@@ -29,7 +29,7 @@ jobs:
         xray: [feed, latest]
     name: test (xray ${{ matrix.xray }})
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Download the latest xray
         if: matrix.xray == 'latest'
         env:
@@ -48,7 +48,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: scripts/itest.sh
         run: sh scripts/itest.sh
 
@@ -57,12 +57,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: scripts/build.sh
         env:
           DOCKER: docker
         run: sh scripts/build.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ipk
           path: dist/*.ipk
@@ -75,7 +75,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: ipk
           path: dist
