@@ -42,7 +42,9 @@ const methods = {
 					due_in: s.enabled ? due_in(s) : null,
 				};
 			});
-			return { subscriptions: subs, updating: !!update_running() };
+			// the daemon also counts the moment before `cli.uc update` takes the lock
+			let d = connect()?.call('xvpn', 'status');
+			return { subscriptions: subs, updating: d ? !!d.updating : !!update_running() };
 		}
 	},
 

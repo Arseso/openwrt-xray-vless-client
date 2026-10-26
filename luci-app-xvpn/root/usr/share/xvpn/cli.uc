@@ -7,7 +7,7 @@
 import { readfile, unlink, access, symlink, readlink } from 'fs';
 import * as ubus from 'ubus';
 import {
-	load_config, read_json, write_json, mkdir_p, log, run, shq, update_running,
+	load_config, read_json, write_json, mkdir_p, log, run, shq, is_updater,
 	ACTIVE_FILE, CONFIG_FILE, INDEX_FILE, VAR_DIR, RUN_DIR, UPDATE_LOCK
 } from 'xvpn.util';
 import { all_servers, update } from 'xvpn.subscription';
@@ -25,17 +25,27 @@ function active_port() {
 	return filter(idx?.servers ?? [], (e) => e.id == idx.active)[0]?.test_port;
 }
 
+const SELF = readlink('/proc/self');
+
 // symlink() is atomic: of two concurrent updates only one gets the lock
 function lock_update() {
 	mkdir_p(RUN_DIR);
-	for (let i = 0; i < 2; i++) {
-		if (symlink(readlink('/proc/self'), UPDATE_LOCK))
+	for (let i = 0; i < 3; i++) {
+		if (symlink(SELF, UPDATE_LOCK))
 			return true;
-		if (update_running())
+		let held = readlink(UPDATE_LOCK);
+		if (is_updater(held))
 			return false;
-		unlink(UPDATE_LOCK);	// left by an update that died
+		// left by an update that died: remove that one, not a lock taken meanwhile
+		if (held && readlink(UPDATE_LOCK) == held)
+			unlink(UPDATE_LOCK);
 	}
 	return false;
+}
+
+function unlock_update() {
+	if (readlink(UPDATE_LOCK) == SELF)
+		unlink(UPDATE_LOCK);
 }
 
 switch (ARGV[0]) {
@@ -99,7 +109,7 @@ case 'update': {
 		log(r.error ? `subscription "${sub.name}": ${r.error}`
 			: `subscription "${sub.name}": ${r.count} servers${r.skipped ? `, ${r.skipped} skipped` : ''}${r.changed ? ' (changed)' : ''}`);
 	}
-	unlink(UPDATE_LOCK);
+	unlock_update();
 	printf('%J\n', out);
 	exit(changed ? 0 : 2);
 }

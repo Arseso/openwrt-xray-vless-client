@@ -33,6 +33,7 @@ let st = {
 	updating: false,
 	reloading: false,	// a reload is running or xray is settling after one
 	reload_pending: false,
+	choose_pending: null,	// choose_best() decision put off until the reload settles
 	passthrough: false,
 	last_error: null,
 	last_switch: prev.last_switch,
@@ -41,7 +42,7 @@ let st = {
 	quarantine: prev.quarantine ?? {},
 };
 let test_waiters = [], testq = null, test_resume = null;
-let timers = {};
+let timers = {}, settling = false;
 let probe_seq = 0;
 // ucode does not hoist functions: these call each other in a cycle, defined below
 let reload_service, reindex, choose_best, check;
@@ -202,6 +203,8 @@ function set_passthrough(on) {
 
 // Syncs the daemon with the config xray runs now.
 function adopt_index() {
+	let pending = st.choose_pending;
+	st.choose_pending = null;
 	if (!length(index.servers)) {
 		set_state('no_servers', 'no servers in subscriptions');
 		return;
@@ -212,12 +215,17 @@ function adopt_index() {
 		choose_best('server list changed');
 		return;
 	}
-	check();
+	if (pending)
+		choose_best(pending);
+	else
+		check();
 }
 
 // xray restarts with the new config: give it a moment before measuring again.
 function settle() {
+	settling = true;
 	timers.settle = uloop.timer(3000, () => {
+		settling = false;
 		st.reloading = false;
 		if (st.reload_pending) {
 			st.reload_pending = false;
@@ -253,8 +261,14 @@ reindex = function(notified) {
 	let changed = load_index();
 	if (notified || changed)
 		st.passthrough = false;	// the reload applies the normal rules
-	if (!changed || st.reloading)
+	if (!changed)
+		return;
+	if (st.reloading) {
+		// changed again while xray settles: wait for the latest config
+		if (settling)
+			timers.settle.set(3000);
 		return;	// our own reload: after_reload() takes over
+	}
 	log('server list changed by a reload outside the daemon');
 	st.reloading = true;
 	settle();
@@ -280,6 +294,11 @@ function switch_to(id, reason) {
 
 choose_best = function(reason) {
 	test_all(() => {
+		// the test may end mid-reload with partial data: decide once it settles
+		if (st.reloading) {
+			st.choose_pending = reason;
+			return;
+		}
 		let b = best() ?? best(true);
 		if (!b) {
 			set_state('no_servers', 'no live servers');
@@ -362,7 +381,8 @@ function rank() {
 function update_subs(force, only) {
 	if (st.updating || update_running())
 		return 'busy';
-	let due = filter(cfg.subscriptions, (s) => s.enabled && s.url
+	// a subscription may have been added or enabled a moment ago
+	let due = filter(load_config().subscriptions, (s) => s.enabled && s.url
 		&& (only ? s.id == only : (force || due_in(s) <= 0)));
 	if (!length(due))
 		return 'no subscriptions to update';

@@ -141,12 +141,32 @@ sleep 12
 	|| { echo "FAIL: external reload broke the state"; ubus call xvpn status; logread | grep xvpn | tail -10; exit 1; }
 echo "OK: external reload picked up, still connected to sub-live"
 
-# one update at a time: a live updater holds the lock (pid 1 stands for it)
-ln -s 1 /var/run/xvpn/updating
+# one update at a time: a live updater holds the lock (a process named cli.uc stands for it)
+sh -c 'sleep 30; :' cli.uc & fake=$!
+ln -s $fake /var/run/xvpn/updating
 [ "$(ubus call luci.xvpn update | jsonfilter -e @.error)" = busy ] || { echo "FAIL: no busy while updating"; exit 1; }
 [ "$(ubus call luci.xvpn subscriptions | jsonfilter -e @.updating)" = true ] || { echo "FAIL: updating flag"; exit 1; }
+kill $fake
+# a lock left by a dead (or reused) pid does not block
+[ "$(ubus call luci.xvpn subscriptions | jsonfilter -e @.updating)" = false ] || { echo "FAIL: stale lock counts"; exit 1; }
 rm /var/run/xvpn/updating
+ln -s 1 /var/run/xvpn/updating	# left behind, cli.uc update must take it over
+[ "$(ubus call luci.xvpn subscriptions | jsonfilter -e @.updating)" = false ] || { echo "FAIL: reused pid counts"; exit 1; }
 echo "OK: single update lock"
+
+# a subscription added a moment ago (no daemon restart yet) is updated too
+uci batch <<UCI
+set xvpn.s2=subscription
+set xvpn.s2.name=fresh
+set xvpn.s2.url=http://127.0.0.1/sub.b64
+set xvpn.s2.via_tunnel=0
+commit xvpn
+UCI
+r=$(ubus call luci.xvpn update '{"sid":"s2"}')
+[ "$(echo "$r" | jsonfilter -e @.ok)" = true ] || { echo "FAIL: fresh subscription: $r"; exit 1; }
+wait_cmd 20 test -s /etc/xvpn/subs/s2.json
+[ ! -e /var/run/xvpn/updating ] || { echo "FAIL: lock left after update"; exit 1; }
+echo "OK: fresh subscription updated"
 
 /etc/init.d/xvpn stop
 nft list table inet xvpn >/dev/null 2>&1 && { echo "FAIL: table left after stop"; exit 1; }

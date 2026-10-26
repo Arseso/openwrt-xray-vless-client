@@ -56,10 +56,15 @@ export function write_json(path, obj) {
 	return write_file(path, sprintf('%J\n', obj));
 };
 
+// The pid is alive and still is `cli.uc` (pids get reused).
+export function is_updater(pid) {
+	return !!pid && index(readfile(`/proc/${pid}/cmdline`) ?? '', 'cli.uc') >= 0;
+};
+
 // Pid of the running subscription update, or null.
 export function update_running() {
 	let pid = readlink(UPDATE_LOCK);
-	return (pid && stat(`/proc/${pid}`)) ? int(pid) : null;
+	return is_updater(pid) ? int(pid) : null;
 };
 
 // 32-bit FNV-1a, hex encoded.
