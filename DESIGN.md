@@ -305,7 +305,7 @@ LuCI обращается к демону только через rpcd `luci.xvp
 - Релиз: тег `v<PKG_VERSION>` (при `PKG_RELEASE:=1`) или `v<PKG_VERSION>-r<PKG_RELEASE>`, например `v0.1.0`, `v0.1.0-r2`. Job `version` сверяет тег с Makefile и падает сразу; после зелёных `test`/`itest`/`build` публикуется GitHub Release с ipk. Pre-release-теги (`v0.2.0-rc1`) не поддерживаются — такой тег не совпадёт с Makefile. Сборка берёт голову ветки `openwrt-24.10` фида luci (`luci.mk`, host-утилиты luci-base/csstidy), а не зафиксированный коммит: ipk одного тега, собранный в разные дни, может немного отличаться; для точного воспроизведения — `LUCI_FEED='https://github.com/openwrt/luci.git^<коммит>'`.
 - Установка на роутер:
   ```
-  scp dist/luci-app-xvpn_*.ipk root@192.168.1.1:/tmp/
+  scp -O dist/luci-app-xvpn_*.ipk root@192.168.1.1:/tmp/   # -O: в 24.10 нет sftp-server
   ssh root@192.168.1.1 'opkg update && opkg install /tmp/luci-app-xvpn_*.ipk'
   ```
 
