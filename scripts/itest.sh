@@ -2,7 +2,8 @@
 # Integration test: runs the service under procd in an OpenWrt container with two
 # local VLESS "remote" servers, checks server selection, failover, subscription update and
 # that a VPN client (network namespace behind a bridge port) never reaches the "internet"
-# (another namespace) directly: boot guard, restart, stop, broken fw-apply, fw4 flush.
+# (another namespace) directly: boot guard, restart, stop, broken fw-apply, fw4 flush;
+# subscription update from LuCI through the daemon and by a reload past it.
 set -e
 cd "$(dirname "$0")/.."
 DOCKER="${DOCKER:-docker}"
@@ -110,6 +111,17 @@ wait_for() { # expr value timeout
 	echo "TIMEOUT waiting for $1 == $2"; ubus call xvpn status; logread | grep -E 'xvpn|xray' | tail -20; exit 1
 }
 active_name() { ubus call xvpn status | jsonfilter -e "@.servers[@.id='$(status @.active)'].name"; }
+active_is() { [ "$(active_name)" = "$1" ]; }
+latency() { ubus call xvpn status | jsonfilter -e "@.servers[@.name='$1'].latency"; }
+count_is() { [ "$(ubus call xvpn status | jsonfilter -e '@.servers[*].name' | wc -l)" = "$1" ]; }
+xvpnd_pid() { ubus call service list '{"name":"xvpn"}' | jsonfilter -e '@.xvpn.instances.xvpnd.pid'; }
+xvpnd_restarted() { p=$(xvpnd_pid); [ -n "$p" ] && [ "$p" != "$1" ] && ubus call xvpn status >/dev/null; }
+wait_cmd() { # timeout cmd...
+	t=$1; shift; i=0
+	while [ $i -lt $t ]; do "$@" >/dev/null 2>&1 && return 0; sleep 1; i=$((i+1)); done
+	echo "TIMEOUT waiting for: $*"; ubus call xvpn status; logread | grep -E 'xvpn|xray' | tail -20; exit 1
+}
+
 
 remote 18443
 uci batch <<UCI
@@ -220,7 +232,10 @@ echo "OK: failover to the other server"
 logread | grep xvpn | grep -E 'switching|state' | tail -5
 
 # subscription over http (curl reports file:// as HTTP 0), busybox has no base64
-{ link 18446 sub-a; link 18445 sub-b; } | ucode -l fs -e 'print(b64enc(fs.stdin.read("all")))' > /www/sub.b64
+# LuCI: a new subscription; its servers go before the manual links, so every test
+# port shifts (20000 was "second", now it is a dead server)
+remote 18446
+{ link 18445 sub-dead; link 18446 sub-live; } | ucode -l fs -e 'print(b64enc(fs.stdin.read("all")))' > /www/sub.b64
 uci batch <<UCI
 set xvpn.s1=subscription
 set xvpn.s1.name=test
@@ -228,14 +243,73 @@ set xvpn.s1.url=http://127.0.0.1/sub.b64
 set xvpn.s1.via_tunnel=0
 commit xvpn
 UCI
-ucode /usr/share/xvpn/cli.uc update s1 || true
-[ "$(jsonfilter -i /etc/xvpn/subs/s1.json -e '@.servers[*].name' | wc -l)" = 2 ] || { echo "FAIL: subscription not parsed"; exit 1; }
+# apply in LuCI = reload_config: procd restarts xvpnd for the new config
+old=$(xvpnd_pid); reload_config
+wait_cmd 30 xvpnd_restarted "$old"
+wait_for @.state connected 30
+r=$(ubus call luci.xvpn update '{"sid":"s1"}')
+[ "$(echo "$r" | jsonfilter -e @.ok)" = true ] || { echo "FAIL: luci.xvpn update: $r"; exit 1; }
+wait_cmd 30 count_is 4
+[ "$(jsonfilter -i /etc/xvpn/subs/s1.json -e '@.servers[*].name' | wc -l)" = 2 ] || { echo "FAIL: subscription cache"; exit 1; }
 echo "OK: subscription parsed"
+wait_for @.state connected 30
+[ "$(status '@.servers[0].name')" = sub-dead ] || { echo "FAIL: index order"; ubus call xvpn status; exit 1; }
+[ "$(active_name)" = second ] || { echo "FAIL: after update expected second, got $(active_name)"; exit 1; }
+echo "OK: update from LuCI went through the daemon, 4 servers, still on second"
+
+ubus call xvpn test >/dev/null
+sleep 1; wait_for @.testing false 30
+[ "$(latency sub-dead)" = -1 ] && [ "$(latency first)" = -1 ] \
+	&& [ "$(latency sub-live)" -ge 0 ] && [ "$(latency second)" -ge 0 ] \
+	|| { echo "FAIL: latencies are attributed to wrong servers"; ubus call xvpn status; exit 1; }
+echo "OK: measurements match the new server list"
+
+kill $(cat /tmp/remote-18444.pid)
+sleep 6
+wait_cmd 60 active_is sub-live
+wait_for @.state connected 30
+echo "OK: failover after the update went to the live sub-live"
+tunnel || { echo "FAIL: no tunnel through sub-live"; exit 1; }
+echo "OK: client goes through the tunnel after the update"
+
+# reload past the daemon (UCI triggers on wireless/network): ports shift again,
+# sub-live moves from 20001 to 20002
+{ link 18447 sub-x; link 18448 sub-y; link 18446 sub-live; } | ucode -l fs -e 'print(b64enc(fs.stdin.read("all")))' > /www/sub.b64
+ucode /usr/share/xvpn/cli.uc update s1 >/dev/null
 /etc/init.d/xvpn reload
-sleep 3
-# the daemon re-reads the index after an outside reload only with issue #3 fixed: check the index
-[ "$(jsonfilter -i /var/etc/xvpn/index.json -e '@.servers[*].name' | wc -l)" = 4 ] || { echo "FAIL: expected 4 servers in the index after reload"; exit 1; }
-echo "OK: 4 servers in the index after reload"
+wait_cmd 10 count_is 5
+switch=$(status @.last_switch.at)
+sleep 12
+[ "$(status @.state)" = connected ] && [ "$(active_name)" = sub-live ] && [ "$(status @.last_switch.at)" = "$switch" ] \
+	|| { echo "FAIL: external reload broke the state"; ubus call xvpn status; logread | grep xvpn | tail -10; exit 1; }
+echo "OK: external reload picked up, still connected to sub-live"
+
+# one update at a time: a live updater holds the lock (a process named cli.uc stands for it)
+sh -c 'sleep 30; :' cli.uc & fake=$!
+ln -s $fake /var/run/xvpn/updating
+[ "$(ubus call luci.xvpn update | jsonfilter -e @.error)" = busy ] || { echo "FAIL: no busy while updating"; exit 1; }
+[ "$(ubus call luci.xvpn subscriptions | jsonfilter -e @.updating)" = true ] || { echo "FAIL: updating flag"; exit 1; }
+kill $fake
+# a lock left by a dead (or reused) pid does not block
+[ "$(ubus call luci.xvpn subscriptions | jsonfilter -e @.updating)" = false ] || { echo "FAIL: stale lock counts"; exit 1; }
+rm /var/run/xvpn/updating
+ln -s 1 /var/run/xvpn/updating	# left behind, cli.uc update must take it over
+[ "$(ubus call luci.xvpn subscriptions | jsonfilter -e @.updating)" = false ] || { echo "FAIL: reused pid counts"; exit 1; }
+echo "OK: single update lock"
+
+# a subscription added a moment ago (no daemon restart yet) is updated too
+uci batch <<UCI
+set xvpn.s2=subscription
+set xvpn.s2.name=fresh
+set xvpn.s2.url=http://127.0.0.1/sub.b64
+set xvpn.s2.via_tunnel=0
+commit xvpn
+UCI
+r=$(ubus call luci.xvpn update '{"sid":"s2"}')
+[ "$(echo "$r" | jsonfilter -e @.ok)" = true ] || { echo "FAIL: fresh subscription: $r"; exit 1; }
+wait_cmd 20 test -s /etc/xvpn/subs/s2.json
+[ ! -e /var/run/xvpn/updating ] || { echo "FAIL: lock left after update"; exit 1; }
+echo "OK: fresh subscription updated"
 
 /etc/init.d/xvpn stop
 no_tproxy "stop with the service enabled"

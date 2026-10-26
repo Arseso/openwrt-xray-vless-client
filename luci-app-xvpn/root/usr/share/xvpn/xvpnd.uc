@@ -9,7 +9,7 @@ import * as uloop from 'uloop';
 import * as ubus from 'ubus';
 import { readfile, unlink } from 'fs';
 import {
-	load_config, read_json, write_json, write_file, mkdir_p, log, shq,
+	load_config, read_json, write_json, write_file, mkdir_p, log, shq, update_running,
 	ETC_DIR, RUN_DIR, INDEX_FILE, ACTIVE_FILE, STATE_FILE, FW_ERROR_FILE
 } from 'xvpn.util';
 import { due_in } from 'xvpn.subscription';
@@ -20,17 +20,20 @@ const SUB_CHECK = 300;
 const cfg = load_config();
 const H = cfg.health;
 
-let index = read_json(INDEX_FILE) ?? { servers: [] };
+let index = { servers: [] }, index_raw = null;
 let prev = read_json(STATE_FILE) ?? {};
 
 let st = {
 	state: 'starting',
-	active: index.active,
+	active: null,
 	since: time(),
 	fails: 0,
+	gen: 0,			// index generation, see load_index()
 	testing: false,
 	updating: false,
-	reloading: false,
+	reloading: false,	// a reload is running or xray is settling after one
+	reload_pending: false,
+	choose_pending: null,	// choose_best() decision put off until the reload settles
 	passthrough: false,
 	last_error: null,
 	last_switch: prev.last_switch,
@@ -38,11 +41,53 @@ let st = {
 	latency: prev.latency ?? {},
 	quarantine: prev.quarantine ?? {},
 };
-let test_waiters = [];
-let timers = {};
+let test_waiters = [], testq = null, test_resume = null;
+let timers = {}, settling = false;
+let probe_seq = 0;
+// ucode does not hoist functions: these call each other in a cycle, defined below
+let reload_service, reindex, choose_best, check;
 
 function server(id) {
 	return filter(index.servers, (e) => e.id == id)[0];
+}
+
+// Re-reads the index when it changed on disk. Test ports are positional, so each
+// change starts a new generation: measurements started before it went through
+// the old config and are dropped (see valid()).
+function load_index() {
+	let raw = readfile(INDEX_FILE), idx = null;
+	if (raw == index_raw)
+		return false;
+	index_raw = raw;
+	try {
+		idx = raw ? json(raw) : null;
+	}
+	catch (e) { }
+	index = idx ?? { servers: [] };
+	st.gen++;
+
+	let ids = {};
+	for (let e in index.servers)
+		ids[e.id] = true;
+	for (let id in keys(st.latency))
+		if (!ids[id])
+			delete st.latency[id];
+	for (let id in keys(st.quarantine))
+		if (!ids[id])
+			delete st.quarantine[id];
+	// a running test also covers servers that have just appeared
+	if (testq)
+		for (let e in index.servers)
+			if (!testq.seen[e.id]) {
+				testq.seen[e.id] = true;
+				push(testq.queue, e.id);
+			}
+	return true;
+}
+
+// A measurement is trusted only if no reload happened since it started.
+function valid(gen) {
+	return gen == st.gen && !st.reloading;
 }
 
 function save() {
@@ -67,7 +112,7 @@ function spawn(cmd, args, cb) {
 // HTTP ping through a SOCKS test port (or direct when port is null).
 // Calls cb(ms), ms < 0 on failure.
 function probe(port, cb) {
-	let out = `${RUN_DIR}/probe-${port ?? 'direct'}`;
+	let out = `${RUN_DIR}/probe-${++probe_seq}`;
 	let cmd = sprintf("/usr/bin/curl -s -o /dev/null --connect-timeout %d --max-time %d -w '%%{http_code} %%{time_starttransfer}' %s %s > %s 2>/dev/null",
 		H.timeout, H.timeout, port ? `-x socks5h://127.0.0.1:${port}` : '', shq(H.url), shq(out));
 
@@ -102,11 +147,18 @@ function test_all(cb) {
 	if (st.testing)
 		return;
 
+	reindex(false);
 	st.testing = true;
-	let queue = [ ...index.servers ], running = 0;
+	testq = { queue: [], seen: {} };
+	for (let e in index.servers) {
+		testq.seen[e.id] = true;
+		push(testq.queue, e.id);
+	}
+	let running = 0;
 
 	function finish() {
 		st.testing = false;
+		testq = test_resume = null;
 		st.last_test = time();
 		save();
 		let w = test_waiters;
@@ -115,25 +167,29 @@ function test_all(cb) {
 			f();
 	}
 
+	// the port is looked up by id at start: the queue survives index changes
 	function next() {
-		while (running < H.concurrency && length(queue)) {
-			let e = shift(queue);
+		// nothing is measured while xray restarts: settle() resumes the test
+		while (!st.reloading && running < H.concurrency && length(testq.queue)) {
+			let id = shift(testq.queue), e = server(id), gen = st.gen;
+			if (!e)
+				continue;	// gone from the list meanwhile
 			running++;
 			probe(e.test_port, (ms) => {
-				st.latency[e.id] = { ms, at: time() };
 				running--;
-				if (!length(queue) && !running)
-					finish();
-				else
-					next();
+				if (valid(gen))
+					st.latency[id] = { ms, at: time() };
+				else if (server(id))
+					push(testq.queue, id);	// went through the old config: measure again
+				next();
 			});
 		}
+		if (!running && !length(testq.queue))
+			finish();
 	}
 
-	if (length(queue))
-		next();
-	else
-		finish();
+	test_resume = next;
+	next();
 }
 
 function set_passthrough(on) {
@@ -145,27 +201,80 @@ function set_passthrough(on) {
 	spawn('/usr/bin/ucode', on ? [ CLI, 'fw-apply', 'passthrough' ] : [ CLI, 'fw-apply' ]);
 }
 
-function after_reload() {
-	index = read_json(INDEX_FILE) ?? { servers: [] };
-	st.reloading = false;
-	st.passthrough = false;
+// Syncs the daemon with the config xray runs now.
+function adopt_index() {
+	let pending = st.choose_pending;
+	st.choose_pending = null;
 	if (!length(index.servers)) {
 		set_state('no_servers', 'no servers in subscriptions');
 		return;
 	}
-	if (!server(st.active)) {
-		// active server disappeared from the subscription
+	if (index.active != st.active) {
+		// active server disappeared from the list
 		st.active = index.active;
-		timers.once = uloop.timer(3000, () => choose_best('server list changed'));
+		choose_best('server list changed');
 		return;
 	}
-	timers.check.set(3000);
+	if (pending)
+		choose_best(pending);
+	else
+		check();
 }
 
-function reload_service() {
-	st.reloading = true;
-	spawn('/etc/init.d/xvpn', [ 'reload' ], () => after_reload());
+// xray restarts with the new config: give it a moment before measuring again.
+function settle() {
+	settling = true;
+	timers.settle = uloop.timer(3000, () => {
+		settling = false;
+		st.reloading = false;
+		if (st.reload_pending) {
+			st.reload_pending = false;
+			reload_service();
+			return;
+		}
+		let paused = st.testing;	// a test started by adopt_index() runs by itself
+		adopt_index();
+		if (paused)
+			test_resume();
+	});
 }
+
+function after_reload() {
+	load_index();
+	st.passthrough = false;
+	settle();
+}
+
+reload_service = function() {
+	if (st.reloading) {
+		st.reload_pending = true;
+		return;
+	}
+	st.reloading = true;
+	st.gen++;	// measurements in flight go through the config being replaced
+	spawn('/etc/init.d/xvpn', [ 'reload' ], () => after_reload());
+};
+
+// The service is also reloaded past the daemon (rpcd, UCI triggers on wireless and
+// network): service_started() in init.d notifies us after fw-apply (notified),
+// and check() polls the index.
+reindex = function(notified) {
+	let changed = load_index();
+	if (notified || changed)
+		st.passthrough = false;	// the reload applies the normal rules
+	if (st.reloading) {
+		// changed again, or polling saw the change before the reload finished:
+		// count the pause from the latest config and from fw-apply
+		if (settling && (changed || notified))
+			timers.settle.set(3000);
+		return;	// our own reload: after_reload() takes over
+	}
+	if (!changed)
+		return;
+	log('server list changed by a reload outside the daemon');
+	st.reloading = true;
+	settle();
+};
 
 function switch_to(id, reason) {
 	let e = server(id);
@@ -185,8 +294,13 @@ function switch_to(id, reason) {
 	return true;
 }
 
-function choose_best(reason) {
+choose_best = function(reason) {
 	test_all(() => {
+		// the test may end mid-reload with partial data: decide once it settles
+		if (st.reloading) {
+			st.choose_pending = reason;
+			return;
+		}
 		let b = best() ?? best(true);
 		if (!b) {
 			set_state('no_servers', 'no live servers');
@@ -202,7 +316,7 @@ function choose_best(reason) {
 		}
 		switch_to(b.id, reason);
 	});
-}
+};
 
 function failover(reason) {
 	if (st.active)
@@ -211,7 +325,8 @@ function failover(reason) {
 	choose_best(reason);
 }
 
-function check() {
+check = function() {
+	reindex(false);
 	if (st.testing || st.reloading)
 		return;
 	if (!length(index.servers)) {
@@ -223,8 +338,9 @@ function check() {
 	if (!e)
 		return failover('no active server');
 
+	let gen = st.gen;
 	probe(e.test_port, (ms) => {
-		if (st.reloading || st.active != e.id)
+		if (!valid(gen) || st.active != e.id)
 			return;
 		st.latency[e.id] = { ms, at: time() };
 		if (ms >= 0) {
@@ -239,13 +355,15 @@ function check() {
 			return;
 		}
 		probe(null, (dms) => {
+			if (!valid(gen) || st.active != e.id)
+				return;
 			if (dms < 0)
 				set_state('wan_down', 'no direct internet access');
 			else
 				failover(`"${e.name}" is down`);
 		});
 	});
-}
+};
 
 function rank() {
 	if (st.testing || st.reloading || st.state != 'connected')
@@ -254,39 +372,34 @@ function rank() {
 		if (!H.auto_best || st.reloading)
 			return;
 		let b = best(), cur = st.latency[st.active];
-		if (b && b.id != st.active && cur && cur.ms >= 0 && b.ms + H.hysteresis < cur.ms)
+		if (b && b.id != st.active && cur && cur.ms >= 0 && st.latency[b.id].ms + H.hysteresis < cur.ms)
 			switch_to(b.id, `faster server: ${st.latency[b.id].ms} ms vs ${cur.ms} ms`);
 	});
 }
 
-// Updates due (or all when force) subscriptions one after another.
+// Updates due (or all when force) subscriptions in one `cli.uc update` run, the only
+// path to update them while the daemon runs (rpcd calls ubus xvpn update).
+// Returns an error message or null.
 function update_subs(force, only) {
-	if (st.updating)
-		return;
-	let due = filter(cfg.subscriptions, (s) => s.enabled && s.url
+	if (st.updating || update_running())
+		return 'busy';
+	// a subscription may have been added or enabled a moment ago
+	let due = filter(load_config().subscriptions, (s) => s.enabled && s.url
 		&& (only ? s.id == only : (force || due_in(s) <= 0)));
 	if (!length(due))
-		return;
+		return 'no subscriptions to update';
 
 	st.updating = true;
-	let changed = false;
-	function next() {
-		let s = shift(due);
-		if (!s) {
-			st.updating = false;
-			if (changed)
-				reload_service();
-			return;
-		}
-		spawn('/usr/bin/ucode', [ CLI, 'update', s.id ], (code) => {
-			changed ||= (code == 0);
-			next();
-		});
-	}
-	next();
+	spawn('/usr/bin/ucode', [ CLI, 'update', ...map(due, (s) => s.id) ], (code) => {
+		st.updating = false;
+		if (code == 0)	// server list changed
+			reload_service();
+	});
+	return null;
 }
 
 function status() {
+	reindex(false);
 	let servers = map(index.servers, (e) => ({
 		id: e.id, name: e.name, proto: e.proto, address: e.address, port: e.port,
 		sub: e.sub, sub_name: e.sub_name,
@@ -297,7 +410,7 @@ function status() {
 	let fw_error = readfile(FW_ERROR_FILE);
 	return {
 		state: fw_error ? 'error' : st.state, active: st.active, since: st.since, fails: st.fails,
-		testing: st.testing, updating: st.updating, passthrough: st.passthrough,
+		testing: st.testing, updating: st.updating || !!update_running(), passthrough: st.passthrough,
 		last_error: fw_error ?? st.last_error, last_switch: st.last_switch, last_test: st.last_test,
 		servers,
 	};
@@ -311,6 +424,10 @@ function every(name, sec, fn) {
 	});
 	timers[name] = t;
 }
+
+mkdir_p(RUN_DIR);
+load_index();
+st.active = index.active;
 
 uloop.init();
 
@@ -345,7 +462,13 @@ conn.publish('xvpn', {
 	update: {
 		args: { sid: '' },
 		call: (req) => {
-			update_subs(true, req.args.sid || null);
+			let err = update_subs(true, req.args.sid || null);
+			return err ? { ok: false, error: err } : { ok: true };
+		},
+	},
+	reindex: {
+		call: () => {
+			reindex(true);
 			return { ok: true };
 		},
 	},

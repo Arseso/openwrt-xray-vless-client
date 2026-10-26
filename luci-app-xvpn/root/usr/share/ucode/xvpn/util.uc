@@ -3,7 +3,7 @@
 
 'use strict';
 
-import { readfile, writefile, rename, mkdir, stat, popen } from 'fs';
+import { readfile, writefile, rename, mkdir, stat, popen, readlink } from 'fs';
 import { cursor } from 'uci';
 
 export const ETC_DIR = '/etc/xvpn';
@@ -16,6 +16,8 @@ export const CONFIG_FILE = '/var/etc/xvpn/config.json';
 export const INDEX_FILE = '/var/etc/xvpn/index.json';
 export const NFT_FILE = '/var/etc/xvpn/xvpn.nft';
 export const STATE_FILE = '/var/run/xvpn/state.json';
+// symlink to the pid of the running `cli.uc update`: the only "update in progress" flag
+export const UPDATE_LOCK = '/var/run/xvpn/updating';
 export const FW_WANT_FILE = '/var/run/xvpn/fw_want';
 export const FW_MODE_FILE = '/var/run/xvpn/fw_mode';
 export const FW_ERROR_FILE = '/var/run/xvpn/fw_error';
@@ -57,6 +59,17 @@ export function write_file(path, text) {
 
 export function write_json(path, obj) {
 	return write_file(path, sprintf('%J\n', obj));
+};
+
+// The pid is alive and still is `cli.uc` (pids get reused).
+export function is_updater(pid) {
+	return !!pid && index(readfile(`/proc/${pid}/cmdline`) ?? '', 'cli.uc') >= 0;
+};
+
+// Pid of the running subscription update, or null.
+export function update_running() {
+	let pid = readlink(UPDATE_LOCK);
+	return is_updater(pid) ? int(pid) : null;
 };
 
 // 32-bit FNV-1a, hex encoded.

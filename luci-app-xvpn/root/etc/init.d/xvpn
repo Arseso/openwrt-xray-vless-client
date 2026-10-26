@@ -61,6 +61,12 @@ stop_service() {
 	fi
 }
 
+# start and every reload, whoever runs it (the daemon, rpcd, UCI triggers): the rules are
+# applied and procd restarts xray now, so the daemon re-reads the index and settles from here
+service_started() {
+	ubus -t 2 call xvpn reindex >/dev/null 2>&1 || true
+}
+
 service_triggers() {
 	procd_add_reload_trigger xvpn wireless network
 }
