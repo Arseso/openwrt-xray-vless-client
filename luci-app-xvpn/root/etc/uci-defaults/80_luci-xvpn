@@ -12,6 +12,15 @@ set firewall.xvpn.path=/usr/share/xvpn/firewall.include
 set firewall.xvpn.fw4_compatible=1
 commit firewall
 EOF
+# the id of a subscription is its section name, and the cache and the status are kept under it:
+# an anonymous section is renumbered when one above it is deleted or moved, so give it a fixed name
+# (one at a time: the names of the anonymous sections left may change after a rename)
+while s=$(uci -q -X show xvpn | sed -n 's/^xvpn\.\(cfg[0-9a-f]*\)=subscription$/\1/p' | head -n 1); [ -n "$s" ]; do
+	n=sub_$(head -c 4 /dev/urandom | hexdump -e '4/1 "%02x"')
+	uci -q rename xvpn.$s=$n && uci -q commit xvpn || break
+	[ ! -f /etc/xvpn/subs/$s.json ] || mv /etc/xvpn/subs/$s.json /etc/xvpn/subs/$n.json
+	[ ! -f /var/run/xvpn/sub-$s.json ] || mv /var/run/xvpn/sub-$s.json /var/run/xvpn/sub-$n.json
+done
 # SSID names are fixed in /etc/config/wireless now, the cache of the old versions is not used
 rm -f /etc/xvpn/ifnames.json
 rm -rf /tmp/luci-indexcache* /tmp/luci-modulecache
