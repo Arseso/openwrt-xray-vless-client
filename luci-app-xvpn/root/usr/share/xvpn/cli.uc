@@ -1,14 +1,14 @@
 #!/usr/bin/ucode
 // SPDX-License-Identifier: MIT
-// xvpn command line: generate | fw-apply [passthrough] | fw-remove | update [sid|all]
+// xvpn command line: generate | fw-apply [passthrough] | fw-remove | update [sid...|all]
 
 'use strict';
 
-import { readfile, unlink, access } from 'fs';
+import { readfile, unlink, access, symlink, readlink } from 'fs';
 import * as ubus from 'ubus';
 import {
-	load_config, read_json, write_json, mkdir_p, log, run, shq,
-	ACTIVE_FILE, CONFIG_FILE, INDEX_FILE, VAR_DIR
+	load_config, read_json, write_json, mkdir_p, log, run, shq, update_running,
+	ACTIVE_FILE, CONFIG_FILE, INDEX_FILE, VAR_DIR, RUN_DIR, UPDATE_LOCK
 } from 'xvpn.util';
 import { all_servers, update } from 'xvpn.subscription';
 import { build_index, generate } from 'xvpn.xrayconf';
@@ -23,6 +23,19 @@ function xray_ok(path) {
 function active_port() {
 	let idx = read_json(INDEX_FILE);
 	return filter(idx?.servers ?? [], (e) => e.id == idx.active)[0]?.test_port;
+}
+
+// symlink() is atomic: of two concurrent updates only one gets the lock
+function lock_update() {
+	mkdir_p(RUN_DIR);
+	for (let i = 0; i < 2; i++) {
+		if (symlink(readlink('/proc/self'), UPDATE_LOCK))
+			return true;
+		if (update_running())
+			return false;
+		unlink(UPDATE_LOCK);	// left by an update that died
+	}
+	return false;
 }
 
 switch (ARGV[0]) {
@@ -55,6 +68,8 @@ case 'generate': {
 	}
 
 	write_json(INDEX_FILE, idx);
+	// the service is reloaded not only by the daemon (rpcd, UCI triggers): let it re-read the index
+	ubus.connect()?.call('xvpn', 'reindex', {});
 	print(`${length(servers)} servers, active ${idx.active ?? 'none'}\n`);
 	exit(length(servers) ? 0 : 3);
 }
@@ -69,9 +84,14 @@ case 'fw-remove':
 	exit(0);
 
 case 'update': {
-	let sid = ARGV[1] ?? 'all', port = active_port(), out = {}, changed = false;
+	let sids = slice(ARGV, 1), port = active_port(), out = {}, changed = false;
+	let all = !length(sids) || ('all' in sids);
+	if (!lock_update()) {
+		warn('another subscription update is running\n');
+		exit(5);
+	}
 	for (let sub in cfg.subscriptions) {
-		if (!sub.enabled || (sid != 'all' && sid != sub.id))
+		if (!sub.enabled || !(all || (sub.id in sids)))
 			continue;
 		let r = update(sub, port);
 		out[sub.id] = r;
@@ -79,11 +99,12 @@ case 'update': {
 		log(r.error ? `subscription "${sub.name}": ${r.error}`
 			: `subscription "${sub.name}": ${r.count} servers${r.skipped ? `, ${r.skipped} skipped` : ''}${r.changed ? ' (changed)' : ''}`);
 	}
+	unlink(UPDATE_LOCK);
 	printf('%J\n', out);
 	exit(changed ? 0 : 2);
 }
 
 default:
-	warn('usage: cli.uc generate | fw-apply [passthrough] | fw-remove | update [sid|all]\n');
+	warn('usage: cli.uc generate | fw-apply [passthrough] | fw-remove | update [sid...|all]\n');
 	exit(1);
 }

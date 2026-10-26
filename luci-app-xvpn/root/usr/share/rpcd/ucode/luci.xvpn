@@ -3,9 +3,10 @@
 
 'use strict';
 
-import { readfile, popen, access } from 'fs';
+import { readfile, popen } from 'fs';
 import { cursor } from 'uci';
-import { load_config, read_json, run, shq, INDEX_FILE, ACTIVE_FILE, RUN_DIR } from 'xvpn.util';
+import { connect } from 'ubus';
+import { load_config, read_json, run, shq, update_running, INDEX_FILE, ACTIVE_FILE } from 'xvpn.util';
 import { all_servers, load_cache, load_status, due_in } from 'xvpn.subscription';
 
 const CLI = '/usr/share/xvpn/cli.uc';
@@ -41,18 +42,24 @@ const methods = {
 					due_in: s.enabled ? due_in(s) : null,
 				};
 			});
-			return { subscriptions: subs, updating: access(`${RUN_DIR}/updating`) };
+			return { subscriptions: subs, updating: !!update_running() };
 		}
 	},
 
 	update: {
 		args: { sid: 'sid' },
 		call: function(req) {
-			let sid = req.args?.sid || 'all';
-			if (access(`${RUN_DIR}/updating`))
+			let sid = req.args?.sid || null;
+			// the daemon is the single entry point: it updates, reloads and re-reads the index
+			let r = connect()?.call('xvpn', 'update', sid ? { sid } : {});
+			if (r)
+				return r;
+
+			// no daemon (service disabled or being restarted by procd): the lock in cli.uc
+			// keeps it the one update at a time, the daemon picks up the reload by itself
+			if (update_running())
 				return { ok: false, error: 'busy' };
-			bg(sprintf('mkdir -p %s; touch %s/updating; /usr/bin/ucode %s update %s && %s reload; rm -f %s/updating',
-				RUN_DIR, RUN_DIR, CLI, shq(sid), INIT, RUN_DIR));
+			bg(sprintf('/usr/bin/ucode %s update %s && %s running && %s reload', CLI, shq(sid ?? 'all'), INIT, INIT));
 			return { ok: true };
 		}
 	},

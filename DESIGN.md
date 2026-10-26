@@ -50,10 +50,12 @@
                     ▲ reload (новый активный)
    ┌──────────── xvpnd (procd instance, ucode+uloop) ───────┐
    │ health-check, failover, re-rank, обновление подписок   │
-   │ ubus-объект `xvpn`: status / test / select / update     │
+   │ ubus-объект `xvpn`: status / test / select / update /   │
+   │ reindex                                                 │
    └─────────────────────────────────────────────────────────┘
                     ▲ ubus
-   LuCI (JS-вьюхи) ──► rpcd ucode-плагин `luci.xvpn` (офлайн-операции)
+   LuCI (JS-вьюхи) ──► rpcd ucode-плагин `luci.xvpn` (офлайн-операции;
+                       обновление подписок — через `ubus xvpn update`)
 ```
 
 ### 3.1 Файлы пакета
@@ -88,6 +90,7 @@ scripts/{test,build}.sh                        тесты и сборка ipk в
 | `/var/etc/xvpn/index.json` | список серверов: id, имя, тестовый порт, активный | `cli.uc generate` |
 | `/var/etc/xvpn/xvpn.nft` | правила nft | `cli.uc fw-apply` |
 | `/var/run/xvpn/state.json` | состояние демона (для rpcd, когда демон занят) | демон |
+| `/var/run/xvpn/updating` | симлинк на pid идущего `cli.uc update` — единственный флаг «идёт обновление» | `cli.uc update` |
 
 ## 4. UCI-схема `/etc/config/xvpn`
 
@@ -160,11 +163,16 @@ config manual 'manual'
    - нет прямого интернета → состояние `wan_down`, серверы не трогаем, ждём;
    - есть → `failover`: активный в карантин, тест всех, переход на минимальный пинг. Если живых нет → `no_servers`, повтор на каждом тике.
 4. Каждые `rank_interval` с — фоновый тест всех (для UI). При `auto_best=1` переход, только если лучший быстрее текущего более чем на `hysteresis` мс.
-5. Каждые 5 мин — проверка, не пора ли обновить подписки; обновление идёт отдельным процессом (`cli.uc update`), при изменении списка серверов — `reload`.
+5. Каждые 5 мин — проверка, не пора ли обновить подписки; обновление идёт отдельным процессом (`cli.uc update <sid…>`), при изменении списка серверов — `reload`.
 6. Ручной выбор сервера в UI (`xvpn.select`) — сразу переключает; дальше работает обычный failover.
 7. Kill switch выключен и живых серверов нет → правила TPROXY снимаются (клиенты идут напрямую) до появления живого сервера.
 
-ubus `xvpn`: `status` → `{state, active, since, fails, servers:[{id,name,proto,sub,latency,tested,quarantined}], testing, last_error}`; `test` (запустить тест всех); `select {id}`; `update {sid?}` (обновить подписки); `check` (проверить сейчас).
+### 6.1 Обновления и устаревший индекс
+- **Одна точка входа.** Подписки обновляет только демон: rpcd `luci.xvpn update` вызывает `ubus xvpn update`. Без демона (сервис выключен или procd его перезапускает) rpcd сам запускает `cli.uc update` и, если сервис запущен, `reload`. Взаимоисключение — в `cli.uc update`: лок `/var/run/xvpn/updating` берётся атомарным `symlink` на свой pid, лок умершего процесса снимается. `updating` в `status` демона и в `luci.xvpn subscriptions` — это один и тот же лок.
+- **Индекс перечитывается при любом reload.** Сервис перезагружают и мимо демона (rpcd, UCI-триггеры `wireless`/`network`). `cli.uc generate` после записи `index.json` вызывает `ubus xvpn reindex`; кроме того, демон сравнивает содержимое файла на каждом `check` и `status`. Изменение, сделанное не демоном, обрабатывается так же, как после своего `reload`: 3 с на перезапуск xray, затем синхронизация (активный пропал или xray ведёт трафик не туда → выбор лучшего, иначе — проверка активного).
+- **Поколения замеров.** Тестовые порты позиционные (`20000+i`), поэтому каждое изменение индекса и каждый `reload` демона увеличивают номер поколения. Замер принимается, только если за время замера поколение не менялось и xray не перезапускался; иначе он отбрасывается, а в тесте всех — повторяется по новому индексу. Порт берётся по id сервера в момент запуска замера; замеры и карантин удалённых серверов удаляются.
+
+ubus `xvpn`: `status` → `{state, active, since, fails, servers:[{id,name,proto,sub,latency,tested,quarantined}], testing, updating, last_error}`; `test` (запустить тест всех); `select {id}`; `update {sid?}` (обновить подписки, `{ok:false, error:"busy"}`, если обновление уже идёт); `check` (проверить сейчас); `reindex` (перечитать индекс, вызывает `cli.uc generate`).
 
 Состояния: `starting`, `connected`, `degraded` (были неудачи, порог не достигнут), `failover`, `wan_down`, `no_servers`, `testing`.
 
