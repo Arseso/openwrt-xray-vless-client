@@ -1,0 +1,10 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# A wifi interface appeared (wifi up after xvpn started, renamed after reconfiguration):
+# resolve the access points again so that a VPN SSID gets into the rules.
+
+[ "$ACTION" = add ] && [ "$DEVTYPE" = wlan ] || exit 0
+[ -f /var/run/xvpn/fw_mode ] && [ -n "$(uci -q get xvpn.access.wifi)" ] || exit 0
+
+# netifd reports the new ifname in network.wireless status a little later
+( sleep 3; /usr/bin/ucode /usr/share/xvpn/cli.uc fw-refresh ) >/dev/null 2>&1 </dev/null &

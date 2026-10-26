@@ -23,8 +23,9 @@ start_service() {
 	local have_servers=1
 	$CLI generate >/dev/null || have_servers=0
 
-	# rules stay in place without servers: with kill switch on, clients stay offline instead of leaking
-	$CLI fw-apply || logger -t xvpn "failed to apply firewall rules"
+	# rules stay in place without servers: with kill switch on, clients stay offline instead of leaking;
+	# if nft rejects them, cli.uc blocks the clients and the status shows "error"
+	$CLI fw-apply || logger -t xvpn "failed to apply firewall rules, VPN clients are blocked"
 
 	if [ "$have_servers" = 1 ]; then
 		procd_open_instance xray
@@ -47,7 +48,17 @@ start_service() {
 }
 
 stop_service() {
-	$CLI fw-remove
+	config_load xvpn
+	local on
+	config_get_bool on main enabled 0
+
+	# restart, upgrade and shutdown keep the clients behind the guard until xray is back;
+	# rules go away only when the service is turned off or disabled (package removal disables it first)
+	if [ "$on" = 1 ] && enabled; then
+		$CLI fw-guard
+	else
+		$CLI fw-remove
+	fi
 }
 
 service_triggers() {

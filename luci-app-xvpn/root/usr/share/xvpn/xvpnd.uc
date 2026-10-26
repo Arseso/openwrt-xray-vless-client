@@ -10,7 +10,7 @@ import * as ubus from 'ubus';
 import { readfile, unlink } from 'fs';
 import {
 	load_config, read_json, write_json, write_file, mkdir_p, log, shq, update_running,
-	ETC_DIR, RUN_DIR, INDEX_FILE, ACTIVE_FILE, STATE_FILE
+	ETC_DIR, RUN_DIR, INDEX_FILE, ACTIVE_FILE, STATE_FILE, FW_ERROR_FILE
 } from 'xvpn.util';
 import { due_in } from 'xvpn.subscription';
 
@@ -404,10 +404,12 @@ function status() {
 		latency: st.latency[e.id]?.ms, tested: st.latency[e.id]?.at,
 		quarantined: quarantined(e.id),
 	}));
+	// cli.uc could not apply the rules and blocked the clients (fail closed)
+	let fw_error = readfile(FW_ERROR_FILE);
 	return {
-		state: st.state, active: st.active, since: st.since, fails: st.fails,
+		state: fw_error ? 'error' : st.state, active: st.active, since: st.since, fails: st.fails,
 		testing: st.testing, updating: st.updating || !!update_running(), passthrough: st.passthrough,
-		last_error: st.last_error, last_switch: st.last_switch, last_test: st.last_test,
+		last_error: fw_error ?? st.last_error, last_switch: st.last_switch, last_test: st.last_test,
 		servers,
 	};
 }
