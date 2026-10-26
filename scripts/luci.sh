@@ -10,7 +10,7 @@
 # The password is a test value for this local container only.
 set -e
 cd "$(dirname "$0")/.."
-DOCKER="${DOCKER:-docker}"
+DOCKER="${DOCKER:-docker --context default}"
 IMAGE="${IMAGE:-openwrt/rootfs:x86-64-24.10.4}"
 NAME=${NAME:-xvpn-luci}
 PORT=${PORT:-8019}
@@ -34,7 +34,9 @@ sync) sync; $DOCKER exec $NAME /etc/init.d/rpcd restart; exit 0 ;;
 esac
 
 $DOCKER rm -f $NAME >/dev/null 2>&1 || true
-$DOCKER run -d --name $NAME --privileged -p 127.0.0.1:$PORT:80 -v "$PWD:/src:ro" "$IMAGE" /sbin/init >/dev/null
+# --privileged: S11sysctl in the container would write the sysctls of the host
+$DOCKER run -d --name $NAME --privileged -p 127.0.0.1:$PORT:80 -v "$PWD:/src:ro" "$IMAGE" \
+	sh -c 'rm -f /etc/rc.d/S11sysctl; exec /sbin/init' >/dev/null
 sleep 5
 NET=$($DOCKER inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}/{{.IPPrefixLen}} {{.Gateway}}{{end}}' $NAME)
 

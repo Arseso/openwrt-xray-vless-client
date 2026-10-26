@@ -19,16 +19,19 @@ function bg(cmd) {
 }
 
 // LuCI cannot call the daemon itself: uhttpd adds ubus_rpc_session to the arguments
-// and the ucode ubus object rejects arguments missing from its policy
+// and the ucode ubus object rejects arguments missing from its policy.
+// A hung daemon must not stall rpcd (and with it all of LuCI) for the default 30 s.
 function daemon(method, args) {
-	return connect()?.call('xvpn', method, args ?? {});
+	return connect(null, 2)?.call('xvpn', method, args ?? {});
 }
 
 const methods = {
 	status: {
 		call: function() {
 			let d = daemon('status');
-			return d ? { running: true, ...d } : { running: false };
+			// enabled and the router clock: the status tab needs no other call each poll
+			let base = { enabled: cursor().get('xvpn', 'main', 'enabled') == '1', time: time() };
+			return d ? { ...base, running: true, ...d } : { ...base, running: false };
 		}
 	},
 
@@ -43,7 +46,13 @@ const methods = {
 		call: function(req) {
 			if (!req.args?.id)
 				return { ok: false, error: 'invalid id' };
-			return daemon('select', { id: req.args.id }) ?? { ok: false, error: 'not running' };
+			let r = daemon('select', { id: req.args.id });
+			if (!r)
+				return { ok: false, error: 'not running' };
+			// the daemon answers a bare ok: false for an id missing from its index
+			if (r.ok === false && !r.error)
+				r.error = 'unknown server';
+			return r;
 		}
 	},
 
@@ -59,7 +68,9 @@ const methods = {
 	},
 
 	subscriptions: {
-		call: function() {
+		// updating: false — the caller takes the flag from status, do not ask the daemon
+		args: { updating: true },
+		call: function(req) {
 			let cfg = load_config();
 			let subs = map(cfg.subscriptions, (s) => {
 				let c = load_cache(s.id), st = load_status(s.id);
@@ -69,11 +80,13 @@ const methods = {
 					title: c?.title, updated: c?.updated,
 					last_ok: st.last_ok, last_attempt: st.last_attempt, error: st.error,
 					userinfo: st.userinfo, via: st.via,
-					due_in: s.enabled ? due_in(s) : null,
+					due_in: s.enabled ? due_in(s, c, st) : null,
 				};
 			});
+			if (req.args?.updating === false)
+				return { subscriptions: subs };
 			// the daemon also counts the moment before `cli.uc update` takes the lock
-			let d = connect()?.call('xvpn', 'status');
+			let d = daemon('status');
 			return { subscriptions: subs, updating: d ? !!d.updating : !!update_running() };
 		}
 	},
@@ -83,7 +96,7 @@ const methods = {
 		call: function(req) {
 			let sid = req.args?.sid || null;
 			// the daemon is the single entry point: it updates, reloads and re-reads the index
-			let r = connect()?.call('xvpn', 'update', sid ? { sid } : {});
+			let r = daemon('update', sid ? { sid } : {});
 			if (r)
 				return r;
 

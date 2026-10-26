@@ -5,14 +5,16 @@
 'require rpc';
 'require poll';
 'require ui';
-'require uci';
 'require dom';
+
+// luci.xvpn stats starts the xray binary for every query: once in this many seconds
+const STATS_EVERY = 30;
 
 const callStatus = rpc.declare({ object: 'luci.xvpn', method: 'status' });
 const callTest = rpc.declare({ object: 'luci.xvpn', method: 'test' });
 const callSelect = rpc.declare({ object: 'luci.xvpn', method: 'select', params: [ 'id' ] });
 const callServers = rpc.declare({ object: 'luci.xvpn', method: 'servers' });
-const callSubscriptions = rpc.declare({ object: 'luci.xvpn', method: 'subscriptions' });
+const callSubscriptions = rpc.declare({ object: 'luci.xvpn', method: 'subscriptions', params: [ 'updating' ] });
 const callStats = rpc.declare({ object: 'luci.xvpn', method: 'stats' });
 const callFirewall = rpc.declare({ object: 'luci.xvpn', method: 'firewall' });
 const callUpdate = rpc.declare({ object: 'luci.xvpn', method: 'update' });
@@ -46,6 +48,7 @@ function errorText(err) {
 	return {
 		'busy': _('Busy, try again later'),
 		'not running': _('The daemon is not running'),
+		'unknown server': _('The server is no longer in the list, reload the page'),
 	}[err] ?? err ?? _('unknown error');
 }
 
@@ -116,25 +119,49 @@ return view.extend({
 	handleReset: null,
 
 	load() {
-		uci.unload('xvpn');
-		return Promise.all([
-			// running: false when the daemon is not on ubus
-			L.resolveDefault(callStatus(), null),
-			L.resolveDefault(callServers(), {}),
-			L.resolveDefault(callSubscriptions(), {}),
-			L.resolveDefault(callStats(), {}),
-			L.resolveDefault(callFirewall(), {}),
-			L.resolveDefault(uci.load('xvpn'), null),
+		// running: false when the daemon is not on ubus; enabled and the router time come with it
+		return L.resolveDefault(callStatus(), {}).then((status) => {
+			const up = (status.running === true);
+			// counted from the last attempt: a hung xray must not be queried on every poll
+			const due = up && status.enabled && !(status.time - this.statsAt < STATS_EVERY);
+			if (due)
+				this.statsAt = status.time;
+			return Promise.all([
+				status,
+				// the daemon has the list already
+				up ? {} : L.resolveDefault(callServers(), {}),
+				// updating comes from status
+				L.resolveDefault(callSubscriptions(false), {}),
+				due ? L.resolveDefault(callStats(), null) : null,
+				L.resolveDefault(callFirewall(), {}),
+			]);
+		});
+	},
+
+	// an action and the poll may load at once: only the latest result is drawn
+	refresh() {
+		const seq = ++this.seq;
+		return this.load().then((data) => (seq == this.seq) ? this.update(data) : null);
+	},
+
+	confirm(key, action) {
+		const [ title, text, ok ] = action.confirm;
+		ui.showModal(title, [
+			E('p', {}, text),
+			E('div', { 'class': 'right' }, [
+				E('button', { 'class': 'cbi-button', 'click': ui.hideModal }, _('Cancel')),
+				' ',
+				E('button', {
+					'class': 'cbi-button cbi-button-negative',
+					'click': () => { ui.hideModal(); this.run(key, action); },
+				}, ok),
+			]),
 		]);
 	},
 
-	refresh() {
-		return this.load().then((data) => this.update(data));
-	},
-
 	// runs the action of a button, keeps it spinning until the call returns
-	run(key) {
-		const btn = this.buttons[key], { fn, done } = btn.xvpnAction;
+	run(key, action) {
+		const btn = this.buttons[key], { fn, done } = action;
 		this.busy[key] = true;
 		btn.classList.add('spinning');
 		btn.disabled = true;
@@ -152,44 +179,60 @@ return view.extend({
 	},
 
 	// the page is redrawn on every poll: buttons are kept, so a click in progress is not lost
-	button(key, cls, text, disabled, fn, done) {
+	// confirm: [ title, text, button ] of a dialog before the action
+	button(key, cls, text, disabled, fn, done, confirm) {
 		const busy = !!this.busy[key];
-		const btn = this.buttons[key] ??= E('button', { 'click': () => this.run(key) });
+		const btn = this.buttons[key] ??= E('button', { 'click': () => {
+			const action = btn.xvpnAction;
+			return action.confirm ? this.confirm(key, action) : this.run(key, action);
+		} });
 		btn.className = 'cbi-button ' + cls + (busy ? ' spinning' : '');
 		btn.disabled = !!(disabled || busy);
 		btn.textContent = text;
-		btn.xvpnAction = { fn, done };
+		btn.xvpnAction = { fn, done, confirm };
 		return btn;
 	},
 
-	update([ status, servers, subs, stats, fw ]) {
-		const up = (status?.running === true);
-		const enabled = (uci.get('xvpn', 'main', 'enabled') == '1');
-		const now = stats.time ?? Math.floor(Date.now() / 1000);
+	// sums the traffic of a stats sample, the speed is the average since the previous one
+	takeStats(sample) {
+		let down = 0, up = 0;
+		for (let id in sample.traffic ?? {}) {
+			down += sample.traffic[id].down ?? 0;
+			up += sample.traffic[id].up ?? 0;
+		}
+		const prev = this.stats;
+		// counters restart with xray: no speed until the next sample
+		const speed = (prev && sample.time > prev.time && down >= prev.down && up >= prev.up)
+			? [ (down - prev.down) / (sample.time - prev.time), (up - prev.up) / (sample.time - prev.time) ] : null;
+		this.stats = { time: sample.time, traffic: sample.traffic ?? {}, down, up, speed };
+	},
+
+	update([ status, servers, subs, sample, fw ]) {
+		const up = (status.running === true);
+		const enabled = (status.enabled === true);
+		const now = status.time ?? Math.floor(Date.now() / 1000);
 		const list = (up ? status.servers : servers.servers) ?? [];
 		const activeId = up ? status.active : servers.active;
 		const byId = {};
-		const traffic = stats.traffic ?? {};
 		const fwError = (fw.error ?? '').trim();
 		const fwWant = (fw.want ?? '').trim(), fwMode = (fw.mode ?? '').trim();
-		const updating = (up && status.updating) || !!subs.updating;
+		const updating = up && !!status.updating;
+
+		if (!up || !enabled)
+			this.stats = this.statsAt = null;
+		else if (sample?.time)
+			this.takeStats(sample);
+		const stats = this.stats, traffic = stats?.traffic ?? {};
+
+		// redrawing would drop a text selection: wait for the next poll
+		const sel = window.getSelection();
+		if (sel && !sel.isCollapsed && this.root.contains(sel.anchorNode))
+			return;
 
 		for (let s of list)
 			byId[s.id] = s;
 		const active = byId[activeId];
 		const name = (id) => byId[id]?.name ?? id ?? '?';
-
-		let down = 0, upl = 0;
-		for (let id in traffic) {
-			down += traffic[id].down ?? 0;
-			upl += traffic[id].up ?? 0;
-		}
-		// counters restart with xray: no speed until the next sample
-		let speed = null;
-		const prev = this.prevStats;
-		if (prev && now > prev.time && down >= prev.down && upl >= prev.up)
-			speed = [ (down - prev.down) / (now - prev.time), (upl - prev.up) / (now - prev.time) ];
-		this.prevStats = { time: now, down, up: upl };
 
 		const alerts = [];
 		if (!enabled)
@@ -214,11 +257,19 @@ return view.extend({
 				() => callUpdate(), _('Updating subscriptions…')),
 			' ',
 			enabled ? this.button('restart', 'cbi-button-reload', _('Restart'), false,
-				() => callService('restart'), _('Restarting the service…')) : '',
+				() => callService('restart'), _('Restarting the service…'), [
+					_('Restart XVPN'),
+					_('xray and the daemon restart: VPN clients lose their connections for a few seconds.'),
+					_('Restart'),
+				]) : '',
 			enabled ? ' ' : '',
 			enabled
 				? this.button('service', 'cbi-button-negative', _('Disable'), false,
-					() => callService('stop'), _('Stopping the service…'))
+					() => callService('stop'), _('Stopping the service…'), [
+						_('Disable XVPN'),
+						_('The tunnel is stopped and its rules are removed: VPN clients go to the internet directly until the service is enabled again.'),
+						_('Disable'),
+					])
 				: this.button('service', 'cbi-button-positive', _('Enable'), false,
 					() => callService('start'), _('Starting the service…')),
 		]);
@@ -260,8 +311,8 @@ return view.extend({
 				(up && status.last_error && status.last_error.trim() != fwError)
 					? [ _('Last error'), E('span', { 'style': 'color:var(--error-color-high, #c00)' }, [ txt(status.last_error) ]) ] : null,
 				[ _('Firewall rules'), txt(fwText) ],
-				[ _('Traffic through xray'), txt('↓ ' + bytes(down) + '  ↑ ' + bytes(upl) +
-					(speed ? '  (↓ ' + bytes(speed[0]) + '/s  ↑ ' + bytes(speed[1]) + '/s)' : '')) ],
+				stats ? [ _('Traffic through xray'), txt('↓ ' + bytes(stats.down) + '  ↑ ' + bytes(stats.up) +
+					(stats.speed ? '  (↓ ' + bytes(stats.speed[0]) + '/s  ↑ ' + bytes(stats.speed[1]) + '/s)' : '')) ] : null,
 			]),
 		]);
 
@@ -286,11 +337,11 @@ return view.extend({
 			if (ui_.expire > 0) {
 				const left = ui_.expire - now;
 				const date = new Date(ui_.expire * 1000).toLocaleDateString();
-				expires = (left <= 0)
-					? label('error', _('expired %s').format(date))
-					: (left < 3 * 86400)
-						? label('warning', _('%s (%d days left)').format(date, Math.floor(left / 86400)))
-						: txt(_('%s (%d days left)').format(date, Math.floor(left / 86400)));
+				const days = Math.floor(left / 86400);
+				const text = '%s (%s)'.format(date, days
+					? N_(days, '%d day left', '%d days left').format(days) : _('less than a day left'));
+				expires = (left <= 0) ? label('error', _('expired %s').format(date))
+					: (left < 3 * 86400) ? label('warning', text) : txt(text);
 			}
 			else if (s.userinfo)
 				expires = txt(_('never'));
@@ -350,10 +401,15 @@ return view.extend({
 			table(srvTitles, srvRows, _('No servers yet. Add a subscription or a link on the "Subscriptions" tab.')),
 		]);
 
+		// buttons are kept across redraws: give the focus back to the one that had it
+		const focused = document.activeElement;
 		dom.content(this.root, [ ...alerts, statusSection, subsSection, srvSection ]);
+		if (focused && focused !== document.activeElement && this.root.contains(focused))
+			focused.focus({ preventScroll: true });
 	},
 
 	render(data) {
+		this.seq = 0;
 		this.busy = {};
 		this.buttons = {};
 		this.root = E('div');
