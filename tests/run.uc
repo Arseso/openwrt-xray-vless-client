@@ -7,7 +7,7 @@ import { readfile, writefile } from 'fs';
 import { parse_link, parse_subscription } from 'xvpn.links';
 import { parse_userinfo } from 'xvpn.subscription';
 import { build_index, generate } from 'xvpn.xrayconf';
-import { render } from 'xvpn.firewall';
+import { render, resolve } from 'xvpn.firewall';
 
 const FIX = ARGV[0] ?? 'tests/fixtures';
 const OUT = ARGV[1] ?? '/tmp';
@@ -98,6 +98,25 @@ cfg.access.killswitch = false;
 writefile(`${OUT}/tunnel.nft`, render(cfg, { nets: [], ports: [] }));
 writefile(`${OUT}/passthrough.nft`, render(cfg, res, { passthrough: true }));
 ok('passthrough has no tproxy', index(render(cfg, res, { passthrough: true }), 'tproxy ip') < 0);
+
+// fail-closed table: blocks even with kill switch off, needs no tproxy/fib/nat
+let blk = render(cfg, res, { block: true });
+ok('block rejects forward', index(blk, '\t\treject with icmpx type admin-prohibited') >= 0);
+ok('block rejects dns', index(blk, 'th dport 53 reject') >= 0);
+ok('block marks ports', index(blk, 'iifname @ports meta mark set meta mark | 0x01000000') >= 0);
+ok('block needs no tproxy', index(blk, 'tproxy') < 0 && index(blk, 'fib ') < 0 && index(blk, 'redirect') < 0);
+ok('full has no dns reject', index(nft, 'th dport 53 reject') < 0);
+writefile(`${OUT}/block.nft`, blk);
+
+// wifi that is not up yet keeps its last known ifname
+let wcfg = { access: { networks: [], ports: [ 'lan2' ], wifi: [ 'wifinet2', 'wifinet3' ] } };
+let up = { call: (o, m) => (o == 'network.wireless' ? { radio1: { interfaces: [ { section: 'wifinet2', ifname: 'phy1-ap1' } ] } } : null) };
+let down = { call: () => null };
+let cache = `${OUT}/ifnames.json`;
+eq('resolve wifi up', resolve(wcfg, up, cache), { nets: [], ports: [ 'lan2', 'phy1-ap1' ] });
+eq('resolve caches ifnames', json(readfile(cache)), { wifinet2: 'phy1-ap1' });
+eq('resolve wifi down uses cache', resolve(wcfg, down, cache), { nets: [], ports: [ 'lan2', 'phy1-ap1' ] });
+eq('resolve without ubus', resolve(wcfg, null, `${OUT}/none.json`), { nets: [], ports: [ 'lan2' ] });
 
 print(`${passed} passed, ${failed} failed\n`);
 exit(failed ? 1 : 0);

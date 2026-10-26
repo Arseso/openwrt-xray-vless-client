@@ -1,0 +1,19 @@
+#!/bin/sh /etc/rc.common
+# SPDX-License-Identifier: MIT
+# Boot guard: blocks VPN clients before fw4 (START=19) and network (20) come up;
+# xvpn (START=95) replaces it with the full rules once xray is configured.
+
+START=18
+
+boot() {
+	config_load xvpn
+	local on
+	config_get_bool on main enabled 0
+	[ "$on" = 1 ] && /etc/init.d/xvpn enabled || return 0
+	/usr/bin/ucode /usr/share/xvpn/cli.uc fw-guard
+}
+
+# start (also from postinst) must not replace the rules of a running xvpn
+start() {
+	return 0
+}

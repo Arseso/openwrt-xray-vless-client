@@ -12,7 +12,7 @@
 | R4 | Сам подключается к серверу | При старте берётся последний рабочий сервер, иначе — лучший по HTTP-пингу |
 | R5 | Если подключение легло — переключение на лучший сервер по HTTP-пингу | Health-check каждые 30 с, после 3 неудач — тест всех серверов и переход на минимальный пинг |
 | R6 | VPN для одной или нескольких точек доступа (порты, Wi-Fi сети) | Выбор сетей OpenWrt, отдельных LAN-портов (DSA) и отдельных SSID |
-| R7 | Доп.: kill switch и защита DNS (выбрано пользователем) | Правила nft не снимаются при падении xray; DNS клиентов VPN перехватывается и идёт через туннель; IPv6 не утекает |
+| R7 | Доп.: kill switch и защита DNS (выбрано пользователем) | Правила nft не снимаются при падении xray, рестарте и до старта сервиса при загрузке; при ошибке nft клиенты блокируются; DNS клиентов VPN перехватывается и идёт через туннель; IPv6 не утекает |
 
 ### Ответы пользователя (2026-10-26)
 - Режим маршрутизации: **только полный туннель** — весь трафик выбранных точек доступа идёт в VPN.
@@ -63,8 +63,10 @@ luci-app-xvpn/
   htdocs/luci-static/resources/view/xvpn/{status,subscriptions,access,settings,log}.js
   po/templates/xvpn.pot, po/ru/xvpn.po
   root/etc/config/xvpn                         дефолтный UCI
-  root/etc/init.d/xvpn                         procd-сервис
-  root/etc/uci-defaults/80_luci-xvpn           очистка кэша LuCI
+  root/etc/init.d/xvpn                         procd-сервис (START=95)
+  root/etc/init.d/xvpn-guard                   блокировка клиентов при загрузке (START=18, до fw4 и сети)
+  root/etc/hotplug.d/net/50-xvpn               Wi-Fi поднялся позже правил → fw-refresh
+  root/etc/uci-defaults/80_luci-xvpn           включение xvpn-guard, очистка кэша LuCI
   root/usr/share/luci/menu.d/luci-app-xvpn.json
   root/usr/share/rpcd/acl.d/luci-app-xvpn.json
   root/usr/share/rpcd/ucode/luci.xvpn          rpcd-плагин
@@ -73,7 +75,7 @@ luci-app-xvpn/
   root/usr/share/ucode/xvpn/subscription.uc    загрузка подписок, кэш, фильтры
   root/usr/share/ucode/xvpn/xrayconf.uc        генерация config.json и индекса серверов
   root/usr/share/ucode/xvpn/firewall.uc        nft-правила и ip rule/route
-  root/usr/share/xvpn/cli.uc                   CLI: generate / fw-apply / fw-remove / update / servers
+  root/usr/share/xvpn/cli.uc                   CLI: generate / fw-apply / fw-guard / fw-refresh / fw-remove / update
   root/usr/share/xvpn/xvpnd.uc                 демон
 tests/                                         ucode-тесты + фикстуры
 scripts/{test,build}.sh                        тесты и сборка ipk в docker
@@ -84,10 +86,13 @@ scripts/{test,build}.sh                        тесты и сборка ipk в
 |------|-----|-----------|
 | `/etc/xvpn/subs/<sid>.json` | кэш подписки: серверы, `userinfo`, время, ошибка | `subscription.uc` (только при изменении) |
 | `/etc/xvpn/active` | id последнего активного сервера | демон (только при смене) |
+| `/etc/xvpn/ifnames.json` | последние ifname выбранных SSID (секция → `phy1-ap1`) — для правил, пока Wi-Fi не поднят | `firewall.uc` (только при смене) |
 | `/var/etc/xvpn/config.json` | конфиг xray | `cli.uc generate` |
 | `/var/etc/xvpn/index.json` | список серверов: id, имя, тестовый порт, активный | `cli.uc generate` |
 | `/var/etc/xvpn/xvpn.nft` | правила nft | `cli.uc fw-apply` |
 | `/var/run/xvpn/state.json` | состояние демона (для rpcd, когда демон занят) | демон |
+| `/var/run/xvpn/fw_mode` | применённый режим правил: `full` / `passthrough` / `block` | `cli.uc fw-*` |
+| `/var/run/xvpn/fw_error` | ошибка nft; пока файл есть, клиенты заблокированы, статус — `error` | `cli.uc fw-*` |
 
 ## 4. UCI-схема `/etc/config/xvpn`
 
@@ -166,7 +171,7 @@ config manual 'manual'
 
 ubus `xvpn`: `status` → `{state, active, since, fails, servers:[{id,name,proto,sub,latency,tested,quarantined}], testing, last_error}`; `test` (запустить тест всех); `select {id}`; `update {sid?}` (обновить подписки); `check` (проверить сейчас).
 
-Состояния: `starting`, `connected`, `degraded` (были неудачи, порог не достигнут), `failover`, `wan_down`, `no_servers`, `testing`.
+Состояния: `starting`, `connected`, `degraded` (были неудачи, порог не достигнут), `failover`, `wan_down`, `no_servers`, `testing`, `error` (nft не принял правила, клиенты заблокированы; текст — в `last_error`).
 
 ## 7. nftables
 
@@ -196,7 +201,21 @@ Wi-Fi SSID → ifname: `ubus call network.wireless status` (`interfaces[].sectio
 - Метка, выставленная в `bridge`-таблице, сохраняется в skb и видна в `inet` prerouting — так один SSID/порт уходит в VPN без выделения отдельной сети.
 - ICMP (ping) xray не проксирует: при kill switch пинг из VPN-сети в интернет не проходит — это ожидаемо.
 - Flow offloading fw4 (на AX3000T есть аппаратный PPE): TPROXY-трафик доставляется локально и не офлоадится. Потоки, установленные до включения VPN, живут до завершения — UI предупреждает.
-- `restart` сервиса кратко снимает правила; `reload` (failover) — нет.
+
+### 7.1 Режимы правил и жизненный цикл
+
+| Режим | Что делает | Когда |
+|-------|-----------|-------|
+| `full` | перехват TPROXY + DNS, kill switch | xray работает (`fw-apply`) |
+| `passthrough` | только метки и блок IPv6, клиенты идут напрямую | kill switch выключен и живых серверов нет (демон); `fw-guard` при выключенном kill switch |
+| `block` | метки, reject forward в интернет и DNS клиентов к роутеру; без tproxy/fib/nat | `fw-guard` при kill switch; fallback при любой ошибке nft |
+
+Правила не исчезают, пока сервис включён (`main.enabled=1` и автозапуск `/etc/init.d/xvpn enable`):
+- **Загрузка.** `xvpn-guard` (START=18, раньше fw4=19 и network=20) ставит `fw-guard`. Имена устройств — без netifd: сети из UCI (`network.<имя>.device`), SSID из `/etc/xvpn/ifnames.json` или `wireless.<секция>.ifname`. `xvpn` (START=95) атомарно заменяет таблицу на `full`. `xvpn-guard start` (в т.ч. из postinst) ничего не делает — работает только `boot`.
+- **stop / restart / upgrade / shutdown.** `stop_service` ставит `fw-guard`, `start` — `full`; `nft -f` атомарен, окна без правил нет.
+- **Выключение.** Правила снимаются (`fw-remove`) только при `enabled=0` или выключенном автозапуске; при удалении пакета `default_prerm` сначала делает `disable`, потом `stop`.
+- **Ошибка nft (fail-closed).** `nft -f` не применяет файл частично — остаются прежние правила; затем `cli.uc` ставит `block`, пишет ошибку в `fw_error`, демон отдаёт `state: error`. Следующий успешный `fw-*` удаляет `fw_error`.
+- **Wi-Fi поднялся позже.** hotplug `net`/`add` для `DEVTYPE=wlan` через 3 с вызывает `fw-refresh`: тот же режим, устройства резолвятся заново. Пока SSID не поднят, в правилах его последний известный ifname.
 
 ## 8. LuCI
 
@@ -210,7 +229,8 @@ Wi-Fi SSID → ifname: `ubus call network.wireless status` (`interfaces[].sectio
 
 ## 9. Сборка и тесты
 
-- Тесты (docker, образ `openwrt/rootfs:x86-64-24.10.4`): `scripts/test.sh` — парсер ссылок/подписок, генерация конфига, `xray run -test` на сгенерированном конфиге, рендер nft и `nft -c` (проверка синтаксиса).
+- Тесты (docker, образ `openwrt/rootfs:x86-64-24.10.4`): `scripts/test.sh` — парсер ссылок/подписок, генерация конфига, `xray run -test` на сгенерированном конфиге, рендер nft (все режимы) и `nft -c` (проверка синтаксиса), резолв SSID из кэша.
+- Интеграционный тест `scripts/itest.sh` (procd в контейнере, `NAME=` для параллельных запусков): выбор сервера, failover, подписка; клиент в netns за портом моста и «интернет» в другом netns — туннель работает, прямого трафика нет при загрузке (guard), restart, stop, сломанном `nft` (`state: error`); правила снимаются при `enabled=0` и `disable`.
 - Сборка ipk (docker, `openwrt/sdk:mediatek-filogic-24.10.4`): `scripts/build.sh` → `dist/luci-app-xvpn_*.ipk`.
 - Установка на роутер:
   ```
@@ -227,6 +247,8 @@ Wi-Fi SSID → ifname: `ubus call network.wireless status` (`interfaces[].sectio
 6. dnsleaktest.com с клиента VPN — только DNS со стороны туннеля.
 7. test-ipv6.com — IPv6 недоступен (режим block), утечки нет.
 8. Перезагрузка роутера без доступа к подписке → VPN поднимается из кэша.
+9. С клиента VPN-SSID `ping -i 0.2 1.1.1.1` во время `reboot` и `service xvpn restart` — ни одного ответа (ICMP не туннелируется, ответ = утечка).
+10. `nft` без `kmod-nft-tproxy` (или испорченный `tproxy_port`) → клиенты без интернета, на «Статусе» ошибка.
 
 ## 10. Ограничения v1
 - Только полный туннель (раздельная маршрутизация — в идеях).

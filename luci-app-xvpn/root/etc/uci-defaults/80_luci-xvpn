@@ -1,5 +1,7 @@
 #!/bin/sh
 
 mkdir -p /etc/xvpn/subs
+# postinst does not enable new init scripts on upgrade
+/etc/init.d/xvpn-guard enable
 rm -rf /tmp/luci-indexcache* /tmp/luci-modulecache
 exit 0

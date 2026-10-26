@@ -1,14 +1,14 @@
 #!/usr/bin/ucode
 // SPDX-License-Identifier: MIT
-// xvpn command line: generate | fw-apply [passthrough] | fw-remove | update [sid|all]
+// xvpn command line: generate | fw-apply [passthrough] | fw-guard | fw-refresh | fw-remove | update [sid|all]
 
 'use strict';
 
 import { readfile, unlink, access } from 'fs';
 import * as ubus from 'ubus';
 import {
-	load_config, read_json, write_json, mkdir_p, log, run, shq,
-	ACTIVE_FILE, CONFIG_FILE, INDEX_FILE, VAR_DIR
+	load_config, read_json, write_json, write_file, mkdir_p, log, run, shq,
+	ACTIVE_FILE, CONFIG_FILE, INDEX_FILE, VAR_DIR, RUN_DIR, FW_MODE_FILE, FW_ERROR_FILE
 } from 'xvpn.util';
 import { all_servers, update } from 'xvpn.subscription';
 import { build_index, generate } from 'xvpn.xrayconf';
@@ -18,6 +18,25 @@ const cfg = load_config();
 
 function xray_ok(path) {
 	return run(`${shq(cfg.main.xray_bin)} run -test -c ${shq(path)} >/dev/null 2>&1`).code == 0;
+}
+
+// Applies the rules in mode full | passthrough | block. When nft rejects them, falls back
+// to block (fail closed) and leaves the error in FW_ERROR_FILE for the status.
+function fw(mode) {
+	let res = resolve(cfg, ubus.connect());
+	let err = apply(cfg, res, { passthrough: mode == 'passthrough', block: mode == 'block' });
+	mkdir_p(RUN_DIR);
+	if (err == null) {
+		write_file(FW_MODE_FILE, mode);
+		unlink(FW_ERROR_FILE);
+		return true;
+	}
+	if (mode != 'block' && apply(cfg, res, { block: true }) == null) {
+		write_file(FW_MODE_FILE, 'block');
+		log('VPN clients are blocked until the firewall rules are fixed');
+	}
+	write_file(FW_ERROR_FILE, `firewall rules failed: ${err}`);
+	return false;
 }
 
 function active_port() {
@@ -59,13 +78,23 @@ case 'generate': {
 	exit(length(servers) ? 0 : 3);
 }
 
-case 'fw-apply': {
-	let res = resolve(cfg, ubus.connect());
-	exit(apply(cfg, res, { passthrough: ARGV[1] == 'passthrough' }) ? 0 : 1);
+case 'fw-apply':
+	exit(fw(ARGV[1] == 'passthrough' ? 'passthrough' : 'full') ? 0 : 1);
+
+// xray is not running (boot, stop with the service enabled): clients do not go around the VPN
+case 'fw-guard':
+	exit(fw(cfg.access.killswitch ? 'block' : 'passthrough') ? 0 : 1);
+
+// access point devices changed (a wifi came up): same mode, devices resolved again
+case 'fw-refresh': {
+	let mode = readfile(FW_MODE_FILE);
+	exit((mode == null || fw(mode)) ? 0 : 1);
 }
 
 case 'fw-remove':
 	remove(cfg);
+	unlink(FW_MODE_FILE);
+	unlink(FW_ERROR_FILE);
 	exit(0);
 
 case 'update': {
@@ -84,6 +113,6 @@ case 'update': {
 }
 
 default:
-	warn('usage: cli.uc generate | fw-apply [passthrough] | fw-remove | update [sid|all]\n');
+	warn('usage: cli.uc generate | fw-apply [passthrough] | fw-guard | fw-refresh | fw-remove | update [sid|all]\n');
 	exit(1);
 }
