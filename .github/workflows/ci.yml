@@ -50,7 +50,16 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: scripts/itest.sh
-        run: sh scripts/itest.sh
+        # it takes ~5 min; a hung run is stopped after 12 with the container state in the log
+        run: |
+          sh scripts/itest.sh & pid=$!
+          ( sleep 720
+            echo "::error::itest hangs, killed"
+            docker exec xvpn-itest sh -c 'ps w; ubus -t 3 call xvpn status; ubus -t 3 call service list "{\"name\":\"xvpn\"}"; logread | tail -80'
+            kill $pid ) & watchdog=$!
+          rc=0; wait $pid || rc=$?
+          kill $watchdog 2>/dev/null || true
+          exit $rc
 
   build:
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
