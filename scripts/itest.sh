@@ -157,6 +157,8 @@ add_list xvpn.access.port=vc0
 set xvpn.health.interval=3
 set xvpn.health.timeout=4
 set xvpn.health.fail_threshold=2
+set xvpn.health.reload_idle=15
+set xvpn.health.reload_retry=5
 add_list xvpn.manual.link='$(link 18444 second)'
 add_list xvpn.manual.link='$(link 18443 first)'
 commit xvpn
@@ -542,9 +544,9 @@ wait_for @.state connected 40
 active_is "$a" || { echo "FAIL: expected $a after xray is fixed, got $(active_name)"; exit 1; }
 echo "OK: connected again once xray_bin is fixed"
 
-# a reload hangs: no progress for 60 s (its processes and their CPU time do not change),
-# the daemon kills it with all it started, the status shows error, the checks go on and
-# the reload is tried again every 30 s
+# a reload hangs: no progress for reload_idle (15 s here, 60 by default: its processes and
+# their CPU time do not change), the daemon kills it with all it started, the status shows
+# error, the checks go on and the reload is tried again every reload_retry (5 s, 30)
 tested() { ubus call xvpn status | jsonfilter -e "@.servers[@.id='$1'].tested"; }
 tested_after() { [ "$(tested $1)" -gt "$2" ]; }
 killed() { logread | grep -c 'and was killed'; }
@@ -552,8 +554,8 @@ select_ok() { [ "$(ubus call xvpn select "{\"id\":\"$1\"}" | jsonfilter -e @.ok)
 hung_reload() { # what
 	[ "$(ubus call xvpn select "{\"id\":\"$id\"}" | jsonfilter -e @.error)" = busy ] || { echo "FAIL: no busy while reloading ($1)"; exit 1; }
 	[ "$(status @.state)" = connected ] || { echo "FAIL: state while the reload waits ($1)"; ubus call xvpn status; exit 1; }
-	wait_for @.state error 90
-	status @.last_error | grep -q 'no progress for 60 s' || { echo "FAIL: last_error ($1): $(status @.last_error)"; exit 1; }
+	wait_for @.state error 40
+	status @.last_error | grep -q 'no progress for 15 s' || { echo "FAIL: last_error ($1): $(status @.last_error)"; exit 1; }
 	t=$(date +%s); wait_cmd 15 tested_after "$id" "$t"
 	[ "$(ubus call xvpn test | jsonfilter -e @.error)" = busy ] || { echo "FAIL: test after a failed reload ($1)"; exit 1; }
 	echo "OK: $1: killed, state error, the active server is still checked"
@@ -567,7 +569,7 @@ wait_cmd 10 sh -c "ps w | grep -q '[s]leep 1000'"
 hung_reload "sleep in start_service"
 ps w | grep -q '[s]leep 1000' && { echo "FAIL: the hung reload was not killed"; exit 1; }
 rm /tmp/hang-reload
-wait_cmd 50 sh -c "logread | grep -q 'trying the reload again'"
+wait_cmd 20 sh -c "logread | grep -q 'trying the reload again'"
 wait_for @.state connected 30
 active_is "$a" || { echo "FAIL: after the hung reload"; ubus call xvpn status; exit 1; }
 sed -i '/hang-reload/d' /etc/init.d/xvpn
@@ -580,29 +582,29 @@ wait_cmd 15 select_ok "$id"	# busy for the pause after the last reload
 sleep 2
 hung_reload "procd lock held"
 kill $lk $(ps w | awk '/[s]leep 1001/ { print $1 }') 2>/dev/null || true
-wait_for @.state connected 50
+wait_for @.state connected 30
 [ -z "$(status @.last_error)" ] && active_is "$a" || { echo "FAIL: after the lock was released"; ubus call xvpn status; exit 1; }
 echo "OK: connected once the lock is released"
 
-# a slow xray: every `run -test` takes 10 s and one server is rejected, so generate tests
-# them one by one for ~90 s; it makes progress and is not killed
-printf '#!/bin/sh\n[ "$2" = -test ] && { sleep 10; grep -q 127.0.0.9 "$4" && exit 1; }\nexec /usr/bin/xray "$@"\n' > /tmp/xray-slow
+# a slow xray: every `run -test` takes 4 s and one server is rejected, so generate tests
+# them one by one for ~35 s, longer than reload_idle; it makes progress and is not killed
+printf '#!/bin/sh\n[ "$2" = -test ] && { sleep 4; grep -q 127.0.0.9 "$4" && exit 1; }\nexec /usr/bin/xray "$@"\n' > /tmp/xray-slow
 chmod +x /tmp/xray-slow
 uci set xvpn.main.xray_bin=/tmp/xray-slow
 uci add_list xvpn.manual.link="vless://$UUID@127.0.0.9:18449?type=tcp&security=none#bad"
 uci commit xvpn	# no reload_config: the daemon reloads, xvpnd is not restarted
 k=$(killed)
 wait_cmd 15 select_ok "$id"	# busy for the pause after the last reload
-wait_cmd 200 sh -c "logread | grep -q 'rejected 1 server(s): bad'"
+wait_cmd 90 sh -c "logread | grep -q 'rejected 1 server(s): bad'"
 sleep 5	# fw-apply, procd and the pause after the reload
 wait_for @.state connected 40
 [ "$(killed)" = "$k" ] && count_is $n && active_is "$a" || { echo "FAIL: slow generate"; ubus call xvpn status; logread | grep xvpn | tail -10; exit 1; }
-echo "OK: a slow generate (~90 s) is not killed, the rejected server is dropped"
+echo "OK: a slow generate (~35 s) is not killed, the rejected server is dropped"
 
 # generate killed midway (OOM, the daemon): the config and the index xray runs with stay
 c=$(md5sum < /var/etc/xvpn/config.json); x=$(md5sum < /var/etc/xvpn/index.json)
 ucode /usr/share/xvpn/cli.uc generate >/dev/null 2>&1 & g=$!
-sleep 15
+sleep 10
 kill -9 $g
 [ "$(md5sum < /var/etc/xvpn/config.json)" = "$c" ] && [ "$(md5sum < /var/etc/xvpn/index.json)" = "$x" ] \
 	|| { echo "FAIL: a killed generate changed the running config"; exit 1; }

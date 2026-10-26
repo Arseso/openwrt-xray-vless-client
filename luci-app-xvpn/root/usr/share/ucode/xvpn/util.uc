@@ -201,6 +201,10 @@ export function load_config(confdir) {
 			hysteresis: num(h.hysteresis, 150),
 			quarantine: num(h.quarantine, 300),
 			concurrency: num(h.concurrency, 8),
+			// not in the default config, for tests (see DESIGN.md 6.3)
+			reload_idle: num(h.reload_idle, 60),
+			reload_retry: num(h.reload_retry, 30),
+			generate_budget: num(h.generate_budget, 240),
 		},
 		subscriptions: [],
 		manual: list(man.link),

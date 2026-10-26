@@ -21,12 +21,12 @@ const XRAY_RETRY = 15;		// s between our restarts of xray
 const XRAY_RESTARTS = 3;
 const XRAY_BACKOFF = 600;	// s between tries once the restarts did not help
 const XRAY_UNKNOWN = 'unknown';	// procd does not answer: neither xray nor the server is blamed
-const RELOAD_IDLE = 60;		// s a reload may make no progress before it is killed, see watch_reload()
-const RELOAD_MAX = 360;		// s at most for a reload; generate gives up after 240
-const RELOAD_RETRY = 30;	// s between a failed reload and the next try
-
 const cfg = load_config();
 const H = cfg.health;
+const RELOAD_IDLE = H.reload_idle;	// s a reload may make no progress before it is killed, see watch_reload()
+const RELOAD_MAX = H.generate_budget + 120;	// s at most for a reload; generate gives up after its budget
+const RELOAD_RETRY = H.reload_retry;	// s between a failed reload and the next try
+const RELOAD_TICK = min(10, max(1, int(RELOAD_IDLE / 4))) * 1000;
 const STALL = 3 * H.interval + RELOAD_MAX + 30;	// s without health checks: see watchdog()
 
 let index = { servers: [] }, index_raw = null;
@@ -574,7 +574,7 @@ function reload_sig(pid) {
 }
 
 function watch_reload(r) {
-	r.t = uloop.timer(10000, () => {
+	r.t = uloop.timer(RELOAD_TICK, () => {
 		if (reload !== r)
 			return;
 		let sig = reload_sig(r.p.pid()), t = now();
@@ -583,7 +583,7 @@ function watch_reload(r) {
 			r.last = t;
 		}
 		if (t - r.last < RELOAD_IDLE && t - r.at < RELOAD_MAX)
-			return r.t.set(10000);
+			return r.t.set(RELOAD_TICK);
 		reload = null;
 		kill_tree(r.p.pid());
 		unlink(r.out);

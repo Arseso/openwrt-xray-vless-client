@@ -21,7 +21,7 @@ const cfg = load_config();
 // generate runs in init.d under procd's service lock, the daemon kills a reload that makes
 // no progress for 60 s: a test of the whole config may take long with hundreds of outbounds,
 // of one server or none it is short; all the tests together fit in GENERATE_BUDGET
-const TEST_FULL = 40, TEST_ONE = 15, GENERATE_BUDGET = 240;
+const TEST_FULL = 40, TEST_ONE = 15, GENERATE_BUDGET = cfg.health.generate_budget;
 const STARTED = clock(true)[0];
 
 // true: xray accepts the config; false: rejects it, hung or was killed (OOM); null: out of
