@@ -12,6 +12,10 @@ PKG_RELEASE:=1
 PKG_LICENSE:=MIT
 PKG_MAINTAINER:=Artem Sokolov <arseso.main@gmail.com>
 
+# luci.mk writes these into the ipk control file instead of PKG_MAINTAINER/URL
+LUCI_MAINTAINER:=$(PKG_MAINTAINER)
+LUCI_URL:=https://github.com/Arseso/openwrt-xray-vless-client
+
 define Package/luci-app-xvpn/conffiles
 /etc/config/xvpn
 /etc/xvpn/

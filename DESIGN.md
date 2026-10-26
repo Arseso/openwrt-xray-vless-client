@@ -211,7 +211,7 @@ Wi-Fi SSID → ifname: `ubus call network.wireless status` (`interfaces[].sectio
 ## 9. Сборка и тесты
 
 - Тесты (docker, образ `openwrt/rootfs:x86-64-24.10.4`): `scripts/test.sh` — парсер ссылок/подписок, генерация конфига, `xray run -test` на сгенерированном конфиге, рендер nft и `nft -c` (проверка синтаксиса).
-- Сборка ipk (docker, `openwrt/sdk:mediatek-filogic-24.10.4`): `scripts/build.sh` → `dist/luci-app-xvpn_*.ipk`.
+- Сборка ipk (docker, `openwrt/sdk:mediatek-filogic-24.10.4`): `scripts/build.sh` → `dist/luci-app-xvpn_*.ipk` (и `luci-i18n-xvpn-*.ipk`, когда появятся po-файлы). В SDK подключается только фид luci (ветка `openwrt-24.10`, нужен `luci.mk` и host-утилиты `luci-base`); зависимости из `LUCI_DEPENDS` в SDK не ставятся — они всё равно попадают в `Depends` пакета, а иначе SDK стал бы собирать xray-core вместе с Go. Пакет архитектуры `all`, так что SDK под другую архитектуру тоже подошёл бы. Переменные: `DOCKER` (по умолчанию `docker --context default`), `IMAGE`, `LUCI_FEED`.
 - Установка на роутер:
   ```
   scp dist/luci-app-xvpn_*.ipk root@192.168.1.1:/tmp/
