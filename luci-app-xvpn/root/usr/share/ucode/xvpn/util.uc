@@ -16,8 +16,10 @@ export const CONFIG_FILE = '/var/etc/xvpn/config.json';
 export const INDEX_FILE = '/var/etc/xvpn/index.json';
 export const NFT_FILE = '/var/etc/xvpn/xvpn.nft';
 export const STATE_FILE = '/var/run/xvpn/state.json';
+export const FW_WANT_FILE = '/var/run/xvpn/fw_want';
 export const FW_MODE_FILE = '/var/run/xvpn/fw_mode';
 export const FW_ERROR_FILE = '/var/run/xvpn/fw_error';
+export const FW_LOCK_FILE = '/var/lock/xvpn-fw';
 
 export function read_json(path) {
 	let s = readfile(path);

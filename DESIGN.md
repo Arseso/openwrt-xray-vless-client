@@ -66,7 +66,7 @@ luci-app-xvpn/
   root/etc/init.d/xvpn                         procd-сервис (START=95)
   root/etc/init.d/xvpn-guard                   блокировка клиентов при загрузке (START=18, до fw4 и сети)
   root/etc/hotplug.d/net/50-xvpn               Wi-Fi поднялся позже правил → fw-refresh
-  root/etc/uci-defaults/80_luci-xvpn           включение xvpn-guard, очистка кэша LuCI
+  root/etc/uci-defaults/80_luci-xvpn           включение xvpn-guard, include для fw4, очистка кэша LuCI
   root/usr/share/luci/menu.d/luci-app-xvpn.json
   root/usr/share/rpcd/acl.d/luci-app-xvpn.json
   root/usr/share/rpcd/ucode/luci.xvpn          rpcd-плагин
@@ -77,6 +77,7 @@ luci-app-xvpn/
   root/usr/share/ucode/xvpn/firewall.uc        nft-правила и ip rule/route
   root/usr/share/xvpn/cli.uc                   CLI: generate / fw-apply / fw-guard / fw-refresh / fw-remove / update
   root/usr/share/xvpn/xvpnd.uc                 демон
+  root/usr/share/xvpn/firewall.include         fw4 include: вернуть правила после fw4 flush
 tests/                                         ucode-тесты + фикстуры
 scripts/{test,build}.sh                        тесты и сборка ipk в docker
 ```
@@ -91,8 +92,10 @@ scripts/{test,build}.sh                        тесты и сборка ipk в
 | `/var/etc/xvpn/index.json` | список серверов: id, имя, тестовый порт, активный | `cli.uc generate` |
 | `/var/etc/xvpn/xvpn.nft` | правила nft | `cli.uc fw-apply` |
 | `/var/run/xvpn/state.json` | состояние демона (для rpcd, когда демон занят) | демон |
-| `/var/run/xvpn/fw_mode` | применённый режим правил: `full` / `passthrough` / `block` | `cli.uc fw-*` |
-| `/var/run/xvpn/fw_error` | ошибка nft; пока файл есть, клиенты заблокированы, статус — `error` | `cli.uc fw-*` |
+| `/var/run/xvpn/fw_want` | запрошенный режим правил: `full` / `passthrough` / `block` | `cli.uc fw-*` |
+| `/var/run/xvpn/fw_mode` | применённый режим: запрошенный или fallback `block` / `minimal` | `cli.uc fw-*` |
+| `/var/run/xvpn/fw_error` | ошибка nft; есть, пока запрошенный режим не применился; статус — `error` | `cli.uc fw-*` |
+| `/var/lock/xvpn-fw` | блокировка: `fw-*` выполняются по одному | `cli.uc fw-*` |
 
 ## 4. UCI-схема `/etc/config/xvpn`
 
@@ -209,12 +212,16 @@ Wi-Fi SSID → ifname: `ubus call network.wireless status` (`interfaces[].sectio
 | `full` | перехват TPROXY + DNS, kill switch | xray работает (`fw-apply`) |
 | `passthrough` | только метки и блок IPv6, клиенты идут напрямую | kill switch выключен и живых серверов нет (демон); `fw-guard` при выключенном kill switch |
 | `block` | метки, reject forward в интернет и DNS клиентов к роутеру; без tproxy/fib/nat | `fw-guard` при kill switch; fallback при любой ошибке nft |
+| `minimal` | только `inet`: reject forward для `iifname @nets`; отдельные порты и SSID не закрыты | последний fallback, если не принят и `block` (нет `kmod-nft-bridge`) |
+
+Запрошенный режим (`fw_want`) и применённый (`fw_mode`) хранятся отдельно. `fw-refresh` применяет запрошенный, поэтому fallback и ошибка воспроизводятся сами, а `fw_error` удаляется только когда применился именно запрошенный режим. Все `fw-*` (init.d, демон, hotplug, include fw4) берут `/var/lock/xvpn-fw`, запрошенный режим читается уже под блокировкой. Устройства с именем длиннее 15 символов (IFNAMSIZ) отбрасываются с записью в лог: из-за них nft отверг бы весь файл. Без демона состояние правил отдаёт rpcd `luci.xvpn firewall` → `{want, mode, error}`.
 
 Правила не исчезают, пока сервис включён (`main.enabled=1` и автозапуск `/etc/init.d/xvpn enable`):
-- **Загрузка.** `xvpn-guard` (START=18, раньше fw4=19 и network=20) ставит `fw-guard`. Имена устройств — без netifd: сети из UCI (`network.<имя>.device`), SSID из `/etc/xvpn/ifnames.json` или `wireless.<секция>.ifname`. `xvpn` (START=95) атомарно заменяет таблицу на `full`. `xvpn-guard start` (в т.ч. из postinst) ничего не делает — работает только `boot`.
-- **stop / restart / upgrade / shutdown.** `stop_service` ставит `fw-guard`, `start` — `full`; `nft -f` атомарен, окна без правил нет.
+- **Загрузка.** `xvpn-guard` (START=18, раньше fw4=19 и network=20) ставит `fw-guard`. `uci-defaults` включает `xvpn-guard` при каждой установке и апгрейде (postinst при апгрейде новые init-скрипты не включает), так что отключить его вручную до следующего апгрейда можно. Имена устройств — без netifd: сети из UCI (`network.<имя>.device`), SSID из `/etc/xvpn/ifnames.json` или `wireless.<секция>.ifname`. `xvpn` (START=95) атомарно заменяет таблицу на `full`. `xvpn-guard start` (в т.ч. из postinst) ничего не делает — работает только `boot`.
+- **stop / restart / upgrade / shutdown.** `stop_service` ставит `fw-guard`, `start` — `full`; `nft -f` атомарен, окна без правил нет. Если автозапуск `xvpn` выключен (`/etc/init.d/xvpn disable`) при `enabled=1`, `stop` снимает правила — `restart` даёт окно прямого доступа до `start`.
 - **Выключение.** Правила снимаются (`fw-remove`) только при `enabled=0` или выключенном автозапуске; при удалении пакета `default_prerm` сначала делает `disable`, потом `stop`.
 - **Ошибка nft (fail-closed).** `nft -f` не применяет файл частично — остаются прежние правила; затем `cli.uc` ставит `block`, пишет ошибку в `fw_error`, демон отдаёт `state: error`. Следующий успешный `fw-*` удаляет `fw_error`.
+- **fw4 flush.** `service firewall stop` / `restart` (`fw4 flush`) удаляет все таблицы nft, в том числе наши. Include `firewall.xvpn` (type script, `fw4_compatible`) выполняется после каждого start/reload fw4 и, если есть `fw_want`, а таблицы `inet xvpn` нет, вызывает `fw-refresh`. Между `firewall stop` и следующим `start` правил нет. `postrm` удаляет include.
 - **Wi-Fi поднялся позже.** hotplug `net`/`add` для `DEVTYPE=wlan` через 3 с вызывает `fw-refresh`: тот же режим, устройства резолвятся заново. Пока SSID не поднят, в правилах его последний известный ifname.
 
 ## 8. LuCI
@@ -230,7 +237,7 @@ Wi-Fi SSID → ifname: `ubus call network.wireless status` (`interfaces[].sectio
 ## 9. Сборка и тесты
 
 - Тесты (docker, образ `openwrt/rootfs:x86-64-24.10.4`): `scripts/test.sh` — парсер ссылок/подписок, генерация конфига, `xray run -test` на сгенерированном конфиге, рендер nft (все режимы) и `nft -c` (проверка синтаксиса), резолв SSID из кэша.
-- Интеграционный тест `scripts/itest.sh` (procd в контейнере, `NAME=` для параллельных запусков): выбор сервера, failover, подписка; клиент в netns за портом моста и «интернет» в другом netns — туннель работает, прямого трафика нет при загрузке (guard), restart, stop, сломанном `nft` (`state: error`); правила снимаются при `enabled=0` и `disable`.
+- Интеграционный тест `scripts/itest.sh` (procd в контейнере, `NAME=` для параллельных запусков): выбор сервера, failover, подписка; клиент в netns за портом моста и «интернет» в другом netns, fw4 запущен — туннель работает, прямого трафика нет при загрузке (guard), restart, stop, сломанном `nft` (fallback из passthrough, `state: error`, `fw-refresh` сохраняет ошибку, `minimal` без bridge); правила возвращаются после fw4 flush; `fw-remove` ждёт блокировку; правила снимаются при `enabled=0` и `disable`.
 - Сборка ipk (docker, `openwrt/sdk:mediatek-filogic-24.10.4`): `scripts/build.sh` → `dist/luci-app-xvpn_*.ipk`.
 - Установка на роутер:
   ```

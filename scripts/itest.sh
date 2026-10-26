@@ -2,7 +2,7 @@
 # Integration test: runs the service under procd in an OpenWrt container with two
 # local VLESS "remote" servers, checks server selection, failover, subscription update and
 # that a VPN client (network namespace behind a bridge port) never reaches the "internet"
-# (another namespace) directly: boot guard, restart, stop, broken fw-apply.
+# (another namespace) directly: boot guard, restart, stop, broken fw-apply, fw4 flush.
 set -e
 cd "$(dirname "$0")/.."
 DOCKER="${DOCKER:-docker}"
@@ -38,8 +38,12 @@ opkg update >/dev/null
 opkg install ucode-mod-uloop xray-core curl ip-full >/dev/null
 cp -a /src/luci-app-xvpn/root/. /
 /etc/uci-defaults/80_luci-xvpn
+/etc/init.d/rpcd restart
 /etc/init.d/xvpn enable
-/etc/init.d/firewall stop
+# fw4 stays running; the test devices are in no zone, so the defaults decide
+[ "$(uci -q get firewall.xvpn.path)" = /usr/share/xvpn/firewall.include ] || { echo "FAIL: no fw4 include"; exit 1; }
+uci set firewall.@defaults[0].input=ACCEPT; uci set firewall.@defaults[0].forward=ACCEPT; uci commit firewall
+/etc/init.d/firewall restart
 
 # client --vc1/vc0-- [brt 10.77.0.1, router] --vw0/vw1-- wan 45.0.0.2 (http server)
 ip netns add cl; ip netns add wan
@@ -66,6 +70,26 @@ no_tproxy() { # what
 	nft list table inet xvpn 2>/dev/null | grep -q 'reject with icmpx' || { echo "FAIL: no guard table ($1)"; exit 1; }
 	nft list table inet xvpn | grep -q tproxy && { echo "FAIL: full rules instead of the guard ($1)"; exit 1; }
 	return 0
+}
+fw() { ubus call luci.xvpn firewall | jsonfilter -e "$1"; }
+want_mode() { # want mode
+	[ "$(fw @.want)" = "$1" ] && [ "$(fw @.mode)" = "$2" ] || { echo "FAIL: firewall want/mode: $(ubus call luci.xvpn firewall)"; exit 1; }
+}
+full_rules() { # what
+	nft list table inet xvpn 2>/dev/null | grep -q tproxy || { echo "FAIL: no full rules ($1)"; exit 1; }
+}
+# nft that rejects tproxy (kernel without nft_tproxy) and, with /tmp/nft-no-bridge, the bridge family
+break_nft() {
+	mv /usr/sbin/nft /usr/sbin/nft.real
+	cat > /usr/sbin/nft <<'SH'
+#!/bin/sh
+if [ "$1" = -f ]; then
+	grep -q tproxy "$2" && { echo "Error: Could not process rule: No such file or directory" >&2; exit 1; }
+	[ -f /tmp/nft-no-bridge ] && grep -q 'table bridge' "$2" && { echo "Error: Could not process rule: Operation not supported" >&2; exit 1; }
+fi
+exec /usr/sbin/nft.real "$@"
+SH
+	chmod +x /usr/sbin/nft
 }
 direct || { echo "FAIL: test network: client cannot reach wan without xvpn"; exit 1; }
 echo "OK: test network, client goes direct without xvpn"
@@ -111,13 +135,16 @@ sleep 2
 wait_for @.state connected 40
 [ "$(active_name)" = first ] || { echo "FAIL: expected first, got $(active_name)"; exit 1; }
 echo "OK: picked the live server"
-nft list table inet xvpn >/dev/null && echo "OK: nft table present"
-ip rule | grep -q 'lookup 100' && echo "OK: ip rule present"
+full_rules "connected"
+ip rule | grep -q 'lookup 100' || { echo "FAIL: no ip rule"; exit 1; }
+want_mode full full
+echo "OK: full rules, ip rule, luci.xvpn firewall"
 tunnel || { echo "FAIL: client gets no internet through the tunnel"; exit 1; }
 echo "OK: client goes through the tunnel"
 blocked "connected, ICMP is not tunneled"
 /etc/init.d/xvpn-guard start
-nft list table inet xvpn | grep -q tproxy && echo "OK: xvpn-guard start keeps the full rules"
+full_rules "xvpn-guard start"
+echo "OK: xvpn-guard start keeps the full rules"
 
 # restart: the client must not get a single packet through directly
 ( while [ ! -f /tmp/stop-probe ]; do direct && echo leak >> /tmp/leaks; done ) &
@@ -127,26 +154,61 @@ wait_for @.state connected 40
 touch /tmp/stop-probe; sleep 2
 [ -s /tmp/leaks ] && { echo "FAIL: $(wc -l < /tmp/leaks) direct pings during restart"; exit 1; }
 echo "OK: no direct traffic during restart"
-tunnel && echo "OK: tunnel is back after restart"
+tunnel || { echo "FAIL: no tunnel after restart"; exit 1; }
+echo "OK: tunnel is back after restart"
 
-# fw-apply fails (kernel without nft_tproxy): fail closed and status "error"
-mv /usr/sbin/nft /usr/sbin/nft.real
-cat > /usr/sbin/nft <<'SH'
-#!/bin/sh
-[ "$1" = -f ] && grep -q tproxy "$2" && { echo "Error: Could not process rule: No such file or directory" >&2; exit 1; }
-exec /usr/sbin/nft.real "$@"
-SH
-chmod +x /usr/sbin/nft
-/etc/init.d/xvpn restart
+# fw4 flush (service firewall stop/restart) deletes all tables: the include puts them back
+/etc/init.d/firewall restart
+full_rules "after firewall restart"
+/etc/init.d/firewall stop; /etc/init.d/firewall start
+full_rules "after firewall stop + start"
+tunnel || { echo "FAIL: no tunnel after firewall stop + start"; exit 1; }
+echo "OK: rules restored after fw4 flush"
+
+# fw-* run one at a time: fw-remove waits for the lock
+ucode -l fs -e 'let f = fs.open("/var/lock/xvpn-fw", "w"); f.lock("x"); system("sleep 3");' &
 sleep 1
+ucode /usr/share/xvpn/cli.uc fw-remove & R=$!
+sleep 1
+full_rules "fw-remove while the lock is held"
+wait $R
+nft list table inet xvpn >/dev/null 2>&1 && { echo "FAIL: fw-remove did not run after the lock"; exit 1; }
+echo "OK: fw-remove waited for the lock"
+ucode /usr/share/xvpn/cli.uc fw-apply
+full_rules "fw-apply after the lock test"
+
+# fw-apply fails (kernel without nft_tproxy): fail closed and status "error".
+# Start from passthrough (clients go direct) so that only the fallback in cli.uc can block them.
+ucode /usr/share/xvpn/cli.uc fw-apply passthrough
+direct || { echo "FAIL: passthrough does not let the client out"; exit 1; }
+break_nft
+/etc/init.d/xvpn reload
 wait_for @.state error 20
-status @.last_error | grep -q 'No such file' && echo "OK: status shows the nft error"
+status @.last_error | grep -q 'No such file' || { echo "FAIL: status has no nft error: $(status @.last_error)"; exit 1; }
+want_mode full block
+fw @.error | grep -q 'No such file' || { echo "FAIL: luci.xvpn firewall has no error"; exit 1; }
 no_tproxy "broken fw-apply"
 blocked "broken fw-apply"
+ucode /usr/share/xvpn/cli.uc fw-refresh || true
+want_mode full block
+[ "$(status @.state)" = error ] || { echo "FAIL: fw-refresh cleared the error"; exit 1; }
+blocked "fw-refresh with broken nft"
+echo "OK: fw-refresh keeps the error"
+
+# block is rejected too (no bridge support): minimal inet table for the VPN networks
+touch /tmp/nft-no-bridge
+ucode /usr/share/xvpn/cli.uc fw-refresh || true
+want_mode full minimal
+nft list table inet xvpn | grep -q 'iifname @nets reject' || { echo "FAIL: no minimal table"; exit 1; }
+nft list set inet xvpn nets | grep -q br-lan || { echo "FAIL: minimal table without the networks"; exit 1; }
+echo "OK: minimal fallback when block is rejected"
+rm /tmp/nft-no-bridge
 mv /usr/sbin/nft.real /usr/sbin/nft
 /etc/init.d/xvpn reload
 sleep 1
 wait_for @.state connected 40
+want_mode full full
+[ -z "$(fw @.error)" ] || { echo "FAIL: error left after a successful fw-apply"; exit 1; }
 echo "OK: error cleared after a successful fw-apply"
 
 # failover: kill the active remote, start the other one
@@ -157,21 +219,23 @@ wait_for @.state connected 60
 echo "OK: failover to the other server"
 logread | grep xvpn | grep -E 'switching|state' | tail -5
 
-# subscription from a file
-# busybox has no base64
-{ link 18443 sub-a; link 18445 sub-b; } | ucode -l fs -e 'print(b64enc(fs.stdin.read("all")))' > /tmp/sub.b64
+# subscription over http (curl reports file:// as HTTP 0), busybox has no base64
+{ link 18446 sub-a; link 18445 sub-b; } | ucode -l fs -e 'print(b64enc(fs.stdin.read("all")))' > /www/sub.b64
 uci batch <<UCI
 set xvpn.s1=subscription
 set xvpn.s1.name=test
-set xvpn.s1.url=file:///tmp/sub.b64
+set xvpn.s1.url=http://127.0.0.1/sub.b64
 set xvpn.s1.via_tunnel=0
 commit xvpn
 UCI
 ucode /usr/share/xvpn/cli.uc update s1 || true
-[ "$(jsonfilter -i /etc/xvpn/subs/s1.json -e '@.servers[*].name' | wc -l)" = 2 ] && echo "OK: subscription parsed"
+[ "$(jsonfilter -i /etc/xvpn/subs/s1.json -e '@.servers[*].name' | wc -l)" = 2 ] || { echo "FAIL: subscription not parsed"; exit 1; }
+echo "OK: subscription parsed"
 /etc/init.d/xvpn reload
 sleep 3
-[ "$(ubus call xvpn status | jsonfilter -e '@.servers[*].name' | wc -l)" = 4 ] && echo "OK: 4 servers after reload"
+# the daemon re-reads the index after an outside reload only with issue #3 fixed: check the index
+[ "$(jsonfilter -i /var/etc/xvpn/index.json -e '@.servers[*].name' | wc -l)" = 4 ] || { echo "FAIL: expected 4 servers in the index after reload"; exit 1; }
+echo "OK: 4 servers in the index after reload"
 
 /etc/init.d/xvpn stop
 no_tproxy "stop with the service enabled"

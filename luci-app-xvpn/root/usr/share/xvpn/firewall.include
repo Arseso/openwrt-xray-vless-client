@@ -1,0 +1,10 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# fw4 include (type script), runs after every firewall start/reload: "fw4 flush"
+# (service firewall stop/restart) deletes all nft tables, ours too.
+# Put the rules back in the mode xvpn wants.
+
+[ -f /var/run/xvpn/fw_want ] || exit 0
+nft list table inet xvpn >/dev/null 2>&1 && exit 0
+logger -t xvpn "firewall rules were flushed, restoring"
+/usr/bin/ucode /usr/share/xvpn/cli.uc fw-refresh

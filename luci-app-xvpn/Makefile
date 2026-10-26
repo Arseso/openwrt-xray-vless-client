@@ -17,6 +17,14 @@ define Package/luci-app-xvpn/conffiles
 /etc/xvpn/
 endef
 
+define Package/luci-app-xvpn/postrm
+#!/bin/sh
+[ -n "$${IPKG_INSTROOT}" ] || {
+	uci -q delete firewall.xvpn && uci commit firewall
+}
+exit 0
+endef
+
 include $(TOPDIR)/feeds/luci/luci.mk
 
 # call BuildPackage - OpenWrt buildroot signature

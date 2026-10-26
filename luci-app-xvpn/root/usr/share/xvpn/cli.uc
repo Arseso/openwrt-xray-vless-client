@@ -4,11 +4,12 @@
 
 'use strict';
 
-import { readfile, unlink, access } from 'fs';
+import { readfile, unlink, access, open } from 'fs';
 import * as ubus from 'ubus';
 import {
 	load_config, read_json, write_json, write_file, mkdir_p, log, run, shq,
-	ACTIVE_FILE, CONFIG_FILE, INDEX_FILE, VAR_DIR, RUN_DIR, FW_MODE_FILE, FW_ERROR_FILE
+	ACTIVE_FILE, CONFIG_FILE, INDEX_FILE, VAR_DIR, RUN_DIR,
+	FW_WANT_FILE, FW_MODE_FILE, FW_ERROR_FILE, FW_LOCK_FILE
 } from 'xvpn.util';
 import { all_servers, update } from 'xvpn.subscription';
 import { build_index, generate } from 'xvpn.xrayconf';
@@ -20,20 +21,44 @@ function xray_ok(path) {
 	return run(`${shq(cfg.main.xray_bin)} run -test -c ${shq(path)} >/dev/null 2>&1`).code == 0;
 }
 
-// Applies the rules in mode full | passthrough | block. When nft rejects them, falls back
-// to block (fail closed) and leaves the error in FW_ERROR_FILE for the status.
-function fw(mode) {
-	let res = resolve(cfg, ubus.connect());
-	let err = apply(cfg, res, { passthrough: mode == 'passthrough', block: mode == 'block' });
+const MODES = { full: {}, passthrough: { passthrough: true }, block: { block: true }, minimal: { minimal: true } };
+
+// hotplug, init.d and the daemon run fw-* concurrently: one at a time, the lock is
+// released when the process exits
+function fw_lock() {
+	mkdir_p(substr(FW_LOCK_FILE, 0, rindex(FW_LOCK_FILE, '/')));
+	let f = open(FW_LOCK_FILE, 'w');
+	f?.lock('x');
+	return f;
+}
+
+// Applies the wanted mode (full | passthrough | block; null: the last wanted one, fw-refresh).
+// When nft rejects it, falls back to block, then minimal (fail closed); FW_MODE_FILE gets
+// what is applied and FW_ERROR_FILE the error until the wanted mode applies.
+function fw(want) {
+	let lock = fw_lock();
+	want ??= readfile(FW_WANT_FILE);
+	if (!MODES[want])
+		return true;
+
 	mkdir_p(RUN_DIR);
+	write_file(FW_WANT_FILE, want);
+	let res = resolve(cfg, ubus.connect());
+	let err = apply(cfg, res, MODES[want]);
 	if (err == null) {
-		write_file(FW_MODE_FILE, mode);
+		write_file(FW_MODE_FILE, want);
 		unlink(FW_ERROR_FILE);
 		return true;
 	}
-	if (mode != 'block' && apply(cfg, res, { block: true }) == null) {
-		write_file(FW_MODE_FILE, 'block');
-		log('VPN clients are blocked until the firewall rules are fixed');
+
+	for (let m in [ 'block', 'minimal' ]) {
+		if (m == want)
+			continue;
+		if (apply(cfg, res, MODES[m]) == null) {
+			write_file(FW_MODE_FILE, m);
+			log(`VPN clients are blocked (${m}) until the firewall rules are fixed`);
+			break;
+		}
 	}
 	write_file(FW_ERROR_FILE, `firewall rules failed: ${err}`);
 	return false;
@@ -85,17 +110,18 @@ case 'fw-apply':
 case 'fw-guard':
 	exit(fw(cfg.access.killswitch ? 'block' : 'passthrough') ? 0 : 1);
 
-// access point devices changed (a wifi came up): same mode, devices resolved again
-case 'fw-refresh': {
-	let mode = readfile(FW_MODE_FILE);
-	exit((mode == null || fw(mode)) ? 0 : 1);
-}
+// devices changed (a wifi came up) or fw4 flushed the tables: the wanted mode again
+case 'fw-refresh':
+	exit(fw(null) ? 0 : 1);
 
-case 'fw-remove':
+case 'fw-remove': {
+	let lock = fw_lock();
 	remove(cfg);
+	unlink(FW_WANT_FILE);
 	unlink(FW_MODE_FILE);
 	unlink(FW_ERROR_FILE);
 	exit(0);
+}
 
 case 'update': {
 	let sid = ARGV[1] ?? 'all', port = active_port(), out = {}, changed = false;

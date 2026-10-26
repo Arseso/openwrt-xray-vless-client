@@ -107,6 +107,10 @@ ok('block marks ports', index(blk, 'iifname @ports meta mark set meta mark | 0x0
 ok('block needs no tproxy', index(blk, 'tproxy') < 0 && index(blk, 'fib ') < 0 && index(blk, 'redirect') < 0);
 ok('full has no dns reject', index(nft, 'th dport 53 reject') < 0);
 writefile(`${OUT}/block.nft`, blk);
+let min = render(cfg, res, { minimal: true });
+ok('minimal rejects nets', index(min, 'iifname @nets reject with icmpx type admin-prohibited') >= 0);
+ok('minimal is inet only', index(min, 'bridge') < 0 && index(min, 'tproxy') < 0 && index(min, 'mark') < 0);
+writefile(`${OUT}/minimal.nft`, min);
 
 // wifi that is not up yet keeps its last known ifname
 let wcfg = { access: { networks: [], ports: [ 'lan2' ], wifi: [ 'wifinet2', 'wifinet3' ] } };
@@ -117,6 +121,8 @@ eq('resolve wifi up', resolve(wcfg, up, cache), { nets: [], ports: [ 'lan2', 'ph
 eq('resolve caches ifnames', json(readfile(cache)), { wifinet2: 'phy1-ap1' });
 eq('resolve wifi down uses cache', resolve(wcfg, down, cache), { nets: [], ports: [ 'lan2', 'phy1-ap1' ] });
 eq('resolve without ubus', resolve(wcfg, null, `${OUT}/none.json`), { nets: [], ports: [ 'lan2' ] });
+eq('resolve drops names over 15 chars', resolve({ access: { networks: [], ports: [ 'lan2', 'a-very-long-port0' ], wifi: [] } }, null),
+	{ nets: [], ports: [ 'lan2' ] });
 
 print(`${passed} passed, ${failed} failed\n`);
 exit(failed ? 1 : 0);

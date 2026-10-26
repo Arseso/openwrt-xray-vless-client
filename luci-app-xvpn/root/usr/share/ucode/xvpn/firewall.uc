@@ -72,14 +72,36 @@ export function resolve(cfg, ubus_conn, ifnames_file) {
 			}
 	}
 
-	return { nets: uniq(nets), ports: uniq(ports) };
+	// longer names do not exist (IFNAMSIZ) and make nft reject the whole file
+	let valid = (dev) => {
+		if (length(dev) <= 15)
+			return true;
+		log(`device name "${dev}" is longer than 15 characters, skipped`);
+		return false;
+	};
+	return { nets: filter(uniq(nets), valid), ports: filter(uniq(ports), valid) };
 };
 
 // opts.passthrough: keep marking but do not intercept (kill switch off and no live server).
 // opts.block: no interception, clients get neither internet nor DNS (service not started
 // yet or stopped, failed fw-apply); needs no tproxy, fib or nat support.
+// opts.minimal: last resort when even block is rejected (no bridge support): inet only,
+// VPN networks get no forwarding at all, single ports and SSIDs are not covered.
 export function render(cfg, res, opts) {
 	let m = cfg.main, a = cfg.access;
+	if (opts?.minimal)
+		return join('\n', [
+			'table inet xvpn',
+			'delete table inet xvpn',
+			'table inet xvpn {',
+			`\tset nets { type ifname; ${elements(res.nets, true)}}`,
+			'',
+			'\tchain guard_forward {',
+			'\t\ttype filter hook forward priority filter - 5; policy accept;',
+			'\t\tiifname @nets reject with icmpx type admin-prohibited',
+			'\t}',
+			'}', '' ]);
+
 	let cm = hex32(m.client_mark), tm = hex32(m.tproxy_mark), both = hex32(m.client_mark | m.tproxy_mark);
 	let block = !!opts?.block;
 	let intercept = !opts?.passthrough && !block;
