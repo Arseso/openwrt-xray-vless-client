@@ -326,9 +326,14 @@ no_quarantine() { # what; earlier failovers left their quarantine, nothing new m
 a=$(active_name); n=$(ubus call xvpn status | jsonfilter -e '@.servers[*].name' | wc -l); q0=$(quarantined | tr '\n' ' ')
 x=$(xray_pid); kill -STOP $x
 wait_for @.state xray_down 30
-status @.last_error | grep -q 'xray is stopped' || { echo "FAIL: last_error: $(status @.last_error)"; exit 1; }
+[ "$(status @.last_error)" = 'xray is stopped' ] || { echo "FAIL: last_error: $(status @.last_error)"; exit 1; }
 no_quarantine "xray stopped"
 echo "OK: stopped xray is xray_down, no quarantine"
+# a test with xray down does not mark the servers dead
+ubus call xvpn test >/dev/null
+sleep 1; wait_for @.testing false 30
+[ "$(latency "$a")" -ge 0 ] || { echo "FAIL: test with xray down wrote -1"; ubus call xvpn status; exit 1; }
+echo "OK: measurements kept while xray is down"
 wait_cmd 40 xray_restarted "$x"
 wait_for @.state connected 40
 active_is "$a" && [ "$(status @.xray_restarts)" = 0 ] || { echo "FAIL: after the xray restart"; ubus call xvpn status; exit 1; }
@@ -352,6 +357,12 @@ want_mode full full
 # kill switch off lets ICMP out, TCP still goes to xray: no passthrough
 tunnel && { echo "FAIL: client gets out with xray down"; exit 1; }
 echo "OK: broken xray_bin is xray_down, 3 restarts, no passthrough"
+# the binary is fixed in place, no UCI change: the daemon notices and tries again
+old=$(xvpnd_pid)
+printf '#!/bin/sh\nexec /usr/bin/xray "$@"\n' > /tmp/xray-broken
+wait_for @.state connected 40
+[ "$(xvpnd_pid)" = "$old" ] && active_is "$a" || { echo "FAIL: recovery after the binary fix"; ubus call xvpn status; exit 1; }
+echo "OK: recovered from a fixed binary without restarting xvpnd"
 uci set xvpn.main.xray_bin=/usr/bin/xray; uci set xvpn.access.killswitch=1; uci commit xvpn
 old=$(xvpnd_pid); reload_config
 wait_cmd 30 xvpnd_restarted "$old"
