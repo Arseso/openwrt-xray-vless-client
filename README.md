@@ -40,11 +40,10 @@ VPN-клиент для OpenWrt 24.10 на [xray-core](https://github.com/XTLS/X
 
 ### Готовый пакет
 
-Релизы собирает CI: по тегу `v<версия>` после зелёных тестов, интеграционного теста и сборки ipk
-(`luci-app-xvpn_0.1.0-r1_all.ipk`) публикуется в
-[GitHub Releases](https://github.com/Arseso/openwrt-xray-vless-client/releases). Релизов пока нет;
-ipk каждой сборки `main` и PR лежит 30 дней в артефакте `ipk` запуска workflow CI на вкладке
-Actions.
+Релизы публикуются в
+[GitHub Releases](https://github.com/Arseso/openwrt-xray-vless-client/releases) локальным CI
+(`sh scripts/ci.sh release`) после зелёных тестов, интеграционного теста и сборки ipk
+(`luci-app-xvpn_0.1.0-r1_all.ipk`). Релизов пока нет — соберите пакет сами (ниже).
 
 Скопируйте ipk на роутер и установите (`-O`: в OpenWrt 24.10 нет sftp-server):
 
@@ -330,10 +329,27 @@ http://127.0.0.1:8019, логин `root`, пароль — переменная 
 незапущенный Docker Desktop). `scripts/build.sh` и `scripts/luci.sh` сами вызывают
 `docker --context default`; все скрипты принимают переменную `DOCKER`.
 
-CI (`.github/workflows/ci.yml`) на каждый PR и push в `main` запускает `test.sh`, `itest.sh` и
-`build.sh`, ipk — в артефакте `ipk` на 30 дней. Тег `v<PKG_VERSION>` (или
-`v<PKG_VERSION>-r<PKG_RELEASE>` при `PKG_RELEASE` ≠ 1) после зелёных проверок публикует GitHub
-Release с ipk; тег, не совпадающий с `luci-app-xvpn/Makefile`, отклоняется.
+CI выполняется локально, GitHub Actions не используется. Перед каждым push и PR:
+
+```bash
+sh scripts/ci.sh
+```
+
+Скрипт проверяет закоммиченный HEAD (незакоммиченные изменения не проверяются): `test.sh` с
+xray из фида и с последним релизом xray с GitHub (пока только предупреждение, [#14](https://github.com/Arseso/openwrt-xray-vless-client/issues/14)), `itest.sh`
+(не дольше 12 мин) и `build.sh`; ipk — в `dist/`, логи шагов — в `.ci/`. Занимает около
+15 минут.
+
+Релиз — из запушенного `main` с чистым деревом:
+
+```bash
+sh scripts/ci.sh release
+```
+
+После тех же проверок ставит тег `v<PKG_VERSION>` (или `v<PKG_VERSION>-r<PKG_RELEASE>` при
+`PKG_RELEASE` ≠ 1), пушит его и публикует GitHub Release с ipk (нужен `gh` с доступом к
+репозиторию). Для нового релиза поднимите `PKG_VERSION` или `PKG_RELEASE` в
+`luci-app-xvpn/Makefile`.
 
 ## Лицензия
 
