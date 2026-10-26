@@ -238,7 +238,7 @@ Wi-Fi SSID → ifname: `ubus call network.wireless status` (`interfaces[].sectio
 
 - Тесты (docker, образ `openwrt/rootfs:x86-64-24.10.4`): `scripts/test.sh` — парсер ссылок/подписок, генерация конфига, `xray run -test` на сгенерированном конфиге, рендер nft (все режимы) и `nft -c` (проверка синтаксиса), резолв SSID из кэша.
 - Интеграционный тест `scripts/itest.sh` (procd в контейнере, `NAME=` для параллельных запусков): выбор сервера, failover, подписка; клиент в netns за портом моста и «интернет» в другом netns, fw4 запущен — туннель работает, прямого трафика нет при загрузке (guard), restart, stop, сломанном `nft` (fallback из passthrough, `state: error`, `fw-refresh` сохраняет ошибку, `minimal` без bridge); правила возвращаются после fw4 flush; `fw-remove` ждёт блокировку; правила снимаются при `enabled=0` и `disable`.
-- Сборка ipk (docker, `openwrt/sdk:mediatek-filogic-24.10.4`): `scripts/build.sh` → `dist/luci-app-xvpn_*.ipk`.
+- Сборка ipk (docker, `openwrt/sdk:mediatek-filogic-24.10.4`): `scripts/build.sh` → `dist/luci-app-xvpn_*.ipk` (и `luci-i18n-xvpn-*.ipk`, когда появятся po-файлы). Из фида luci (ветка `openwrt-24.10`) берутся только `luci.mk`, `luci-base` и `csstidy`, и собираются лишь их host-утилиты; сам пакет собирается с `NO_DEPS=1` — иначе SDK компилировал бы все рантайм-зависимости (luci-base, xray-core вместе с Go), а пакету архитектуры `all` они нужны только в `Depends`. Пакет архитектуры `all`, так что SDK под другую архитектуру тоже подошёл бы. Переменные: `DOCKER` (по умолчанию `docker --context default`), `IMAGE`, `LUCI_FEED`.
 - Установка на роутер:
   ```
   scp dist/luci-app-xvpn_*.ipk root@192.168.1.1:/tmp/
