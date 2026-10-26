@@ -27,7 +27,6 @@ jobs:
         # feed: xray-core 25.1.30 from the OpenWrt 24.10 feed, what the router gets.
         # latest: the last xray release from GitHub, informational until #14
         xray: [feed, latest]
-    name: test (xray ${{ matrix.xray }})
     steps:
       - uses: actions/checkout@v7
       - name: Download the latest xray
