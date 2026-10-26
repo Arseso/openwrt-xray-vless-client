@@ -1,0 +1,13 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# A VPN network came up: its L3 device may differ from the configured one (pppoe, Wi-Fi only
+# network) or exist only now. Resolve the access points again.
+
+[ "$ACTION" = ifup ] || exit 0
+[ -f /var/run/xvpn/fw_want ] || exit 0
+
+for n in $(uci -q get xvpn.access.network); do
+	[ "$n" = "$INTERFACE" ] || continue
+	( /usr/bin/ucode /usr/share/xvpn/cli.uc fw-refresh ) >/dev/null 2>&1 </dev/null &
+	exit 0
+done
