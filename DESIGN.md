@@ -1,0 +1,247 @@
+# luci-app-xvpn — VPN-клиент на xray для OpenWrt 24.10
+
+Проектный документ: требования, принятые решения, архитектура, план проверки и идеи на будущее.
+
+## 1. Требования
+
+| # | Требование | Как закрыто |
+|---|------------|-------------|
+| R1 | LuCI-приложение для OpenWrt 24.10, удобное | Пакет `luci-app-xvpn`, раздел «Сервисы → XVPN», 5 вкладок, RU/EN |
+| R2 | VPN-клиент | xray-core (`xray-core 25.1.30` из штатного фида 24.10) + TPROXY |
+| R3 | Сам обновляет подписку | Демон `xvpnd` по таймеру, интервал из настроек или из заголовка `profile-update-interval` |
+| R4 | Сам подключается к серверу | При старте берётся последний рабочий сервер, иначе — лучший по HTTP-пингу |
+| R5 | Если подключение легло — переключение на лучший сервер по HTTP-пингу | Health-check каждые 30 с, после 3 неудач — тест всех серверов и переход на минимальный пинг |
+| R6 | VPN для одной или нескольких точек доступа (порты, Wi-Fi сети) | Выбор сетей OpenWrt, отдельных LAN-портов (DSA) и отдельных SSID |
+| R7 | Доп.: kill switch и защита DNS (выбрано пользователем) | Правила nft не снимаются при падении xray; DNS клиентов VPN перехватывается и идёт через туннель; IPv6 не утекает |
+
+### Ответы пользователя (2026-10-26)
+- Режим маршрутизации: **только полный туннель** — весь трафик выбранных точек доступа идёт в VPN.
+- Протоколы: **всё, что умеет xray** — `vless://` (Reality, XTLS-Vision, XHTTP, WS, gRPC, HTTPUpgrade, mKCP), `vmess://`, `trojan://`, `ss://`.
+- Устройство: **Xiaomi AX3000T** (MediaTek MT7981B, target `mediatek/filogic`, arch `aarch64_cortex-a53`, 128 МБ NAND, 256 МБ ОЗУ, порты `lan1..lan3` + `wan`, радио 2.4 и 5 ГГц).
+- Доп. функции в v1: **kill switch + защита DNS**.
+
+## 2. Ключевые решения
+
+1. **Ядро — xray-core из фида.** В 24.10.4 есть `xray-core 25.1.30` (ipk ≈ 9.8 МБ, ≈ 25 МБ на флеше). На AX3000T места хватает. Geo-файлы (`v2ray-geoip`/`v2ray-geosite`) для полного туннеля не нужны и не ставятся. Путь к бинарю настраивается (`main.xray_bin`) — можно положить свежий xray с GitHub, если нужны функции новее 25.1.30 (например, VLESS `encryption`/ML-KEM).
+2. **Бэкенд на ucode** — родной язык скриптов OpenWrt 24.10 (как в `luci-app-homeproxy`): модули `/usr/share/ucode/xvpn/*.uc`, скрипты `/usr/share/xvpn/{cli,xvpnd}.uc`.
+3. **Перехват — nftables TPROXY** (TCP+UDP) в собственных таблицах `inet xvpn` и `bridge xvpn`. fw4 удаляет только свою таблицу `inet fw4`, поэтому наши таблицы переживают `fw4 reload`.
+4. **Выбор сервера и failover — в нашем демоне, а не в балансировщике xray.** Каждый сервер — отдельный outbound, у каждого свой loopback SOCKS-инбаунд `127.0.0.1:20000+i` («тестовый порт»). TPROXY- и DNS-инбаунды маршрутизируются на активный outbound. Плюсы: прозрачные замеры для UI, полный контроль над логикой (проверка WAN, карантин, гистерезис). Переключение = перегенерация конфига + `reload` сервиса, procd перезапускает только xray (~1 с).
+5. **HTTP-пинг** = `time_starttransfer` запроса `GET https://www.gstatic.com/generate_204` через SOCKS сервера (`curl -x socks5h://…`), ответ 204/200 обязателен. Тесты идут параллельно (по умолчанию 8 одновременно) через `uloop.process`.
+6. **Кэш подписок на флеше** (`/etc/xvpn/subs/<id>.json`) — VPN поднимается после перезагрузки без доступа к серверу подписки. Пишем только при изменении содержимого (экономия ресурса NAND).
+7. **Один пакет** `luci-app-xvpn` (`PKGARCH:=all`), собирается через `luci.mk`.
+
+## 3. Архитектура
+
+```
+ Клиенты VPN-точек ─┐
+  (SSID / lan-порт /│   bridge xvpn: метка CLIENT для выбранных портов и SSID
+   сеть br-guest)   │   inet  xvpn : метка CLIENT для выбранных сетей
+                    ▼
+            prerouting mangle: CLIENT && не приватный dst && не DNS → TPROXY :12345 (+метка TPROXY)
+            prerouting dstnat: CLIENT && dport 53                     → redirect :10853
+            forward          : CLIENT && не приватный dst → reject (kill switch / IPv6 block)
+                    ▼
+   ┌──────────────── xray (procd instance) ─────────────────┐
+   │ inbound tproxy :12345 ─┐                                │
+   │ inbound dns    :10853 ─┼─► outbound srv-<активный>  ──► │──► VPN-сервер
+   │ inbound test-i 127.0.0.1:20000+i ─► outbound srv-i      │
+   │ inbound api    127.0.0.1:10085 (stats)                  │
+   └─────────────────────────────────────────────────────────┘
+                    ▲ reload (новый активный)
+   ┌──────────── xvpnd (procd instance, ucode+uloop) ───────┐
+   │ health-check, failover, re-rank, обновление подписок   │
+   │ ubus-объект `xvpn`: status / test / select / update     │
+   └─────────────────────────────────────────────────────────┘
+                    ▲ ubus
+   LuCI (JS-вьюхи) ──► rpcd ucode-плагин `luci.xvpn` (офлайн-операции)
+```
+
+### 3.1 Файлы пакета
+```
+luci-app-xvpn/
+  Makefile
+  htdocs/luci-static/resources/view/xvpn/{status,subscriptions,access,settings,log}.js
+  po/templates/xvpn.pot, po/ru/xvpn.po
+  root/etc/config/xvpn                         дефолтный UCI
+  root/etc/init.d/xvpn                         procd-сервис
+  root/etc/uci-defaults/80_luci-xvpn           очистка кэша LuCI
+  root/usr/share/luci/menu.d/luci-app-xvpn.json
+  root/usr/share/rpcd/acl.d/luci-app-xvpn.json
+  root/usr/share/rpcd/ucode/luci.xvpn          rpcd-плагин
+  root/usr/share/ucode/xvpn/util.uc            общие функции (json, хэш, лог, shell-quote)
+  root/usr/share/ucode/xvpn/links.uc           парсер ссылок и подписок → xray outbound
+  root/usr/share/ucode/xvpn/subscription.uc    загрузка подписок, кэш, фильтры
+  root/usr/share/ucode/xvpn/xrayconf.uc        генерация config.json и индекса серверов
+  root/usr/share/ucode/xvpn/firewall.uc        nft-правила и ip rule/route
+  root/usr/share/xvpn/cli.uc                   CLI: generate / fw-apply / fw-remove / update / servers
+  root/usr/share/xvpn/xvpnd.uc                 демон
+tests/                                         ucode-тесты + фикстуры
+scripts/{test,build}.sh                        тесты и сборка ipk в docker
+```
+
+### 3.2 Рантайм-файлы
+| Путь | Что | Кто пишет |
+|------|-----|-----------|
+| `/etc/xvpn/subs/<sid>.json` | кэш подписки: серверы, `userinfo`, время, ошибка | `subscription.uc` (только при изменении) |
+| `/etc/xvpn/active` | id последнего активного сервера | демон (только при смене) |
+| `/var/etc/xvpn/config.json` | конфиг xray | `cli.uc generate` |
+| `/var/etc/xvpn/index.json` | список серверов: id, имя, тестовый порт, активный | `cli.uc generate` |
+| `/var/etc/xvpn/xvpn.nft` | правила nft | `cli.uc fw-apply` |
+| `/var/run/xvpn/state.json` | состояние демона (для rpcd, когда демон занят) | демон |
+
+## 4. UCI-схема `/etc/config/xvpn`
+
+```
+config general 'main'
+	option enabled '0'
+	option xray_bin '/usr/bin/xray'
+	option loglevel 'warning'          # debug|info|warning|error|none
+	option tproxy_port '12345'
+	option dns_port '10853'
+	option api_port '10085'
+	option test_port_base '20000'
+	option client_mark '0x01000000'    # метка «клиент VPN» (вне масок mwan3 0x3F00 и pbr 0x00ff0000)
+	option tproxy_mark '0x02000000'    # метка для ip rule → table 
+	option route_table '100'
+	option sniffing '0'                # 1 = подменять IP на домен (http/tls/quic)
+
+config access 'access'
+	list network 'guest'               # целые сети OpenWrt
+	list port 'lan2'                   # отдельные порты моста (DSA)
+	list wifi 'wifinet2'               # секции wifi-iface (SSID)
+	option killswitch '1'
+	option ipv6 'block'                # block | tunnel
+	option dns_hijack '1'
+	option dns_server '1.1.1.1'        # DNS, куда идут запросы клиентов через туннель
+
+config health 'health'
+	option url 'https://www.gstatic.com/generate_204'
+	option interval '30'               # с, проверка активного
+	option timeout '5'                 # с, таймаут одного замера
+	option fail_threshold '3'          # неудач подряд до failover
+	option rank_interval '600'         # с, фоновый тест всех
+	option auto_best '0'               # переходить на заметно более быстрый
+	option hysteresis '150'            # мс, насколько быстрее должен быть новый
+	option quarantine '300'            # с, «мёртвый» сервер не выбирается
+	option concurrency '8'
+
+config subscription
+	option name 'Мой VPN'
+	option enabled '1'
+	option url 'https://example.com/sub/xxxx'
+	option user_agent 'v2rayN/7.0'     # провайдеры (Marzban/Remnawave/3x-ui) выбирают формат по UA
+	option update_interval '12'        # часы; 0 = из profile-update-interval или 12
+	option include ''                  # regex по имени сервера
+	option exclude ''
+	option via_tunnel '1'              # качать через активный сервер, при неудаче — напрямую
+
+config manual 'manual'
+	list link 'vless://…#Мой сервер'
+```
+
+## 5. Подписки и ссылки
+
+- Загрузка: `curl -sSL --max-time 30 -A <UA> -D <headers> -o <body>`; через туннель — `-x socks5h://127.0.0.1:<тестовый порт активного>`, при неудаче — напрямую.
+- Форматы тела: base64 (обычный и URL-safe, без паддинга) списка ссылок; plain-список; xray-JSON (массив полных конфигов или один конфиг — берётся первый outbound с протоколом vless/vmess/trojan/shadowsocks, имя из `remarks`). Clash YAML и sing-box JSON не поддерживаются → понятная ошибка «смените User-Agent».
+- Заголовки: `subscription-userinfo` (upload/download/total/expire → показываем трафик и срок), `profile-update-interval`, `profile-title` (в т.ч. `base64:`).
+- Ссылки → xray outbound:
+  - `vless://uuid@host:port?type=&security=&flow=&sni=&fp=&alpn=&pbk=&sid=&spx=&host=&path=&serviceName=&mode=&headerType=&seed=&extra=&allowInsecure=#name`
+  - `vmess://base64(JSON v2rayN)`
+  - `trojan://password@host:port?…` (security по умолчанию tls)
+  - `ss://base64(method:password)@host:port#name` (SIP002) и legacy `ss://base64(method:password@host:port)`; плагины (obfs/v2ray-plugin) — пропуск.
+  - Транспорты: `tcp` (+ http-обфускация), `ws`, `grpc`, `xhttp`/`splithttp`, `httpupgrade`, `kcp`. Не поддерживаемые xray 25.1.30 (`h2`/`http`, `quic`) и протоколы (`hysteria2`, `tuic`) — пропускаются со счётчиком «пропущено».
+- id сервера = FNV-1a от канонической строки (протокол, адрес, порт, учётка, транспорт, security, sni). Дубликаты между подписками отбрасываются. Фильтры include/exclude — регулярки по имени, без учёта регистра.
+
+## 6. Логика демона xvpnd
+
+1. Старт: загрузить индекс; если активный неизвестен — сразу тест всех и выбор лучшего.
+2. Каждые `interval` с — HTTP-пинг активного через его тестовый порт.
+3. `fail_threshold` неудач подряд → проверка прямого интернета (тот же URL без прокси):
+   - нет прямого интернета → состояние `wan_down`, серверы не трогаем, ждём;
+   - есть → `failover`: активный в карантин, тест всех, переход на минимальный пинг. Если живых нет → `no_servers`, повтор на каждом тике.
+4. Каждые `rank_interval` с — фоновый тест всех (для UI). При `auto_best=1` переход, только если лучший быстрее текущего более чем на `hysteresis` мс.
+5. Каждые 5 мин — проверка, не пора ли обновить подписки; обновление идёт отдельным процессом (`cli.uc update`), при изменении списка серверов — `reload`.
+6. Ручной выбор сервера в UI (`xvpn.select`) — сразу переключает; дальше работает обычный failover.
+7. Kill switch выключен и живых серверов нет → правила TPROXY снимаются (клиенты идут напрямую) до появления живого сервера.
+
+ubus `xvpn`: `status` → `{state, active, since, fails, servers:[{id,name,proto,sub,latency,tested,quarantined}], testing, last_error}`; `test` (запустить тест всех); `select {id}`; `update {sid?}` (обновить подписки); `check` (проверить сейчас).
+
+Состояния: `starting`, `connected`, `degraded` (были неудачи, порог не достигнут), `failover`, `wan_down`, `no_servers`, `testing`.
+
+## 7. nftables
+
+```
+table bridge xvpn {
+  set ports { type ifname; elements = { "lan2", "phy1-ap1" } }        # порты + реальные ifname SSID
+  chain pre { type filter hook prerouting priority -210;
+              iifname @ports meta mark set meta mark | CLIENT }
+}
+table inet xvpn {
+  set nets     { type ifname; elements = { "br-guest" } }
+  set bypass4  { type ipv4_addr; flags interval; … RFC1918, CGNAT, loopback, link-local, multicast … }
+  set bypass6  { type ipv6_addr; flags interval; ::1, fc00::/7, fe80::/10, ff00::/8 }
+  chain mark     { prerouting, mangle-10: iifname @nets → mark |= CLIENT }
+  chain tproxy   { prerouting, mangle: не CLIENT → return; dst local → return; dport 53 → return (hijack);
+                   bypass → return; ipv6+block → return; tcp/udp → mark |= TPROXY, tproxy to :PORT }
+  chain dns      { prerouting, dstnat-5: CLIENT && dport 53 → redirect to :DNS_PORT }
+  chain forward  { forward, filter-5: CLIENT && не bypass → reject (kill switch; при ipv6=block — весь IPv6) }
+  chain input    { input, filter-5: порты tproxy/dns не от CLIENT/TPROXY → drop }
+}
+ip rule add fwmark TPROXY/TPROXY table 100 ; ip route add local default dev lo table 100   (и -6)
+```
+
+Wi-Fi SSID → ifname: `ubus call network.wireless status` (`interfaces[].section` → `ifname`). Сервис перезагружается по изменениям `xvpn`, `wireless`, `network`.
+
+Особенности:
+- Метка, выставленная в `bridge`-таблице, сохраняется в skb и видна в `inet` prerouting — так один SSID/порт уходит в VPN без выделения отдельной сети.
+- ICMP (ping) xray не проксирует: при kill switch пинг из VPN-сети в интернет не проходит — это ожидаемо.
+- Flow offloading fw4 (на AX3000T есть аппаратный PPE): TPROXY-трафик доставляется локально и не офлоадится. Потоки, установленные до включения VPN, живут до завершения — UI предупреждает.
+- `restart` сервиса кратко снимает правила; `reload` (failover) — нет.
+
+## 8. LuCI
+
+| Вкладка | Содержимое |
+|---------|-----------|
+| Статус | состояние, активный сервер, пинг, аптайм, трафик через xray; подписки (трафик, срок); таблица серверов (пинг, «Использовать»); кнопки «Проверить все», «Обновить подписки», «Перезапустить», вкл/выкл |
+| Подписки | таблица подписок (имя, URL, UA, интервал, фильтры, через туннель) + ручные ссылки |
+| Точки доступа | сети / LAN-порты / SSID, kill switch, DNS, IPv6 |
+| Настройки | проверка (URL, интервалы, порог, таймаут, авто-лучший, гистерезис, карантин, параллельность), порты, метки, лог-уровень, путь к xray |
+| Журнал | `logread` по `xvpn`/`xray` |
+
+## 9. Сборка и тесты
+
+- Тесты (docker, образ `openwrt/rootfs:x86-64-24.10.4`): `scripts/test.sh` — парсер ссылок/подписок, генерация конфига, `xray run -test` на сгенерированном конфиге, рендер nft и `nft -c` (проверка синтаксиса).
+- Сборка ipk (docker, `openwrt/sdk:mediatek-filogic-24.10.4`): `scripts/build.sh` → `dist/luci-app-xvpn_*.ipk`.
+- Установка на роутер:
+  ```
+  scp dist/luci-app-xvpn_*.ipk root@192.168.1.1:/tmp/
+  ssh root@192.168.1.1 'opkg update && opkg install /tmp/luci-app-xvpn_*.ipk'
+  ```
+
+### Чек-лист проверки на AX3000T
+1. Установка ipk тянет `xray-core`, `kmod-nft-tproxy`, `kmod-nft-socket`, `kmod-nft-bridge`, `curl`.
+2. Добавить подписку → «Обновить» → серверы с пингами на вкладке «Статус».
+3. Выбрать SSID и порт `lan2`, включить → с клиента на этом SSID/порту `curl ifconfig.me` = IP VPN-сервера; на `lan1` — IP провайдера.
+4. `killall xray` → у клиентов VPN нет интернета (не утечка), procd поднимает xray за секунды.
+5. `nft add rule inet fw4 output ip daddr <IP активного> drop` → через ~90 с переход на другой сервер.
+6. dnsleaktest.com с клиента VPN — только DNS со стороны туннеля.
+7. test-ipv6.com — IPv6 недоступен (режим block), утечки нет.
+8. Перезагрузка роутера без доступа к подписке → VPN поднимается из кэша.
+
+## 10. Ограничения v1
+- Только полный туннель (раздельная маршрутизация — в идеях).
+- Трафик самого роутера в VPN не идёт.
+- DNS клиентов VPN идёт на один `dns_server` через туннель — локальные имена (`*.lan`) у них не резолвятся.
+- xray 25.1.30: нет VLESS `encryption` (ML-KEM), hysteria2, TUN. Решается подменой бинаря (`main.xray_bin`).
+
+## 11. Идеи на будущее
+- Мастер «VPN Wi-Fi сеть»: в пару кликов создать SSID и/или порты, отдельную сеть, DHCP, зону firewall.
+- Исключения/включения по MAC/IP отдельных устройств.
+- Уведомления в Telegram (переключение сервера, ошибки подписки, падение VPN).
+- Раздельная маршрутизация (списки доменов/geosite, «Россия напрямую»).
+- Обновление xray-core с GitHub (свежие версии, VLESS encryption, hysteria2).
+- Горячее переключение без рестарта: balancer + `xray api bo`.
+- LED-индикация статуса VPN на AX3000T.
+- Импорт по QR, бэкап/восстановление настроек и кэша.
+- Графики трафика и задержек.
+- VPN для трафика самого роутера (опция).

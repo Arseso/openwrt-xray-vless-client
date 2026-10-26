@@ -1,0 +1,55 @@
+#!/bin/sh /etc/rc.common
+# SPDX-License-Identifier: MIT
+
+USE_PROCD=1
+START=95
+STOP=10
+
+CLI="/usr/bin/ucode /usr/share/xvpn/cli.uc"
+CONF=/var/etc/xvpn/config.json
+
+start_service() {
+	config_load xvpn
+	local enabled xray_bin
+	config_get_bool enabled main enabled 0
+	config_get xray_bin main xray_bin /usr/bin/xray
+
+	if [ "$enabled" != 1 ]; then
+		$CLI fw-remove
+		return 0
+	fi
+
+	# generate drops servers that xray rejects; non-zero: no servers or invalid config
+	local have_servers=1
+	$CLI generate >/dev/null || have_servers=0
+
+	# rules stay in place without servers: with kill switch on, clients stay offline instead of leaking
+	$CLI fw-apply || logger -t xvpn "failed to apply firewall rules"
+
+	if [ "$have_servers" = 1 ]; then
+		procd_open_instance xray
+		procd_set_param command "$xray_bin" run -c "$CONF"
+		procd_set_param file "$CONF"
+		procd_set_param limits nofile="65535 65535"
+		procd_set_param stdout 1
+		procd_set_param stderr 1
+		procd_set_param respawn 3600 5 0
+		procd_close_instance
+	fi
+
+	procd_open_instance xvpnd
+	procd_set_param command /usr/bin/ucode /usr/share/xvpn/xvpnd.uc
+	procd_set_param file /etc/config/xvpn
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_set_param respawn 3600 5 0
+	procd_close_instance
+}
+
+stop_service() {
+	$CLI fw-remove
+}
+
+service_triggers() {
+	procd_add_reload_trigger xvpn wireless network
+}

@@ -1,0 +1,39 @@
+{
+	"admin/services/xvpn": {
+		"title": "XVPN",
+		"order": 10,
+		"action": {
+			"type": "alias",
+			"path": "admin/services/xvpn/status"
+		},
+		"depends": {
+			"acl": [ "luci-app-xvpn" ],
+			"uci": { "xvpn": true }
+		}
+	},
+	"admin/services/xvpn/status": {
+		"title": "Status",
+		"order": 10,
+		"action": { "type": "view", "path": "xvpn/status" }
+	},
+	"admin/services/xvpn/subscriptions": {
+		"title": "Subscriptions",
+		"order": 20,
+		"action": { "type": "view", "path": "xvpn/subscriptions" }
+	},
+	"admin/services/xvpn/access": {
+		"title": "Access points",
+		"order": 30,
+		"action": { "type": "view", "path": "xvpn/access" }
+	},
+	"admin/services/xvpn/settings": {
+		"title": "Settings",
+		"order": 40,
+		"action": { "type": "view", "path": "xvpn/settings" }
+	},
+	"admin/services/xvpn/log": {
+		"title": "Log",
+		"order": 50,
+		"action": { "type": "view", "path": "xvpn/log" }
+	}
+}

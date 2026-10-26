@@ -1,0 +1,148 @@
+// SPDX-License-Identifier: MIT
+// rpcd plugin for luci-app-xvpn: data that is available without the daemon.
+
+'use strict';
+
+import { readfile, popen, access } from 'fs';
+import { cursor } from 'uci';
+import { load_config, read_json, run, shq, INDEX_FILE, ACTIVE_FILE, RUN_DIR } from 'xvpn.util';
+import { all_servers, load_cache, load_status, due_in } from 'xvpn.subscription';
+
+const CLI = '/usr/share/xvpn/cli.uc';
+const INIT = '/etc/init.d/xvpn';
+
+function bg(cmd) {
+	system(`(${cmd}) >/dev/null 2>&1 </dev/null &`);
+}
+
+const methods = {
+	servers: {
+		call: function() {
+			let cfg = load_config();
+			let list = map(all_servers(cfg), (s) => ({
+				id: s.id, name: s.name, proto: s.proto, address: s.address, port: s.port,
+				sub: s.sub, sub_name: s.sub_name,
+			}));
+			return { servers: list, active: trim(readfile(ACTIVE_FILE) ?? '') || null };
+		}
+	},
+
+	subscriptions: {
+		call: function() {
+			let cfg = load_config();
+			let subs = map(cfg.subscriptions, (s) => {
+				let c = load_cache(s.id), st = load_status(s.id);
+				return {
+					id: s.id, name: s.name, enabled: s.enabled,
+					count: length(c?.servers ?? []), skipped: c?.skipped, format: c?.format,
+					title: c?.title, updated: c?.updated,
+					last_ok: st.last_ok, last_attempt: st.last_attempt, error: st.error,
+					userinfo: st.userinfo, via: st.via,
+					due_in: s.enabled ? due_in(s) : null,
+				};
+			});
+			return { subscriptions: subs, updating: access(`${RUN_DIR}/updating`) };
+		}
+	},
+
+	update: {
+		args: { sid: 'sid' },
+		call: function(req) {
+			let sid = req.args?.sid || 'all';
+			if (access(`${RUN_DIR}/updating`))
+				return { ok: false, error: 'busy' };
+			bg(sprintf('mkdir -p %s; touch %s/updating; /usr/bin/ucode %s update %s && %s reload; rm -f %s/updating',
+				RUN_DIR, RUN_DIR, CLI, shq(sid), INIT, RUN_DIR));
+			return { ok: true };
+		}
+	},
+
+	access_points: {
+		call: function() {
+			let uci = cursor();
+			let networks = [], ports = [], wifi = [];
+
+			uci.foreach('network', 'interface', (s) => {
+				if (s['.name'] == 'loopback' || match(s['.name'], /^wan/))
+					return;
+				push(networks, { name: s['.name'], proto: s.proto, device: s.device });
+			});
+
+			uci.foreach('network', 'device', (s) => {
+				if (s.type != 'bridge')
+					return;
+				for (let p in (type(s.ports) == 'array' ? s.ports : (s.ports ? [ s.ports ] : [])))
+					push(ports, { name: p, bridge: s.name });
+			});
+
+			uci.foreach('wireless', 'wifi-iface', (s) => {
+				if (s.mode && s.mode != 'ap')
+					return;
+				let dev = uci.get_all('wireless', s.device) ?? {};
+				push(wifi, {
+					section: s['.name'], ssid: s.ssid, radio: s.device, band: dev.band,
+					network: s.network, disabled: (s.disabled == '1' || dev.disabled == '1'),
+				});
+			});
+
+			return {
+				networks, ports, wifi,
+				flow_offloading: uci.get('firewall', '@defaults[0]', 'flow_offloading') == '1',
+				flow_offloading_hw: uci.get('firewall', '@defaults[0]', 'flow_offloading_hw') == '1',
+			};
+		}
+	},
+
+	stats: {
+		call: function() {
+			let cfg = load_config(), idx = read_json(INDEX_FILE) ?? {};
+			let r = run(sprintf('%s api statsquery --server=127.0.0.1:%d 2>/dev/null', shq(cfg.main.xray_bin), cfg.main.api_port));
+			let traffic = {};
+			try {
+				for (let s in (json(r.out)?.stat ?? [])) {
+					let m = match(s.name, /^outbound>>>(srv-[0-9]+)>>>traffic>>>(uplink|downlink)$/);
+					if (!m)
+						continue;
+					let e = filter(idx.servers ?? [], (x) => x.tag == m[1])[0];
+					if (!e)
+						continue;
+					traffic[e.id] ??= { up: 0, down: 0 };
+					traffic[e.id][(m[2] == 'uplink') ? 'up' : 'down'] = int(s.value ?? 0);
+				}
+			}
+			catch (e) { }
+			return { traffic };
+		}
+	},
+
+	log: {
+		call: function() {
+			let r = run("logread -e 'xvpn|xray' 2>/dev/null | tail -n 300");
+			return { log: r.out };
+		}
+	},
+
+	service: {
+		args: { action: 'action' },
+		call: function(req) {
+			let action = req.args?.action;
+			if (!(action in [ 'start', 'stop', 'restart' ]))
+				return { ok: false, error: 'invalid action' };
+
+			let uci = cursor();
+			if (action == 'stop') {
+				uci.set('xvpn', 'main', 'enabled', '0');
+				uci.commit('xvpn');
+				bg(`${INIT} stop; ${INIT} disable`);
+			}
+			else {
+				uci.set('xvpn', 'main', 'enabled', '1');
+				uci.commit('xvpn');
+				bg(`${INIT} enable; ${INIT} restart`);
+			}
+			return { ok: true };
+		}
+	},
+};
+
+return { 'luci.xvpn': methods };

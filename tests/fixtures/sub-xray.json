@@ -1,0 +1,12 @@
+[
+  {
+    "remarks": "🇫🇮 Finland",
+    "outbounds": [
+      { "tag": "proxy", "protocol": "vless",
+        "settings": { "vnext": [ { "address": "fi.example.com", "port": 443, "users": [ { "id": "11111111-2222-3333-4444-555555555555", "encryption": "none", "flow": "xtls-rprx-vision" } ] } ] },
+        "streamSettings": { "network": "tcp", "security": "reality", "realitySettings": { "serverName": "www.microsoft.com", "fingerprint": "chrome", "publicKey": "Z84J2IelR9ch3k8VtlVhhs5ycBUlXA7wHBWcBrjqnAw", "shortId": "ab" }, "sockopt": { "dialerProxy": "x" } } },
+      { "tag": "direct", "protocol": "freedom" }
+    ]
+  },
+  { "remarks": "broken", "outbounds": [ { "protocol": "freedom" } ] }
+]

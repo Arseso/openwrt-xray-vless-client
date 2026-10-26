@@ -1,0 +1,19 @@
+{
+	"luci-app-xvpn": {
+		"description": "Grant access to XVPN",
+		"read": {
+			"ubus": {
+				"luci.xvpn": [ "status", "servers", "subscriptions", "access_points", "stats", "log" ],
+				"xvpn": [ "status" ]
+			},
+			"uci": [ "xvpn", "firewall" ]
+		},
+		"write": {
+			"ubus": {
+				"luci.xvpn": [ "update", "service" ],
+				"xvpn": [ "test", "select", "update", "check" ]
+			},
+			"uci": [ "xvpn" ]
+		}
+	}
+}
