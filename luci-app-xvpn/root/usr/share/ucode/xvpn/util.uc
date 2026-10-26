@@ -9,12 +9,17 @@ import { cursor } from 'uci';
 export const ETC_DIR = '/etc/xvpn';
 export const SUBS_DIR = '/etc/xvpn/subs';
 export const ACTIVE_FILE = '/etc/xvpn/active';
+export const IFNAMES_FILE = '/etc/xvpn/ifnames.json';
 export const VAR_DIR = '/var/etc/xvpn';
 export const RUN_DIR = '/var/run/xvpn';
 export const CONFIG_FILE = '/var/etc/xvpn/config.json';
 export const INDEX_FILE = '/var/etc/xvpn/index.json';
 export const NFT_FILE = '/var/etc/xvpn/xvpn.nft';
 export const STATE_FILE = '/var/run/xvpn/state.json';
+export const FW_WANT_FILE = '/var/run/xvpn/fw_want';
+export const FW_MODE_FILE = '/var/run/xvpn/fw_mode';
+export const FW_ERROR_FILE = '/var/run/xvpn/fw_error';
+export const FW_LOCK_FILE = '/var/lock/xvpn-fw';
 
 export function read_json(path) {
 	let s = readfile(path);

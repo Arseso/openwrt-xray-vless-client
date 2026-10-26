@@ -1,14 +1,15 @@
 #!/usr/bin/ucode
 // SPDX-License-Identifier: MIT
-// xvpn command line: generate | fw-apply [passthrough] | fw-remove | update [sid|all]
+// xvpn command line: generate | fw-apply [passthrough] | fw-guard | fw-refresh | fw-remove | update [sid|all]
 
 'use strict';
 
-import { readfile, unlink, access } from 'fs';
+import { readfile, unlink, access, open } from 'fs';
 import * as ubus from 'ubus';
 import {
-	load_config, read_json, write_json, mkdir_p, log, run, shq,
-	ACTIVE_FILE, CONFIG_FILE, INDEX_FILE, VAR_DIR
+	load_config, read_json, write_json, write_file, mkdir_p, log, run, shq,
+	ACTIVE_FILE, CONFIG_FILE, INDEX_FILE, VAR_DIR, RUN_DIR,
+	FW_WANT_FILE, FW_MODE_FILE, FW_ERROR_FILE, FW_LOCK_FILE
 } from 'xvpn.util';
 import { all_servers, update } from 'xvpn.subscription';
 import { build_index, generate } from 'xvpn.xrayconf';
@@ -18,6 +19,49 @@ const cfg = load_config();
 
 function xray_ok(path) {
 	return run(`${shq(cfg.main.xray_bin)} run -test -c ${shq(path)} >/dev/null 2>&1`).code == 0;
+}
+
+const MODES = { full: {}, passthrough: { passthrough: true }, block: { block: true }, minimal: { minimal: true } };
+
+// hotplug, init.d and the daemon run fw-* concurrently: one at a time, the lock is
+// released when the process exits
+function fw_lock() {
+	mkdir_p(substr(FW_LOCK_FILE, 0, rindex(FW_LOCK_FILE, '/')));
+	let f = open(FW_LOCK_FILE, 'w');
+	f?.lock('x');
+	return f;
+}
+
+// Applies the wanted mode (full | passthrough | block; null: the last wanted one, fw-refresh).
+// When nft rejects it, falls back to block, then minimal (fail closed); FW_MODE_FILE gets
+// what is applied and FW_ERROR_FILE the error until the wanted mode applies.
+function fw(want) {
+	let lock = fw_lock();
+	want ??= readfile(FW_WANT_FILE);
+	if (!MODES[want])
+		return true;
+
+	mkdir_p(RUN_DIR);
+	write_file(FW_WANT_FILE, want);
+	let res = resolve(cfg, ubus.connect());
+	let err = apply(cfg, res, MODES[want]);
+	if (err == null) {
+		write_file(FW_MODE_FILE, want);
+		unlink(FW_ERROR_FILE);
+		return true;
+	}
+
+	for (let m in [ 'block', 'minimal' ]) {
+		if (m == want)
+			continue;
+		if (apply(cfg, res, MODES[m]) == null) {
+			write_file(FW_MODE_FILE, m);
+			log(`VPN clients are blocked (${m}) until the firewall rules are fixed`);
+			break;
+		}
+	}
+	write_file(FW_ERROR_FILE, `firewall rules failed: ${err}`);
+	return false;
 }
 
 function active_port() {
@@ -59,14 +103,25 @@ case 'generate': {
 	exit(length(servers) ? 0 : 3);
 }
 
-case 'fw-apply': {
-	let res = resolve(cfg, ubus.connect());
-	exit(apply(cfg, res, { passthrough: ARGV[1] == 'passthrough' }) ? 0 : 1);
-}
+case 'fw-apply':
+	exit(fw(ARGV[1] == 'passthrough' ? 'passthrough' : 'full') ? 0 : 1);
 
-case 'fw-remove':
+// xray is not running (boot, stop with the service enabled): clients do not go around the VPN
+case 'fw-guard':
+	exit(fw(cfg.access.killswitch ? 'block' : 'passthrough') ? 0 : 1);
+
+// devices changed (a wifi came up) or fw4 flushed the tables: the wanted mode again
+case 'fw-refresh':
+	exit(fw(null) ? 0 : 1);
+
+case 'fw-remove': {
+	let lock = fw_lock();
 	remove(cfg);
+	unlink(FW_WANT_FILE);
+	unlink(FW_MODE_FILE);
+	unlink(FW_ERROR_FILE);
 	exit(0);
+}
 
 case 'update': {
 	let sid = ARGV[1] ?? 'all', port = active_port(), out = {}, changed = false;
@@ -84,6 +139,6 @@ case 'update': {
 }
 
 default:
-	warn('usage: cli.uc generate | fw-apply [passthrough] | fw-remove | update [sid|all]\n');
+	warn('usage: cli.uc generate | fw-apply [passthrough] | fw-guard | fw-refresh | fw-remove | update [sid|all]\n');
 	exit(1);
 }

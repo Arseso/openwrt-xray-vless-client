@@ -1,5 +1,16 @@
 #!/bin/sh
 
 mkdir -p /etc/xvpn/subs
+# postinst does not enable new init scripts on upgrade
+/etc/init.d/xvpn-guard enable
+
+# fw4 flush deletes our tables too: the include restores them after firewall start/reload
+uci -q get firewall.xvpn >/dev/null || uci -q batch <<EOF
+set firewall.xvpn=include
+set firewall.xvpn.type=script
+set firewall.xvpn.path=/usr/share/xvpn/firewall.include
+set firewall.xvpn.fw4_compatible=1
+commit firewall
+EOF
 rm -rf /tmp/luci-indexcache* /tmp/luci-modulecache
 exit 0
