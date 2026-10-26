@@ -57,6 +57,7 @@ function errorText(err) {
 	return {
 		'busy': _('Busy, try again later'),
 		'not running': _('The daemon is not running'),
+		'timeout': _('The daemon did not answer in time, the request may still be carried out'),
 		'unknown server': _('The server is no longer in the list, reload the page'),
 	}[err] ?? err ?? _('unknown error');
 }
@@ -136,8 +137,9 @@ return view.extend({
 		// running: false when the daemon is not on ubus; enabled and the router time come with it
 		return L.resolveDefault(callStatus(), {}).then((status) => {
 			const up = (status.running === true);
-			// counted from the last attempt: a hung xray must not be queried on every poll
-			const due = up && status.enabled && !(status.time - this.statsAt < STATS_EVERY);
+			// counted from the last attempt: a hung xray must not be queried on every poll;
+			// with xray down the query would wait for its timeout and stall rpcd
+			const due = up && status.enabled && status.state != 'xray_down' && !(status.time - this.statsAt < STATS_EVERY);
 			if (due)
 				this.statsAt = status.time;
 			return Promise.all([
@@ -196,6 +198,7 @@ return view.extend({
 	// confirm: [ title, text, button ] of a dialog before the action
 	button(key, cls, text, disabled, fn, done, confirm) {
 		const busy = !!this.busy[key];
+		this.used[key] = true;
 		const btn = this.buttons[key] ??= E('button', { 'click': () => {
 			const action = btn.xvpnAction;
 			return action.confirm ? this.confirm(key, action) : this.run(key, action);
@@ -223,6 +226,8 @@ return view.extend({
 
 	update([ status, servers, subs, sample, fw ]) {
 		const up = (status.running === true);
+		// the daemon is on ubus but did not answer in 2 s
+		const hung = !up && (status.timeout === true);
 		const enabled = (status.enabled === true);
 		const now = status.time ?? Math.floor(Date.now() / 1000);
 		const list = (up ? status.servers : servers.servers) ?? [];
@@ -243,6 +248,7 @@ return view.extend({
 		if (sel && !sel.isCollapsed && this.root.contains(sel.anchorNode))
 			return;
 
+		this.used = {};
 		for (let s of list)
 			byId[s.id] = s;
 		const active = byId[activeId];
@@ -252,6 +258,9 @@ return view.extend({
 		if (!enabled)
 			alerts.push(E('div', { 'class': 'alert-message notice' },
 				_('The service is disabled: VPN clients are not routed through xray.')));
+		else if (hung)
+			alerts.push(E('div', { 'class': 'alert-message warning' },
+				_('The xvpnd daemon does not answer: it is busy or hung. If this message stays, restart the service.')));
 		else if (!up)
 			alerts.push(E('div', { 'class': 'alert-message warning' },
 				_('The xvpnd daemon is not running. It is restarted by procd within seconds; if this message stays, check the log.')));
@@ -315,7 +324,8 @@ return view.extend({
 			E('h3', {}, _('Status')),
 			actions,
 			info([
-				[ _('Service'), enabled ? (up ? _('Enabled, running') : _('Enabled, daemon not running')) : _('Disabled') ],
+				[ _('Service'), enabled ? (up ? _('Enabled, running') : hung ? _('Enabled, daemon not answering')
+					: _('Enabled, daemon not running')) : _('Disabled') ],
 				up ? [ _('State'), state ] : null,
 				[ _('Active server'), active
 					? [ E('strong', {}, [ txt(active.name) ]), txt(' (' + [ active.proto, active.sub_name ].filter((x) => x).join(', ') + ')') ]
@@ -420,6 +430,11 @@ return view.extend({
 			E('h3', {}, _('Servers')),
 			table(srvTitles, srvRows, _('No servers yet. Add a subscription or a link on the "Subscriptions" tab.')),
 		]);
+
+		// buttons of servers that left the list are dropped, a running one is kept until it is done
+		for (let key in this.buttons)
+			if (!this.used[key] && !this.busy[key])
+				delete this.buttons[key];
 
 		// buttons are kept across redraws: give the focus back to the one that had it
 		const focused = document.activeElement;
