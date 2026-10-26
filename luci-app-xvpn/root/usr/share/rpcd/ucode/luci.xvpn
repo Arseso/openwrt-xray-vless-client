@@ -18,7 +18,35 @@ function bg(cmd) {
 	system(`(${cmd}) >/dev/null 2>&1 </dev/null &`);
 }
 
+// LuCI cannot call the daemon itself: uhttpd adds ubus_rpc_session to the arguments
+// and the ucode ubus object rejects arguments missing from its policy
+function daemon(method, args) {
+	return connect()?.call('xvpn', method, args ?? {});
+}
+
 const methods = {
+	status: {
+		call: function() {
+			let d = daemon('status');
+			return d ? { running: true, ...d } : { running: false };
+		}
+	},
+
+	test: {
+		call: function() {
+			return daemon('test') ?? { ok: false, error: 'not running' };
+		}
+	},
+
+	select: {
+		args: { id: 'id' },
+		call: function(req) {
+			if (!req.args?.id)
+				return { ok: false, error: 'invalid id' };
+			return daemon('select', { id: req.args.id }) ?? { ok: false, error: 'not running' };
+		}
+	},
+
 	servers: {
 		call: function() {
 			let cfg = load_config();
@@ -122,7 +150,8 @@ const methods = {
 				}
 			}
 			catch (e) { }
-			return { traffic };
+			// router clock: the UI counts uptime, ages and speed from it, not from the browser
+			return { traffic, time: time() };
 		}
 	},
 

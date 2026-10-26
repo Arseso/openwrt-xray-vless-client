@@ -1,0 +1,370 @@
+// SPDX-License-Identifier: MIT
+// Status tab: daemon state, active server, subscriptions, servers and service actions.
+'use strict';
+'require view';
+'require rpc';
+'require poll';
+'require ui';
+'require uci';
+'require dom';
+
+const callStatus = rpc.declare({ object: 'luci.xvpn', method: 'status' });
+const callTest = rpc.declare({ object: 'luci.xvpn', method: 'test' });
+const callSelect = rpc.declare({ object: 'luci.xvpn', method: 'select', params: [ 'id' ] });
+const callServers = rpc.declare({ object: 'luci.xvpn', method: 'servers' });
+const callSubscriptions = rpc.declare({ object: 'luci.xvpn', method: 'subscriptions' });
+const callStats = rpc.declare({ object: 'luci.xvpn', method: 'stats' });
+const callFirewall = rpc.declare({ object: 'luci.xvpn', method: 'firewall' });
+const callUpdate = rpc.declare({ object: 'luci.xvpn', method: 'update' });
+const callService = rpc.declare({ object: 'luci.xvpn', method: 'service', params: [ 'action' ] });
+
+// [ label class, text ]; a state missing here is shown as is
+function stateInfo(state) {
+	return {
+		starting: [ 'notice', _('Starting') ],
+		connected: [ 'success', _('Connected') ],
+		degraded: [ 'warning', _('Unstable: health checks fail') ],
+		failover: [ 'warning', _('Switching to another server') ],
+		wan_down: [ 'warning', _('No internet on WAN') ],
+		no_servers: [ 'error', _('No live servers') ],
+		testing: [ 'notice', _('Testing servers') ],
+		error: [ 'error', _('Firewall error: VPN clients are blocked') ],
+		xray_down: [ 'error', _('xray is not running') ],
+	}[state] ?? [ 'notice', state ];
+}
+
+function fwModeText(mode) {
+	return {
+		full: _('Full: VPN clients go through the tunnel'),
+		passthrough: _('Passthrough: VPN clients go directly'),
+		block: _('Block: VPN clients have no internet'),
+		minimal: _('Minimal block: bridge rules were not applied'),
+	}[mode] ?? mode;
+}
+
+function errorText(err) {
+	return {
+		'busy': _('Busy, try again later'),
+		'not running': _('The daemon is not running'),
+	}[err] ?? err ?? _('unknown error');
+}
+
+// server names, subscription titles and errors come from outside: text nodes only
+function txt(s) {
+	return document.createTextNode(s ?? '');
+}
+
+// themes have no red label (.important is the primary color in bootstrap): 'error' is inline
+function label(cls, text) {
+	if (cls == 'error')
+		return E('span', { 'class': 'label', 'style': 'background-color:var(--error-color-high, #c00);color:#fff' }, [ txt(text) ]);
+	return E('span', { 'class': 'label ' + cls }, [ txt(text) ]);
+}
+
+// two largest units: '%t' prints "0h 0m 6s"
+function dur(sec) {
+	sec = Math.max(0, Math.floor(sec));
+	const d = Math.floor(sec / 86400), h = Math.floor(sec / 3600) % 24, m = Math.floor(sec / 60) % 60, s = sec % 60;
+	if (d)
+		return _('%dd %dh').format(d, h);
+	if (h)
+		return _('%dh %dm').format(h, m);
+	if (m)
+		return _('%dm %ds').format(m, s);
+	return _('%ds').format(s);
+}
+
+function bytes(n) {
+	return '%1024.2mB'.format(n ?? 0);
+}
+
+function ago(now, at) {
+	return at ? _('%s ago').format(dur(now - at)) : _('never');
+}
+
+function notify(msg, type) {
+	if (ui.addTimeLimitedNotification)
+		ui.addTimeLimitedNotification(null, E('p', {}, [ txt(msg) ]), 5000, type);
+	else
+		ui.addNotification(null, E('p', {}, [ txt(msg) ]), type);
+}
+
+function table(titles, rows, empty) {
+	return E('table', { 'class': 'table' }, [
+		E('tr', { 'class': 'tr table-titles' }, titles.map((t) => E('th', { 'class': 'th' }, t))),
+		...(rows.length ? rows : [
+			E('tr', { 'class': 'tr placeholder' }, E('td', { 'class': 'td' }, E('em', {}, empty)))
+		])
+	]);
+}
+
+function row(titles, cells, cls) {
+	return E('tr', { 'class': 'tr' + (cls ? ' ' + cls : '') },
+		cells.map((c, i) => E('td', { 'class': 'td', 'data-title': titles[i] }, Array.isArray(c) ? c : [ c ])));
+}
+
+function info(rows) {
+	return E('table', { 'class': 'table' }, rows.filter((r) => r).map((r) => E('tr', { 'class': 'tr' }, [
+		E('td', { 'class': 'td left', 'width': '33%' }, r[0]),
+		E('td', { 'class': 'td left' }, Array.isArray(r[1]) ? r[1] : [ r[1] ]),
+	])));
+}
+
+return view.extend({
+	handleSaveApply: null,
+	handleSave: null,
+	handleReset: null,
+
+	load() {
+		uci.unload('xvpn');
+		return Promise.all([
+			// running: false when the daemon is not on ubus
+			L.resolveDefault(callStatus(), null),
+			L.resolveDefault(callServers(), {}),
+			L.resolveDefault(callSubscriptions(), {}),
+			L.resolveDefault(callStats(), {}),
+			L.resolveDefault(callFirewall(), {}),
+			L.resolveDefault(uci.load('xvpn'), null),
+		]);
+	},
+
+	refresh() {
+		return this.load().then((data) => this.update(data));
+	},
+
+	// runs the action of a button, keeps it spinning until the call returns
+	run(key) {
+		const btn = this.buttons[key], { fn, done } = btn.xvpnAction;
+		this.busy[key] = true;
+		btn.classList.add('spinning');
+		btn.disabled = true;
+		return Promise.resolve().then(fn).then((res) => {
+			if (typeof(res) == 'number' && res != 0)
+				notify(_('Request failed: %s').format(rpc.getStatusText(res)), 'error');
+			else if (res?.ok === false)
+				notify(_('Request failed: %s').format(errorText(res.error)), 'error');
+			else if (done)
+				notify(done, 'info');
+		}).catch((e) => notify(e.message, 'error')).finally(() => {
+			delete this.busy[key];
+			return this.refresh();
+		});
+	},
+
+	// the page is redrawn on every poll: buttons are kept, so a click in progress is not lost
+	button(key, cls, text, disabled, fn, done) {
+		const busy = !!this.busy[key];
+		const btn = this.buttons[key] ??= E('button', { 'click': () => this.run(key) });
+		btn.className = 'cbi-button ' + cls + (busy ? ' spinning' : '');
+		btn.disabled = !!(disabled || busy);
+		btn.textContent = text;
+		btn.xvpnAction = { fn, done };
+		return btn;
+	},
+
+	update([ status, servers, subs, stats, fw ]) {
+		const up = (status?.running === true);
+		const enabled = (uci.get('xvpn', 'main', 'enabled') == '1');
+		const now = stats.time ?? Math.floor(Date.now() / 1000);
+		const list = (up ? status.servers : servers.servers) ?? [];
+		const activeId = up ? status.active : servers.active;
+		const byId = {};
+		const traffic = stats.traffic ?? {};
+		const fwError = (fw.error ?? '').trim();
+		const fwWant = (fw.want ?? '').trim(), fwMode = (fw.mode ?? '').trim();
+		const updating = (up && status.updating) || !!subs.updating;
+
+		for (let s of list)
+			byId[s.id] = s;
+		const active = byId[activeId];
+		const name = (id) => byId[id]?.name ?? id ?? '?';
+
+		let down = 0, upl = 0;
+		for (let id in traffic) {
+			down += traffic[id].down ?? 0;
+			upl += traffic[id].up ?? 0;
+		}
+		// counters restart with xray: no speed until the next sample
+		let speed = null;
+		const prev = this.prevStats;
+		if (prev && now > prev.time && down >= prev.down && upl >= prev.up)
+			speed = [ (down - prev.down) / (now - prev.time), (upl - prev.up) / (now - prev.time) ];
+		this.prevStats = { time: now, down, up: upl };
+
+		const alerts = [];
+		if (!enabled)
+			alerts.push(E('div', { 'class': 'alert-message notice' },
+				_('The service is disabled: VPN clients are not routed through xray.')));
+		else if (!up)
+			alerts.push(E('div', { 'class': 'alert-message warning' },
+				_('The xvpnd daemon is not running. It is restarted by procd within seconds; if this message stays, check the log.')));
+		if (fwError)
+			alerts.push(E('div', { 'class': 'alert-message error' }, [
+				E('strong', {}, _('Firewall rules are not applied, VPN clients are blocked:')), ' ', txt(fwError),
+			]));
+		if (up && status.passthrough)
+			alerts.push(E('div', { 'class': 'alert-message warning' },
+				_('Kill switch is off and there are no live servers: VPN clients go to the internet directly.')));
+
+		const actions = E('div', { 'class': 'cbi-section-actions', 'style': 'margin-bottom:1em' }, [
+			this.button('test', 'cbi-button-action', _('Test all'), !up || status.testing,
+				() => callTest(), _('Testing all servers…')),
+			' ',
+			this.button('update', 'cbi-button-action', _('Update subscriptions'), updating,
+				() => callUpdate(), _('Updating subscriptions…')),
+			' ',
+			enabled ? this.button('restart', 'cbi-button-reload', _('Restart'), false,
+				() => callService('restart'), _('Restarting the service…')) : '',
+			enabled ? ' ' : '',
+			enabled
+				? this.button('service', 'cbi-button-negative', _('Disable'), false,
+					() => callService('stop'), _('Stopping the service…'))
+				: this.button('service', 'cbi-button-positive', _('Enable'), false,
+					() => callService('start'), _('Starting the service…')),
+		]);
+
+		let state;
+		if (up) {
+			const [ cls, text ] = stateInfo(status.state);
+			state = [ label(cls, text) ];
+			if (status.testing && status.state != 'testing')
+				state.push(' ', label('notice', _('testing servers')));
+			if (updating)
+				state.push(' ', label('notice', _('updating subscriptions')));
+		}
+
+		const sw = up ? status.last_switch : null;
+		const lat = active?.latency;
+		const sinceTitle = (up && status.state == 'connected') ? _('Connected for') : _('Active for');
+		const fwText = fwMode
+			? fwModeText(fwMode) + ((fwWant && fwWant != fwMode) ? ' ' + _('(requested: %s)').format(fwWant) : '')
+			: _('not applied');
+
+		const statusSection = E('div', { 'class': 'cbi-section' }, [
+			E('h3', {}, _('Status')),
+			actions,
+			info([
+				[ _('Service'), enabled ? (up ? _('Enabled, running') : _('Enabled, daemon not running')) : _('Disabled') ],
+				up ? [ _('State'), state ] : null,
+				[ _('Active server'), active
+					? [ E('strong', {}, [ txt(active.name) ]), txt(' (' + [ active.proto, active.sub_name ].filter((x) => x).join(', ') + ')') ]
+					: (activeId ? txt(activeId) : E('em', {}, _('none'))) ],
+				(up && active) ? [ _('Latency'), (lat == null) ? '—' : (lat < 0)
+					? [ label('error', _('failed')), ' ', txt(ago(now, active.tested)) ]
+					: txt(_('%d ms').format(lat) + ', ' + ago(now, active.tested)) ] : null,
+				(up && active && status.since) ? [ sinceTitle, txt(dur(now - status.since)) ] : null,
+				(up && status.fails > 0) ? [ _('Failed checks in a row'), txt(String(status.fails)) ] : null,
+				sw ? [ _('Last switch'), txt(
+					((sw.from && sw.from != sw.to) ? name(sw.from) + ' → ' : '') + name(sw.to) + ': ' + (sw.reason ?? '') + ', ' + ago(now, sw.at)) ] : null,
+				(up && status.last_test) ? [ _('Last test of all servers'), txt(ago(now, status.last_test)) ] : null,
+				(up && status.last_error && status.last_error.trim() != fwError)
+					? [ _('Last error'), E('span', { 'style': 'color:var(--error-color-high, #c00)' }, [ txt(status.last_error) ]) ] : null,
+				[ _('Firewall rules'), txt(fwText) ],
+				[ _('Traffic through xray'), txt('↓ ' + bytes(down) + '  ↑ ' + bytes(upl) +
+					(speed ? '  (↓ ' + bytes(speed[0]) + '/s  ↑ ' + bytes(speed[1]) + '/s)' : '')) ],
+			]),
+		]);
+
+		const subTitles = [ _('Name'), _('Servers'), _('Traffic'), _('Expires'), _('Updated'), _('Next update'), _('Status') ];
+		const subRows = (subs.subscriptions ?? []).map((s) => {
+			const ui_ = s.userinfo ?? {};
+			let trafficCell = '—';
+			if (s.userinfo) {
+				const used = (ui_.upload ?? 0) + (ui_.download ?? 0);
+				if (ui_.total > 0) {
+					const pct = Math.min(100, Math.round(used / ui_.total * 100));
+					trafficCell = E('div', {
+						'class': 'cbi-progressbar',
+						'title': '%s / %s (%d%%)'.format(bytes(used), bytes(ui_.total), pct),
+					}, E('div', { 'style': 'width:%d%%'.format(pct) }));
+				}
+				else
+					trafficCell = txt(bytes(used) + ' / ∞');
+			}
+
+			let expires = '—';
+			if (ui_.expire > 0) {
+				const left = ui_.expire - now;
+				const date = new Date(ui_.expire * 1000).toLocaleDateString();
+				expires = (left <= 0)
+					? label('error', _('expired %s').format(date))
+					: (left < 3 * 86400)
+						? label('warning', _('%s (%d days left)').format(date, Math.floor(left / 86400)))
+						: txt(_('%s (%d days left)').format(date, Math.floor(left / 86400)));
+			}
+			else if (s.userinfo)
+				expires = txt(_('never'));
+
+			const names = [ E('strong', {}, [ txt(s.name ?? s.id) ]) ];
+			if (s.title && s.title != s.name)
+				names.push(E('br'), E('small', {}, [ txt(s.title) ]));
+
+			return row(subTitles, [
+				names,
+				txt(String(s.count ?? 0) + (s.skipped ? ' ' + _('(%d skipped)').format(s.skipped) : '')),
+				trafficCell,
+				expires,
+				txt(ago(now, s.last_ok)),
+				!s.enabled ? E('em', {}, _('disabled'))
+					: (s.due_in == null) ? '—'
+					: txt((s.due_in <= 0) ? _('due') : _('in %s').format(dur(s.due_in))),
+				s.error ? E('span', { 'style': 'color:var(--error-color-high, #c00)' }, [ txt(s.error) ])
+					: s.last_ok ? label('success', _('OK')) : '—',
+			], s.enabled ? null : 'disabled');
+		});
+
+		const subsSection = E('div', { 'class': 'cbi-section' }, [
+			E('h3', {}, _('Subscriptions')),
+			table(subTitles, subRows, _('No subscriptions. Add one on the "Subscriptions" tab.')),
+		]);
+
+		const srvTitles = [ _('Name'), _('Protocol'), _('Address'), _('Subscription'), _('Latency'), _('Traffic'), '' ];
+		const srvRows = list.map((s) => {
+			const isActive = (s.id == activeId);
+			const t = traffic[s.id];
+			let ping = '—';
+			if (s.latency != null)
+				ping = (s.latency < 0) ? label('error', _('failed'))
+					: E('span', { 'title': ago(now, s.tested) }, [ txt(_('%d ms').format(s.latency)) ]);
+
+			const nameCell = [ isActive ? E('strong', {}, [ txt(s.name) ]) : txt(s.name) ];
+			if (isActive)
+				nameCell.push(' ', label('success', _('active')));
+			if (s.quarantined)
+				nameCell.push(' ', label('warning', _('quarantine')));
+
+			return row(srvTitles, [
+				nameCell,
+				txt(s.proto),
+				txt((s.address ?? '') + (s.port ? ':' + s.port : '')),
+				s.sub_name ? txt(s.sub_name) : E('em', {}, _('manual')),
+				ping,
+				t ? txt('↓ ' + bytes(t.down) + ' ↑ ' + bytes(t.up)) : '—',
+				isActive ? '' : this.button('select:' + s.id, 'cbi-button-apply', _('Use'), !up,
+					() => callSelect(s.id), _('Switching to %s…').format(s.name)),
+			]);
+		});
+
+		const srvSection = E('div', { 'class': 'cbi-section' }, [
+			E('h3', {}, _('Servers')),
+			table(srvTitles, srvRows, _('No servers yet. Add a subscription or a link on the "Subscriptions" tab.')),
+		]);
+
+		dom.content(this.root, [ ...alerts, statusSection, subsSection, srvSection ]);
+	},
+
+	render(data) {
+		this.busy = {};
+		this.buttons = {};
+		this.root = E('div');
+		this.update(data);
+		poll.add(() => this.refresh(), 5);
+
+		return E('div', { 'class': 'cbi-map' }, [
+			E('h2', {}, _('XVPN')),
+			E('div', { 'class': 'cbi-map-descr' },
+				_('VPN client on xray-core with subscriptions and automatic failover between servers.')),
+			this.root,
+		]);
+	},
+});

@@ -55,7 +55,8 @@
    └─────────────────────────────────────────────────────────┘
                     ▲ ubus
    LuCI (JS-вьюхи) ──► rpcd ucode-плагин `luci.xvpn` (офлайн-операции;
-                       обновление подписок — через `ubus xvpn update`)
+                       обновление подписок — через `ubus xvpn update`;
+                       status / test / select — прокси к демону)
 ```
 
 ### 3.1 Файлы пакета
@@ -81,7 +82,7 @@ luci-app-xvpn/
   root/usr/share/xvpn/xvpnd.uc                 демон
   root/usr/share/xvpn/firewall.include         fw4 include: вернуть правила после fw4 flush
 tests/                                         ucode-тесты + фикстуры
-scripts/{test,build}.sh                        тесты и сборка ipk в docker
+scripts/{test,itest,build,luci}.sh             тесты, сборка ipk и LuCI для ручной проверки в docker
 ```
 
 ### 3.2 Рантайм-файлы
@@ -242,10 +243,15 @@ Wi-Fi SSID → ifname: `ubus call network.wireless status` (`interfaces[].sectio
 | Настройки | проверка (URL, интервалы, порог, таймаут, авто-лучший, гистерезис, карантин, параллельность), порты, метки, лог-уровень, путь к xray |
 | Журнал | `logread` по `xvpn`/`xray` |
 
+LuCI обращается к демону только через rpcd `luci.xvpn`: uhttpd добавляет к аргументам каждого вызова `ubus_rpc_session`, а ubus-объект на ucode отклоняет аргументы вне своей политики (`INVALID_ARGUMENT`). Поэтому в `luci.xvpn` есть прокси `status` (ответ демона плюс `running: true`; без демона — `{running: false}`), `test` и `select {id}`, а в ACL нет объекта `xvpn`. `luci.xvpn stats` возвращает и `time` роутера: от него вкладка «Статус» считает аптайм, «N назад» и скорость, а не от часов браузера.
+
+Вкладка «Статус» опрашивает rpcd каждые 5 с (`poll`) и перерисовывается целиком, сохраняя узлы кнопок, чтобы клик во время перерисовки не терялся. Неизвестное состояние демона показывается как есть.
+
 ## 9. Сборка и тесты
 
 - Тесты (docker, образ `openwrt/rootfs:x86-64-24.10.4`): `scripts/test.sh` — парсер ссылок/подписок, генерация конфига, `xray run -test` на сгенерированном конфиге, рендер nft (все режимы) и `nft -c` (проверка синтаксиса), резолв SSID из кэша.
 - Интеграционный тест `scripts/itest.sh` (procd в контейнере, `NAME=` для параллельных запусков): выбор сервера, failover, подписка; клиент в netns за портом моста и «интернет» в другом netns, fw4 запущен — туннель работает, прямого трафика нет при загрузке (guard), restart, stop, сломанном `nft` (fallback из passthrough, `state: error`, `fw-refresh` сохраняет ошибку, `minimal` без bridge); правила возвращаются после fw4 flush; `fw-remove` ждёт блокировку; правила снимаются при `enabled=0` и `disable`.
+- LuCI для ручной проверки вкладок: `scripts/luci.sh` (procd в контейнере, `luci` + пакет из рабочей копии, два локальных VLESS-сервера — живой и мёртвый — и подписка с `subscription-userinfo` через CGI uhttpd) → http://127.0.0.1:8019, root / тестовый пароль из скрипта; `sync` — скопировать файлы пакета заново (с сохранением `/etc/config/xvpn`), `stop` — удалить контейнер. Переменные: `DOCKER`, `NAME`, `PORT`, `PASS`.
 - Сборка ipk (docker, `openwrt/sdk:mediatek-filogic-24.10.4`): `scripts/build.sh` → `dist/luci-app-xvpn_*.ipk` (и `luci-i18n-xvpn-*.ipk`, когда появятся po-файлы). Из фида luci (ветка `openwrt-24.10`) берутся только `luci.mk`, `luci-base` и `csstidy`, и собираются лишь их host-утилиты; сам пакет собирается с `NO_DEPS=1` — иначе SDK компилировал бы все рантайм-зависимости (luci-base, xray-core вместе с Go), а пакету архитектуры `all` они нужны только в `Depends`. Пакет архитектуры `all`, так что SDK под другую архитектуру тоже подошёл бы. Переменные: `DOCKER` (по умолчанию `docker --context default`), `IMAGE`, `LUCI_FEED`.
 - Установка на роутер:
   ```
