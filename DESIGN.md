@@ -78,7 +78,7 @@ luci-app-xvpn/
   root/usr/share/ucode/xvpn/subscription.uc    загрузка подписок, кэш, фильтры
   root/usr/share/ucode/xvpn/xrayconf.uc        генерация config.json и индекса серверов
   root/usr/share/ucode/xvpn/firewall.uc        nft-правила и ip rule/route
-  root/usr/share/xvpn/cli.uc                   CLI: generate / ifnames / fw-apply / fw-guard / fw-refresh / fw-remove / update
+  root/usr/share/xvpn/cli.uc                   CLI: generate / ifnames / ifnames-wait / fw-apply / fw-guard / fw-refresh / fw-remove / update
   root/usr/share/xvpn/xvpnd.uc                 демон
   root/usr/share/xvpn/firewall.include         fw4 include: вернуть правила после fw4 flush
 tests/                                         ucode-тесты + фикстуры
@@ -97,7 +97,8 @@ scripts/{test,build}.sh                        тесты и сборка ipk в
 | `/var/run/xvpn/state.json` | состояние демона (для rpcd, когда демон занят) | демон |
 | `/var/run/xvpn/fw_want` | запрошенный режим правил: `full` / `passthrough` / `block` | `cli.uc fw-*` |
 | `/var/run/xvpn/fw_mode` | применённый режим: запрошенный или fallback `block` / `minimal` | `cli.uc fw-*` |
-| `/var/run/xvpn/fw_error` | ошибка nft; есть, пока запрошенный режим не применился; статус — `error` | `cli.uc fw-*` |
+| `/var/run/xvpn/fw_error` | ошибка nft или ненайденного SSID; есть, пока запрошенный режим не применился; статус — `error` | `cli.uc fw-*` |
+| `/var/run/xvpn/fw_warn` | предупреждение: имена VPN-SSID не зафиксированы из-за чужих незакоммиченных правок `wireless` | `cli.uc ifnames` |
 | `/var/lock/xvpn-fw` | блокировка: `fw-*` выполняются по одному | `cli.uc fw-*` |
 | `/var/run/xvpn/updating` | симлинк на pid идущего `cli.uc update` — единственный флаг «идёт обновление» | `cli.uc update` |
 
@@ -189,12 +190,14 @@ ubus `xvpn`: `status` → `{state, active, since, fails, servers:[{id,name,proto
 
 ```
 table bridge xvpn {
-  set ports { type ifname; elements = { "lan2", "xvpn-ap0" } }        # порты + ifname SSID
+  set ports { type ifname; flags interval; auto-merge;
+              elements = { "lan2", "xvpn-ap0", "xvpn-ap0.*" } }        # порты + ifname SSID с маской
   chain pre { type filter hook prerouting priority -210;
               iifname @ports meta mark set meta mark | CLIENT }
 }
 table inet xvpn {
-  set nets     { type ifname; elements = { "br-guest", "xvpn-ap0" } }   # сети + ifname SSID
+  set nets     { type ifname; flags interval; auto-merge;
+                 elements = { "br-guest", "xvpn-ap0", "xvpn-ap0.*" } }   # сети + ifname SSID с маской
   set bypass4  { type ipv4_addr; flags interval; … RFC1918, CGNAT, loopback, link-local, multicast … }
   set bypass6  { type ipv6_addr; flags interval; ::1, fc00::/7, fe80::/10, ff00::/8 }
   chain mark     { prerouting, mangle-10: iifname @nets → mark |= CLIENT }
@@ -209,10 +212,10 @@ ip rule add fwmark TPROXY/TPROXY table 100 ; ip route add local default dev lo t
 
 Точки доступа → имена устройств (`resolve` в `firewall.uc`, при каждом `fw-*`):
 - **Сеть** → L3-устройство и устройство из `network.interface dump` (когда netifd её поднял) плюс `network.<имя>.device` из UCI (до netifd — guard при загрузке); `@алиасы` пропускаются. У Wi-Fi-only сети (без `device`) L3-устройство — сам SSID, поэтому её SSID обрабатываются как выбранные SSID.
-- **SSID** → фиксированный `ifname` из UCI (§7.2) и текущий ifname из `network.wireless status` (до того как netifd применил фиксированное имя). Имя SSID попадает и в `bridge @ports` (SSID в мосту: в `inet` iifname — мост), и в `inet @nets` (SSID — сам L3-интерфейс, мост его не видит).
+- **SSID** → фиксированный `ifname` из UCI (§7.2) и текущий ifname из `network.wireless status` (до того как netifd применил фиксированное имя). Имя SSID попадает и в `bridge @ports` (SSID в мосту: в `inet` iifname — мост), и в `inet @nets` (SSID — сам L3-интерфейс, мост его не видит). Вместе с именем в наборы идёт маска `имя.*`: станции WDS (`xvpn-ap0.sta1`) и динамические VLAN (`xvpn-ap0.5`) — отдельные интерфейсы, без маски их клиенты шли бы мимо VPN. Маска с точкой не задевает чужие имена (`xvpn-ap1.*` не совпадает с `xvpn-ap10`); для имён длиннее 13 символов её нет — подынтерфейс не уложится в 15. Маски — это интервалы, поэтому наборы с `flags interval` и `auto-merge` (имя внутри маски, например `xvpn-ap0.5` в сети, иначе даёт «conflicting intervals»). Fail-closed для SSID с WDS/VLAN отвергнут: эти режимы рабочие, а маска покрывает их без потери функции.
 - **Порт** — как есть.
 
-Сервис перезагружается по изменениям `xvpn`, `wireless`, `network`; правила перечитываются без перезагрузки по hotplug: `net`/`add` для `DEVTYPE=wlan` (ждёт до 15 с, пока ifname появится в `network.wireless status`) и `iface`/`ifup` для сетей из `access.network`.
+Сервис перезагружается по изменениям `xvpn`, `wireless`, `network`; правила перечитываются без перезагрузки по hotplug: `net`/`add` и `net`/`move` для `DEVTYPE=wlan` (ждёт до 15 с, пока ifname появится в `network.wireless status`) и `iface`/`ifup` для сетей из `access.network`.
 
 Особенности:
 - Метка, выставленная в `bridge`-таблице, сохраняется в skb и видна в `inet` prerouting — так один SSID/порт уходит в VPN без выделения отдельной сети.
@@ -228,7 +231,7 @@ ip rule add fwmark TPROXY/TPROXY table 100 ; ip route add local default dev lo t
 | `block` | метки, reject forward в интернет и DNS клиентов к роутеру; без tproxy/fib/nat | `fw-guard` при kill switch; fallback при любой ошибке nft |
 | `minimal` | только `inet`: reject forward для `iifname @nets`; отдельные порты и SSID не закрыты | последний fallback, если не принят и `block` (нет `kmod-nft-bridge`) |
 
-Запрошенный режим (`fw_want`) и применённый (`fw_mode`) хранятся отдельно. `fw-refresh` применяет запрошенный, поэтому fallback и ошибка воспроизводятся сами, а `fw_error` удаляется только когда применился именно запрошенный режим. Все `fw-*` (init.d, демон, hotplug, include fw4) берут `/var/lock/xvpn-fw`, запрошенный режим читается уже под блокировкой. Устройства с именем длиннее 15 символов (IFNAMSIZ) отбрасываются с записью в лог: из-за них nft отверг бы весь файл. Без демона состояние правил отдаёт rpcd `luci.xvpn firewall` → `{want, mode, error}`.
+Запрошенный режим (`fw_want`) и применённый (`fw_mode`) хранятся отдельно. `fw-refresh` применяет запрошенный, поэтому fallback и ошибка воспроизводятся сами, а `fw_error` удаляется только когда применился именно запрошенный режим. Все `fw-*` (init.d, демон, hotplug, include fw4) берут `/var/lock/xvpn-fw`, запрошенный режим читается уже под блокировкой. Устройства с именем длиннее 15 символов (IFNAMSIZ) отбрасываются с записью в лог: из-за них nft отверг бы весь файл. Без демона состояние правил отдаёт rpcd `luci.xvpn firewall` → `{want, mode, error, warning}` (`warning` — из `fw_warn`, §7.2).
 
 Правила не исчезают, пока сервис включён (`main.enabled=1` и автозапуск `/etc/init.d/xvpn enable`):
 - **Загрузка.** `xvpn-guard` (START=18, раньше fw4=19 и network=20) ставит `fw-guard`. `uci-defaults` включает `xvpn-guard` при каждой установке и апгрейде (postinst при апгрейде новые init-скрипты не включает): ручное `disable` действует только до следующего апгрейда. Имена устройств — без netifd: сети из UCI (`network.<имя>.device`), SSID — фиксированные `wireless.<секция>.ifname` (§7.2). `xvpn` (START=95) атомарно заменяет таблицу на `full`. `xvpn-guard start` (в т.ч. из postinst) ничего не делает — работает только `boot`.
@@ -236,7 +239,7 @@ ip rule add fwmark TPROXY/TPROXY table 100 ; ip route add local default dev lo t
 - **Выключение.** Правила снимаются (`fw-remove`) только при `enabled=0` или выключенном автозапуске; при удалении пакета `default_prerm` сначала делает `disable`, потом `stop`.
 - **Ошибка nft (fail-closed).** `nft -f` не применяет файл частично — остаются прежние правила; затем `cli.uc` ставит `block`, пишет ошибку в `fw_error`, демон отдаёт `state: error`. Следующий успешный `fw-*` удаляет `fw_error`.
 - **fw4 flush.** `service firewall stop` / `restart` (`fw4 flush`) удаляет все таблицы nft, в том числе наши. Include `firewall.xvpn` (type script, `fw4_compatible`) выполняется после каждого start/reload fw4 и, если есть `fw_want`, а таблицы `inet xvpn` нет, вызывает `fw-refresh`. Между `firewall stop` и следующим `start` правил нет. `postrm` удаляет include.
-- **Wi-Fi поднялся позже, перезапуск радио, `wifi down; wifi up`.** У VPN-SSID фиксированное имя, оно в правилах с самого начала (guard берёт его из UCI) и при перезапуске не переходит к другому SSID — окна нет. hotplug `net`/`add` для `DEVTYPE=wlan` дожидается ifname в `network.wireless status` (до 15 с) и вызывает `fw-refresh`: убирает прежнее имя, если фиксированное ещё не было применено. Выключенный SSID (`disabled=1` или выключенное радио) остаётся в правилах только под своим фиксированным именем — его не займёт другой SSID.
+- **Wi-Fi поднялся позже, перезапуск радио, `wifi down; wifi up`.** У VPN-SSID фиксированное имя, оно в правилах с самого начала (guard берёт его из UCI) и при перезапуске не переходит к другому SSID — окна нет. hotplug `net` для `DEVTYPE=wlan` — `add` (интерфейс создан) и `move` (hostapd переименовал его на месте) — дожидается ifname в `network.wireless status` (до 15 с) и вызывает `fw-refresh`: убирает прежнее имя, которое мог занять другой SSID. Выключенный SSID (`disabled=1` или выключенное радио) остаётся в правилах только под своим фиксированным именем — его не займёт другой SSID.
 - **Сеть поднялась.** hotplug `iface`/`ifup` для сети из `access.network` вызывает `fw-refresh`: L3-устройство (pppoe, Wi-Fi-only сеть) могло появиться или смениться.
 - **SSID без имени (fail-closed).** Если у включённого VPN-SSID нет ни фиксированного, ни текущего имени (имя длиннее 15 символов, правка `wireless` не закоммичена), его клиентов правила не покрывают: `fw-*` ставит `block` для всех клиентов VPN (при запрошенном `passthrough` — `passthrough`: клиенты и так идут напрямую), пишет `access points not found: wifi "<секция>" (SSID "…") has no interface name` в `fw_error`, демон отдаёт `state: error`. Ошибка снимается следующим `fw-*`, когда имя нашлось или SSID выключен. Несуществующая секция или сеть ошибкой не считается — у неё нет клиентов.
 
@@ -244,9 +247,11 @@ ip rule add fwmark TPROXY/TPROXY table 100 ; ip route add local default dev lo t
 
 netifd раздаёт имена `phy1-ap0`, `phy1-ap1`… по порядку при каждом запуске радио: имя VPN-SSID неизвестно до подъёма Wi-Fi (загрузка, `wifi up`) и может перейти к другому SSID после перезапуска. Поэтому xvpn меняет конфиг пользователя — только в этом месте:
 - **Кому.** Выбранным SSID (`access.wifi`) и SSID Wi-Fi-only сетей из `access.network`. `cli.uc ifnames` (в начале каждого `start`/`reload` `init.d/xvpn`, в т.ч. при `enabled=0`) ставит им `option ifname 'xvpn-apN'` — наименьший свободный N. Своё имя, заданное пользователем (`option ifname` без префикса `xvpn-ap`), не трогается и используется как есть.
-- **Применение.** После `uci commit wireless` — `ubus call network reload` (то же, что `wifi reload`): netifd перезапускает радио с изменённым SSID, клиенты этого радио переподключаются (только при выборе или снятии выбора SSID). До перезапуска правила содержат и фиксированное, и текущее имя.
-- **Откат.** SSID, снятые с выбора, теряют `xvpn-apN` при следующем `reload` (выбор в LuCI вызывает его сам). `postrm` удаляет все `xvpn-apN` из `wireless`, но радио не перезапускает: пакет могут удалять через этот же Wi-Fi; прежние имена вернутся при следующем перезапуске радио.
-- **Незакоммиченные правки.** Если в `wireless` есть чужие незакоммиченные изменения (`uci changes wireless`), имена не меняются (иначе `commit` закоммитил бы и их) — в лог пишется предупреждение, правила работают по текущим именам из netifd.
+- **Пометка.** Секция, получившая имя от xvpn, помечается `option xvpn_ifname '1'`. Снимаются только помеченные имена; если пользователь потом сменил имя на своё (не `xvpn-apN`), удаляется только пометка.
+- **Применение.** После `uci commit wireless` — `ubus call network reload` (то же, что `wifi reload`). netifd в 24.10 делает reconf: `hostapd.uc` сопоставляет BSS по хешу конфига и обычно переименовывает интерфейсы на месте (`bss.rename()`) без перезапуска радио; ядро шлёт `ACTION=move`. Переименовываться могут и соседние SSID: если VPN-SSID A (`phy1-ap0`) получил `xvpn-ap0`, домашний B может стать `phy1-ap0`. Поэтому: hotplug `net` реагирует и на `move`, а `ifnames` запускает в фоне `ifnames-wait` — ждёт (до 30 с), пока у всех включённых VPN-SSID в `network.wireless status` не появится фиксированное имя, и делает `fw-refresh`, убирая прежние имена. До этого правила содержат и фиксированное, и текущее имя (кратко в VPN может попасть и соседний SSID — это не утечка). Если hostapd всё же перезапускает радио, его клиенты переподключаются — только при выборе или снятии выбора SSID.
+- **Откат.** SSID, снятые с выбора, теряют `xvpn-apN` при следующем `reload` (выбор в LuCI вызывает его сам). `postrm` снимает помеченные имена, но `network reload` не делает: пакет могут удалять через этот же Wi-Fi; прежние имена вернутся при следующем reload сети или перезапуске радио. Если в `wireless` есть чужие незакоммиченные изменения, `postrm` ничего не трогает.
+- **Незакоммиченные правки.** Если в `wireless` есть чужие незакоммиченные изменения (`uci changes wireless`), а имена нужно выдать или снять, они не меняются (иначе `commit` закоммитил бы и чужое): предупреждение пишется в лог и в `fw_warn` (rpcd `luci.xvpn firewall` → `warning`), правила работают по текущим именам из netifd. Следующий `reload` после коммита правок снимает предупреждение.
+- **Только точки доступа.** У Wi-Fi-only сети имена получают только её SSID с `mode` `ap` (или без `mode`); STA-аплинк той же сети (`wwan`) не трогается.
 
 ## 8. LuCI
 
@@ -260,8 +265,8 @@ netifd раздаёт имена `phy1-ap0`, `phy1-ap1`… по порядку �
 
 ## 9. Сборка и тесты
 
-- Тесты (docker, образ `openwrt/rootfs:x86-64-24.10.4`): `scripts/test.sh` — парсер ссылок/подписок, генерация конфига, `xray run -test` на сгенерированном конфиге, рендер nft (все режимы) и `nft -c` (проверка синтаксиса), резолв сетей и SSID (UCI до netifd, живые имена, SSID в обоих наборах), фиксированные имена SSID (выдача, повторный запуск без изменений, откат при снятии выбора, своё имя пользователя, незакоммиченные правки), ошибка для SSID без имени.
-- Интеграционный тест `scripts/itest.sh` (procd в контейнере, `NAME=` для параллельных запусков): выбор сервера, failover, подписка; клиент в netns за портом моста и «интернет» в другом netns, fw4 запущен — туннель работает, прямого трафика нет при загрузке (guard), restart, stop, сломанном `nft` (fallback из passthrough, `state: error`, `fw-refresh` сохраняет ошибку, `minimal` без bridge); правила возвращаются после fw4 flush; SSID получают `xvpn-apN` (без радио — имена только из UCI) и попадают в оба набора, SSID без имени → `block` и `state: error`, выключенный — без ошибки; `ifup` VPN-сети перечитывает правила; снятие выбора и `postrm` возвращают имена; `fw-remove` ждёт блокировку; правила снимаются при `enabled=0` и `disable`.
+- Тесты (docker, образ `openwrt/rootfs:x86-64-24.10.4`): `scripts/test.sh` — парсер ссылок/подписок, генерация конфига, `xray run -test` на сгенерированном конфиге, рендер nft (все режимы) и `nft -c` (проверка синтаксиса), резолв сетей и SSID (UCI до netifd, живые имена, SSID в обоих наборах), фиксированные имена SSID (выдача, повторный запуск без изменений, откат при снятии выбора, своё имя пользователя, незакоммиченные правки), ошибка для SSID без имени, пометка `xvpn_ifname` (непомеченное `xvpn-ap0` не снимается), STA не получает имя, маски `имя.*` (нет маски для длинных имён), `ifnames_applied`, предупреждение при незакоммиченных правках; `nft -c` с маской, перекрывающей точное имя.
+- Интеграционный тест `scripts/itest.sh` (procd в контейнере, `NAME=` для параллельных запусков): выбор сервера, failover, подписка; клиент в netns за портом моста и «интернет» в другом netns, fw4 запущен — туннель работает, прямого трафика нет при загрузке (guard), restart, stop, сломанном `nft` (fallback из passthrough, `state: error`, `fw-refresh` сохраняет ошибку, `minimal` без bridge); правила возвращаются после fw4 flush; SSID получают `xvpn-apN` (без радио — имена только из UCI) и попадают в оба набора, SSID без имени → `block` и `state: error`, при `passthrough` — клиенты напрямую и ошибка, выключенный — без ошибки; фоновое ожидание имён после выдачи; порт клиента, переименованный после правил в `xvpn-ap0` и `xvpn-ap0.sta1`, идёт в туннель, а `xvpn-ap10` — нет; hotplug `net` с `ACTION=add|move`; предупреждение и отказ от коммита при чужих правках `wireless` (и в `postrm`); `ifup` VPN-сети перечитывает правила; снятие выбора и `postrm` возвращают имена; `fw-remove` ждёт блокировку; правила снимаются при `enabled=0` и `disable`.
 - Сборка ipk (docker, `openwrt/sdk:mediatek-filogic-24.10.4`): `scripts/build.sh` → `dist/luci-app-xvpn_*.ipk` (и `luci-i18n-xvpn-*.ipk`, когда появятся po-файлы). Из фида luci (ветка `openwrt-24.10`) берутся только `luci.mk`, `luci-base` и `csstidy`, и собираются лишь их host-утилиты; сам пакет собирается с `NO_DEPS=1` — иначе SDK компилировал бы все рантайм-зависимости (luci-base, xray-core вместе с Go), а пакету архитектуры `all` они нужны только в `Depends`. Пакет архитектуры `all`, так что SDK под другую архитектуру тоже подошёл бы. Переменные: `DOCKER` (по умолчанию `docker --context default`), `IMAGE`, `LUCI_FEED`.
 - Установка на роутер:
   ```

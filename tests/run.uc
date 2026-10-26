@@ -7,7 +7,7 @@ import { readfile, writefile } from 'fs';
 import { parse_link, parse_subscription } from 'xvpn.links';
 import { parse_userinfo } from 'xvpn.subscription';
 import { build_index, generate } from 'xvpn.xrayconf';
-import { render, resolve, fix_ifnames } from 'xvpn.firewall';
+import { render, resolve, fix_ifnames, ifnames_applied } from 'xvpn.firewall';
 import { cursor } from 'uci';
 
 const FIX = ARGV[0] ?? 'tests/fixtures';
@@ -87,7 +87,8 @@ eq('inbounds', length(conf.inbounds), 3 + length(servers));
 writefile(`${OUT}/config.json`, sprintf('%J', conf));
 
 // firewall
-let res = { nets: [ 'br-guest' ], ports: [ 'lan2', 'phy1-ap1' ] };
+// SSIDs come with a wildcard (WDS, dynamic VLAN) and may overlap an exact name: nft -c checks it
+let res = { nets: [ 'br-guest', 'xvpn-ap1', 'xvpn-ap1.*', 'xvpn-ap1.5' ], ports: [ 'lan2', 'xvpn-ap1', 'xvpn-ap1.*' ] };
 let nft = render(cfg, res);
 ok('nft tproxy', index(nft, 'tproxy ip to :12345') >= 0);
 ok('nft no tproxy6 in block mode', index(nft, 'tproxy ip6') < 0);
@@ -115,7 +116,7 @@ writefile(`${OUT}/minimal.nft`, min);
 
 // access points: fixed SSID names in a test UCI tree
 let confdir = `${OUT}/conf`;
-system([ 'mkdir', '-p', confdir, `${OUT}/delta` ]);
+system([ 'mkdir', '-p', confdir, `${OUT}/delta`, `${OUT}/empty-delta` ]);
 writefile(`${confdir}/network`, `
 config interface 'lan'
 	option device 'br-lan'
@@ -161,54 +162,81 @@ config wifi-iface 'old'
 	option device 'radio0'
 	option network 'lan'
 	option ifname 'xvpn-ap0'
+
+config wifi-iface 'uplink'
+	option device 'radio0'
+	option network 'wonly'
+	option mode 'sta'
+
+config wifi-iface 'gone'
+	option device 'radio0'
+	option network 'lan'
+	option ifname 'xvpn-ap9'
+	option xvpn_ifname '1'
 `);
 let ucur = () => cursor(confdir, `${OUT}/delta`);
+let names = (c, list) => map(list, (x) => c.get('wireless', x, 'ifname'));
 let wcfg = { access: { networks: [ 'wonly' ], ports: [ 'lan2' ], wifi: [ 'vpn', 'own', 'off' ] } };
-ok('fix ifnames changes wireless', fix_ifnames(wcfg, ucur()));
+eq('fix ifnames changes wireless', fix_ifnames(wcfg, ucur()), { changed: true });
 let wl = ucur();
-eq('fixed names: free numbers, own name kept, Wi-Fi only network included',
-	map([ 'vpn', 'own', 'only', 'off', 'home', 'old' ], (x) => wl.get('wireless', x, 'ifname')),
-	[ 'xvpn-ap1', 'myvpn0', 'xvpn-ap2', 'xvpn-ap3', null, null ]);
-ok('fix ifnames is idempotent', !fix_ifnames(wcfg, ucur()));
+eq('fixed names: free numbers, own and unmarked names kept, Wi-Fi only network without its STA uplink',
+	names(wl, [ 'vpn', 'own', 'only', 'off', 'home', 'old', 'uplink', 'gone' ]),
+	[ 'xvpn-ap1', 'myvpn0', 'xvpn-ap2', 'xvpn-ap3', null, 'xvpn-ap0', null, null ]);
+eq('our names are marked', map([ 'vpn', 'own', 'only', 'old', 'gone' ], (x) => wl.get('wireless', x, 'xvpn_ifname')),
+	[ '1', null, '1', null, null ]);
+eq('fix ifnames is idempotent', fix_ifnames(wcfg, ucur()), { changed: false });
 
-// no netifd yet (boot guard): names from UCI, SSIDs in both sets
+// no netifd yet (boot guard): names from UCI, SSIDs in both sets with a wildcard for WDS/VLAN
 let none = { call: () => null };
+let wild = (l) => [ ...l, ...map(l, (n) => `${n}.*`) ];
 eq('resolve from UCI', resolve(wcfg, none, ucur()), {
-	nets: [ 'xvpn-ap1', 'myvpn0', 'xvpn-ap3', 'xvpn-ap2' ],
-	ports: [ 'lan2', 'xvpn-ap1', 'myvpn0', 'xvpn-ap3', 'xvpn-ap2' ], errors: [] });
+	nets: [ ...wild([ 'xvpn-ap1' ]), ...wild([ 'myvpn0' ]), ...wild([ 'xvpn-ap3' ]), ...wild([ 'xvpn-ap2' ]) ],
+	ports: [ 'lan2', ...wild([ 'xvpn-ap1' ]), ...wild([ 'myvpn0' ]), ...wild([ 'xvpn-ap3' ]), ...wild([ 'xvpn-ap2' ]) ],
+	errors: [] });
 
 // netifd up: live L3 device of the network, the current SSID name besides the fixed one
-let up = { call: (o, m) => (o == 'network.wireless')
-	? { radio0: { interfaces: [ { section: 'vpn', ifname: 'phy0-ap0' }, { section: 'home', ifname: 'phy0-ap1' } ] } }
+let st = { radio0: { interfaces: [ { section: 'vpn', ifname: 'phy0-ap0' }, { section: 'home', ifname: 'phy0-ap1' } ] } };
+let up = { call: (o, m) => (o == 'network.wireless') ? st
 	: { interface: [ { interface: 'wonly', l3_device: 'xvpn-ap2', device: 'xvpn-ap2' }, { interface: 'alias', l3_device: 'br-lan' } ] } };
 let lcfg = { access: { networks: [ 'lan', 'alias' ], ports: [], wifi: [ 'vpn' ] } };
 eq('resolve live names', resolve(lcfg, up, ucur()),
-	{ nets: [ 'br-lan', 'xvpn-ap1', 'phy0-ap0' ], ports: [ 'xvpn-ap1', 'phy0-ap0' ], errors: [] });
+	{ nets: [ 'br-lan', ...wild([ 'xvpn-ap1', 'phy0-ap0' ]) ], ports: wild([ 'xvpn-ap1', 'phy0-ap0' ]), errors: [] });
+eq('no wildcard for a name with no room for a suffix',
+	resolve({ access: { networks: [], ports: [], wifi: [ 'vpn' ] } }, { call: () => ({ radio0: { interfaces: [ { section: 'vpn', ifname: 'phy0-ap0-long1' } ] } }) }, ucur()).ports,
+	[ 'xvpn-ap1', 'phy0-ap0-long1', 'xvpn-ap1.*' ]);
+ok('fixed name not applied yet', !ifnames_applied(lcfg, up, ucur()));
+st.radio0.interfaces[0].ifname = 'xvpn-ap1';
+ok('fixed name applied', ifnames_applied(lcfg, up, ucur()));
+ok('disabled SSID is not waited for', ifnames_applied({ access: { networks: [], ports: [], wifi: [ 'off' ] } }, up, ucur()));
 
-// deselected: our name goes away, the user's stays
+// deselected: our (marked) names go away, the user's stay
 let dcfg = { access: { networks: [], ports: [], wifi: [ 'own' ] } };
-ok('deselect changes wireless', fix_ifnames(dcfg, ucur()));
+eq('deselect changes wireless', fix_ifnames(dcfg, ucur()), { changed: true });
 wl = ucur();
-eq('deselected names removed', map([ 'vpn', 'own', 'only', 'off' ], (x) => wl.get('wireless', x, 'ifname')),
-	[ null, 'myvpn0', null, null ]);
+eq('deselected names removed', names(wl, [ 'vpn', 'own', 'only', 'off', 'old' ]), [ null, 'myvpn0', null, null, 'xvpn-ap0' ]);
+eq('marks removed', map([ 'vpn', 'only', 'off' ], (x) => wl.get('wireless', x, 'xvpn_ifname')), [ null, null, null ]);
 
 // an enabled SSID without a usable name is an error (fail closed), a disabled one is not
 wl = ucur();
 wl.set('wireless', 'own', 'ifname', 'a-very-long-name0');
 wl.commit('wireless');
-let ecfg = { access: { networks: [], ports: [], wifi: [ 'own', 'off', 'gone' ] } };
+let ecfg = { access: { networks: [], ports: [], wifi: [ 'own', 'off', 'missing' ] } };
 let er = resolve(ecfg, none, ucur());
 eq('unresolved SSID is an error', [ er.ports, er.errors ], [ [], [ 'wifi "own" has no interface name' ] ]);
 wl = ucur();
 wl.set('wireless', 'own', 'disabled', '1');
 wl.commit('wireless');
 eq('disabled SSID without a name is skipped', resolve(ecfg, none, ucur()).errors, []);
-ok('user changes in wireless are not committed', (() => {
-	let c = ucur();
-	c.set('wireless', 'home', 'ssid', 'Staged');
-	c.save('wireless');
-	return !fix_ifnames(wcfg, ucur()) && ucur().get('wireless', 'vpn', 'ifname') == null;
-})());
+
+// someone's uncommitted changes: nothing committed, a warning instead
+wl = ucur();
+wl.set('wireless', 'home', 'ssid', 'Staged');
+wl.save('wireless');
+let wr = fix_ifnames(wcfg, ucur());
+ok('uncommitted changes: warning', !wr.changed && match(wr.warning, /uncommitted/));
+ok('uncommitted changes are not committed', ucur().get('wireless', 'vpn', 'ifname') == null
+	&& cursor(confdir, `${OUT}/empty-delta`).get('wireless', 'home', 'ssid') == 'Home');
+eq('no warning when there is nothing to fix', fix_ifnames(dcfg, ucur()), { changed: false });
 
 eq('resolve drops names over 15 chars', resolve({ access: { networks: [], ports: [ 'lan2', 'a-very-long-port0' ], wifi: [] } }, null, ucur()),
 	{ nets: [], ports: [ 'lan2' ], errors: [] });

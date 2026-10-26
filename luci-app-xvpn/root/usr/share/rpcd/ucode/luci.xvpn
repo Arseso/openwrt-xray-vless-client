@@ -12,7 +12,7 @@ import { all_servers, load_cache, load_status, due_in } from 'xvpn.subscription'
 const CLI = '/usr/share/xvpn/cli.uc';
 const INIT = '/etc/init.d/xvpn';
 
-import { FW_WANT_FILE, FW_MODE_FILE, FW_ERROR_FILE } from 'xvpn.util';
+import { FW_WANT_FILE, FW_MODE_FILE, FW_ERROR_FILE, FW_WARN_FILE } from 'xvpn.util';
 
 function bg(cmd) {
 	system(`(${cmd}) >/dev/null 2>&1 </dev/null &`);
@@ -160,6 +160,7 @@ const methods = {
 		call: function() {
 			return {
 				want: readfile(FW_WANT_FILE), mode: readfile(FW_MODE_FILE), error: readfile(FW_ERROR_FILE),
+				warning: readfile(FW_WARN_FILE),
 			};
 		}
 	},

@@ -1,6 +1,6 @@
 #!/usr/bin/ucode
 // SPDX-License-Identifier: MIT
-// xvpn command line: generate | ifnames | fw-apply [passthrough] | fw-guard | fw-refresh | fw-remove | update [sid...|all]
+// xvpn command line: generate | ifnames | ifnames-wait | fw-apply [passthrough] | fw-guard | fw-refresh | fw-remove | update [sid...|all]
 
 'use strict';
 
@@ -9,11 +9,11 @@ import * as ubus from 'ubus';
 import {
 	load_config, read_json, write_json, write_file, mkdir_p, log, run, shq, is_updater,
 	ACTIVE_FILE, CONFIG_FILE, INDEX_FILE, VAR_DIR, RUN_DIR, UPDATE_LOCK,
-	FW_WANT_FILE, FW_MODE_FILE, FW_ERROR_FILE, FW_LOCK_FILE
+	FW_WANT_FILE, FW_MODE_FILE, FW_ERROR_FILE, FW_WARN_FILE, FW_LOCK_FILE
 } from 'xvpn.util';
 import { all_servers, update } from 'xvpn.subscription';
 import { build_index, generate } from 'xvpn.xrayconf';
-import { resolve, apply, remove, fix_ifnames } from 'xvpn.firewall';
+import { resolve, apply, remove, fix_ifnames, ifnames_applied } from 'xvpn.firewall';
 
 const cfg = load_config();
 
@@ -150,12 +150,30 @@ case 'fw-guard':
 case 'fw-refresh':
 	exit(fw(null) ? 0 : 1);
 
-// before the rules (init.d): fixed names for the VPN SSIDs, netifd applies them when it
-// restarts the radio; the rules match both the fixed and the current name meanwhile
-case 'ifnames':
-	if (fix_ifnames(cfg))
+// before the rules (init.d): fixed names for the VPN SSIDs; the rules match both the fixed
+// and the current name until netifd applies them
+case 'ifnames': {
+	let r = fix_ifnames(cfg);
+	mkdir_p(RUN_DIR);
+	if (r.warning)
+		write_file(FW_WARN_FILE, r.warning);
+	else
+		unlink(FW_WARN_FILE);
+	if (r.changed) {
 		run('ubus call network reload');
+		// hostapd usually renames the interfaces in place (kernel "move", not "add"): another
+		// SSID may now have the name the VPN SSID had, so refresh once the fixed names are on
+		system('/usr/bin/ucode /usr/share/xvpn/cli.uc ifnames-wait >/dev/null 2>&1 </dev/null &');
+	}
 	exit(0);
+}
+
+case 'ifnames-wait': {
+	let conn = ubus.connect();
+	for (let i = 0; i < 30 && !ifnames_applied(cfg, conn); i++)
+		system('sleep 1');
+	exit(fw(null) ? 0 : 1);
+}
 
 case 'fw-remove': {
 	let lock = fw_lock();
@@ -188,6 +206,6 @@ case 'update': {
 }
 
 default:
-	warn('usage: cli.uc generate | ifnames | fw-apply [passthrough] | fw-guard | fw-refresh | fw-remove | update [sid...|all]\n');
+	warn('usage: cli.uc generate | ifnames | ifnames-wait | fw-apply [passthrough] | fw-guard | fw-refresh | fw-remove | update [sid...|all]\n');
 	exit(1);
 }

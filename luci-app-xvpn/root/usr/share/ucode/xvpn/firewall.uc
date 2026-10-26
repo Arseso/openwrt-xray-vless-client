@@ -25,6 +25,7 @@ function elements(list, quote) {
 
 // Our fixed names for the SSIDs in the rules: known before the radio is up and do not move
 // to another SSID when the radio restarts (phy1-ap0 / phy1-ap1 are given out in order).
+// Sections that got one from us are marked with option xvpn_ifname '1'.
 const IFNAME_PREFIX = 'xvpn-ap';
 const OUR_IFNAME = /^xvpn-ap[0-9]+$/;
 
@@ -40,10 +41,12 @@ function words(v) {
 	return filter(split(type(v) == 'array' ? join(' ', v) : (v ?? ''), /[ \t]+/), (w) => w != '');
 }
 
-// wifi-iface sections attached to the given networks
+// access point wifi-iface sections attached to the given networks (not a STA uplink)
 function wifi_of(uci, networks) {
 	let r = [];
 	uci.foreach('wireless', 'wifi-iface', (s) => {
+		if (s.mode && s.mode != 'ap')
+			return;
 		for (let n in words(s.network))
 			if (n in networks)
 				push(r, s['.name']);
@@ -59,16 +62,15 @@ function wifi_sections(cfg, uci) {
 	return uniq([ ...cfg.access.wifi, ...(length(nodev) ? wifi_of(uci, nodev) : []) ]);
 }
 
+function wifi_disabled(uci, s) {
+	return s.disabled == '1' || uci.get('wireless', s.device, 'disabled') == '1';
+}
+
 // Gives the SSIDs of wifi_sections() a fixed ifname (xvpn-apN) in /etc/config/wireless; a name
 // set by the user stays as is. Our names are removed from SSIDs that are no longer needed.
-// Returns true when wireless was committed: the names apply when netifd sets the radio up again.
+// Returns { changed: wireless was committed, warning: the names could not be fixed }.
 export function fix_ifnames(cfg, uci) {
 	uci ??= cursor();
-	// committing would commit someone's unfinished `uci set wireless...` too
-	if (length(uci.changes('wireless') ?? {})) {
-		log('wireless has uncommitted changes, SSID names are not fixed');
-		return false;
-	}
 	let need = wifi_sections(cfg, uci), used = {}, add = [], drop = [];
 	uci.foreach('wireless', 'wifi-iface', (s) => {
 		if (s.ifname)
@@ -77,24 +79,52 @@ export function fix_ifnames(cfg, uci) {
 			if (!s.ifname)
 				push(add, s['.name']);
 		}
-		else if (match(s.ifname ?? '', OUR_IFNAME))
-			push(drop, s['.name']);
+		else if (s.xvpn_ifname == '1')
+			push(drop, s);
 	});
+	if (!length(add) && !length(drop))
+		return { changed: false };
+	// committing would commit someone's unfinished `uci set wireless...` too
+	if (length(uci.changes('wireless') ?? {})) {
+		let warning = 'wireless has uncommitted changes, VPN SSID names are not fixed until they are committed';
+		log(warning);
+		return { changed: false, warning };
+	}
 	for (let sec in add) {
 		let n = 0;
 		while (used[IFNAME_PREFIX + n])
 			n++;
 		used[IFNAME_PREFIX + n] = true;
 		uci.set('wireless', sec, 'ifname', IFNAME_PREFIX + n);
+		uci.set('wireless', sec, 'xvpn_ifname', '1');
 		log(`wifi "${sec}" gets the fixed name ${IFNAME_PREFIX + n}`);
 	}
-	for (let sec in drop) {
-		uci.delete('wireless', sec, 'ifname');
-		log(`wifi "${sec}" is not a VPN access point any more, its name is restored`);
+	for (let s in drop) {
+		// a name the user changed after us is theirs
+		if (match(s.ifname ?? '', OUR_IFNAME))
+			uci.delete('wireless', s['.name'], 'ifname');
+		uci.delete('wireless', s['.name'], 'xvpn_ifname');
+		log(`wifi "${s['.name']}" is not a VPN access point any more, its name is restored`);
 	}
-	if (!length(add) && !length(drop))
-		return false;
 	uci.commit('wireless');
+	return { changed: true };
+};
+
+// All enabled SSIDs of wifi_sections() that have a fixed name carry it in netifd's status.
+export function ifnames_applied(cfg, ubus_conn, uci) {
+	uci ??= cursor();
+	let st = ubus_conn?.call('network.wireless', 'status') ?? {};
+	for (let section in wifi_sections(cfg, uci)) {
+		let s = uci.get_all('wireless', section);
+		if (!s?.ifname || wifi_disabled(uci, s))
+			continue;
+		let up = false;
+		for (let radio, r in st)
+			for (let i in (r.interfaces ?? []))
+				up ||= (i.section == section && i.ifname == s.ifname);
+		if (!up)
+			return false;
+	}
 	return true;
 };
 
@@ -102,6 +132,8 @@ export function fix_ifnames(cfg, uci) {
 //   networks -> L3 devices (br-guest): from netifd when up, from UCI before (boot guard);
 //   SSIDs -> the fixed ifname from UCI and the current one from netifd, into both sets:
 //   a bridged SSID is seen by the bridge table, an SSID that is a network itself only by inet;
+//   each also as a "name.*" wildcard: WDS stations (name.staN) and dynamic VLANs (name.VID)
+//   are interfaces of their own and would go around the rules;
 //   ports as is.
 // errors: enabled SSIDs that have no name at all, the rules cannot cover their clients.
 export function resolve(cfg, ubus_conn, uci) {
@@ -137,10 +169,12 @@ export function resolve(cfg, ubus_conn, uci) {
 						push(names, i.ifname);
 			names = filter(uniq(names), valid);
 			if (length(names)) {
-				push(nets, ...names);
-				push(ports, ...names);
+				// longer prefixes leave no room for a sub-interface name
+				let subs = map(filter(names, (n) => length(n) <= 13), (n) => `${n}.*`);
+				push(nets, ...names, ...subs);
+				push(ports, ...names, ...subs);
 			}
-			else if (s.disabled == '1' || uci.get('wireless', s.device, 'disabled') == '1')
+			else if (wifi_disabled(uci, s))
 				log(`wifi "${section}" is disabled, skipped`);
 			else
 				push(errors, `wifi "${section}"${s.ssid ? ` (SSID "${s.ssid}")` : ''} has no interface name`);
@@ -162,7 +196,7 @@ export function render(cfg, res, opts) {
 			'table inet xvpn',
 			'delete table inet xvpn',
 			'table inet xvpn {',
-			`\tset nets { type ifname; ${elements(res.nets, true)}}`,
+			`\tset nets { type ifname; flags interval; auto-merge; ${elements(res.nets, true)}}`,
 			'',
 			'\tchain guard_forward {',
 			'\t\ttype filter hook forward priority filter - 5; policy accept;',
@@ -180,7 +214,7 @@ export function render(cfg, res, opts) {
 		'table inet xvpn',
 		'delete table inet xvpn',
 		'table inet xvpn {',
-		`\tset nets { type ifname; ${elements(res.nets, true)}}`,
+		`\tset nets { type ifname; flags interval; auto-merge; ${elements(res.nets, true)}}`,
 		`\tset bypass4 { type ipv4_addr; flags interval; auto-merge; ${elements(BYPASS4)}}`,
 		`\tset bypass6 { type ipv6_addr; flags interval; auto-merge; ${elements(BYPASS6)}}`,
 		'',
@@ -236,7 +270,7 @@ export function render(cfg, res, opts) {
 	if (length(res.ports))
 		push(r,
 			'table bridge xvpn {',
-			`\tset ports { type ifname; ${elements(res.ports, true)}}`,
+			`\tset ports { type ifname; flags interval; auto-merge; ${elements(res.ports, true)}}`,
 			'',
 			'\tchain mark_ports {',
 			'\t\ttype filter hook prerouting priority filter - 10; policy accept;',

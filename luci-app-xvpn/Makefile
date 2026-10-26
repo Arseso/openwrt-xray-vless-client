@@ -25,13 +25,20 @@ define Package/luci-app-xvpn/postrm
 #!/bin/sh
 [ -n "$${IPKG_INSTROOT}" ] || {
 	uci -q delete firewall.xvpn && uci commit firewall
-	# fixed names of the VPN SSIDs (xvpn-apN); applied at the next radio restart, not now:
-	# the package may be removed over that very Wi-Fi
-	c=
-	for s in $$(uci -q -X show wireless | sed -n "s/^wireless\.\([^.]*\)\.ifname='xvpn-ap[0-9]*'$$/\1/p"); do
-		uci -q delete wireless.$$s.ifname && c=1
-	done
-	[ -z "$$c" ] || uci commit wireless
+	# fixed names of the VPN SSIDs (sections marked xvpn_ifname); applied at the next radio
+	# restart, not now: the package may be removed over that very Wi-Fi. Skipped when
+	# wireless has someone's uncommitted changes, the commit would take them along.
+	if [ -z "$$(uci -q changes wireless)" ]; then
+		c=
+		for s in $$(uci -q -X show wireless | sed -n "s/^wireless\.\([^.]*\)\.xvpn_ifname='1'$$/\1/p"); do
+			case "$$(uci -q get wireless.$$s.ifname)" in
+			xvpn-ap[0-9]*) uci -q delete wireless.$$s.ifname ;;
+			esac
+			uci -q delete wireless.$$s.xvpn_ifname
+			c=1
+		done
+		[ -z "$$c" ] || uci commit wireless
+	fi
 }
 exit 0
 endef

@@ -20,6 +20,8 @@ export const UPDATE_LOCK = '/var/run/xvpn/updating';
 export const FW_WANT_FILE = '/var/run/xvpn/fw_want';
 export const FW_MODE_FILE = '/var/run/xvpn/fw_mode';
 export const FW_ERROR_FILE = '/var/run/xvpn/fw_error';
+// VPN SSID names could not be fixed (uncommitted changes to wireless)
+export const FW_WARN_FILE = '/var/run/xvpn/fw_warn';
 export const FW_LOCK_FILE = '/var/lock/xvpn-fw';
 
 export function read_json(path) {
