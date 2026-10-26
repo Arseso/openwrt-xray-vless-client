@@ -20,8 +20,17 @@ const callFirewall = rpc.declare({ object: 'luci.xvpn', method: 'firewall' });
 const callUpdate = rpc.declare({ object: 'luci.xvpn', method: 'update' });
 const callService = rpc.declare({ object: 'luci.xvpn', method: 'service', params: [ 'action' ] });
 
+// what a firewall error means for the clients depends on the mode that got applied
+function fwErrorText(mode) {
+	return {
+		block: _('Firewall error: VPN clients are blocked'),
+		minimal: _('Firewall error: VPN clients are blocked'),
+		passthrough: _('Firewall error: VPN clients go to the internet directly'),
+	}[mode] ?? _('Firewall error');
+}
+
 // [ label class, text ]; a state missing here is shown as is
-function stateInfo(state) {
+function stateInfo(state, fwMode) {
 	return {
 		starting: [ 'notice', _('Starting') ],
 		connected: [ 'success', _('Connected') ],
@@ -30,7 +39,7 @@ function stateInfo(state) {
 		wan_down: [ 'warning', _('No internet on WAN') ],
 		no_servers: [ 'error', _('No live servers') ],
 		testing: [ 'notice', _('Testing servers') ],
-		error: [ 'error', _('Firewall error: VPN clients are blocked') ],
+		error: [ 'error', fwErrorText(fwMode) ],
 		xray_down: [ 'error', _('xray is not running') ],
 	}[state] ?? [ 'notice', state ];
 }
@@ -55,6 +64,11 @@ function errorText(err) {
 // server names, subscription titles and errors come from outside: text nodes only
 function txt(s) {
 	return document.createTextNode(s ?? '');
+}
+
+// fw_error and fw_warn may hold several lines
+function lines(s, style) {
+	return E('span', { 'style': 'white-space:pre-line' + (style ? ';' + style : '') }, [ txt(s) ]);
 }
 
 // themes have no red label (.important is the primary color in bootstrap): 'error' is inline
@@ -215,7 +229,7 @@ return view.extend({
 		const activeId = up ? status.active : servers.active;
 		const byId = {};
 		const fwError = (fw.error ?? '').trim();
-		const fwWant = (fw.want ?? '').trim(), fwMode = (fw.mode ?? '').trim();
+		const fwWant = (fw.want ?? '').trim(), fwMode = (fw.mode ?? '').trim(), fwWarn = (fw.warn ?? '').trim();
 		const updating = up && !!status.updating;
 
 		if (!up || !enabled)
@@ -243,8 +257,14 @@ return view.extend({
 				_('The xvpnd daemon is not running. It is restarted by procd within seconds; if this message stays, check the log.')));
 		if (fwError)
 			alerts.push(E('div', { 'class': 'alert-message error' }, [
-				E('strong', {}, _('Firewall rules are not applied, VPN clients are blocked:')), ' ', txt(fwError),
+				E('strong', {}, {
+					block: _('Firewall rules are not applied, VPN clients are blocked:'),
+					minimal: _('Firewall rules are not applied, VPN clients are blocked:'),
+					passthrough: _('Firewall rules are not applied, VPN clients go to the internet directly:'),
+				}[fwMode] ?? _('Firewall rules are not applied:')), ' ', lines(fwError),
 			]));
+		if (fwWarn)
+			alerts.push(E('div', { 'class': 'alert-message warning' }, [ lines(fwWarn) ]));
 		if (up && status.passthrough)
 			alerts.push(E('div', { 'class': 'alert-message warning' },
 				_('Kill switch is off and there are no live servers: VPN clients go to the internet directly.')));
@@ -276,7 +296,7 @@ return view.extend({
 
 		let state;
 		if (up) {
-			const [ cls, text ] = stateInfo(status.state);
+			const [ cls, text ] = stateInfo(status.state, fwMode);
 			state = [ label(cls, text) ];
 			if (status.testing && status.state != 'testing')
 				state.push(' ', label('notice', _('testing servers')));
@@ -309,7 +329,7 @@ return view.extend({
 					((sw.from && sw.from != sw.to) ? name(sw.from) + ' → ' : '') + name(sw.to) + ': ' + (sw.reason ?? '') + ', ' + ago(now, sw.at)) ] : null,
 				(up && status.last_test) ? [ _('Last test of all servers'), txt(ago(now, status.last_test)) ] : null,
 				(up && status.last_error && status.last_error.trim() != fwError)
-					? [ _('Last error'), E('span', { 'style': 'color:var(--error-color-high, #c00)' }, [ txt(status.last_error) ]) ] : null,
+					? [ _('Last error'), lines(status.last_error, 'color:var(--error-color-high, #c00)') ] : null,
 				[ _('Firewall rules'), txt(fwText) ],
 				stats ? [ _('Traffic through xray'), txt('↓ ' + bytes(stats.down) + '  ↑ ' + bytes(stats.up) +
 					(stats.speed ? '  (↓ ' + bytes(stats.speed[0]) + '/s  ↑ ' + bytes(stats.speed[1]) + '/s)' : '')) ] : null,
