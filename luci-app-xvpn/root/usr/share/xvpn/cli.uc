@@ -122,8 +122,6 @@ case 'generate': {
 	}
 
 	write_json(INDEX_FILE, idx);
-	// the service is reloaded not only by the daemon (rpcd, UCI triggers): let it re-read the index
-	ubus.connect()?.call('xvpn', 'reindex', {});
 	print(`${length(servers)} servers, active ${idx.active ?? 'none'}\n`);
 	exit(length(servers) ? 0 : 3);
 }

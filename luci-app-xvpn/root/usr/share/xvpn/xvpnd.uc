@@ -256,19 +256,21 @@ reload_service = function() {
 };
 
 // The service is also reloaded past the daemon (rpcd, UCI triggers on wireless and
-// network): cli.uc generate notifies us (notified), and check() polls the index.
+// network): service_started() in init.d notifies us after fw-apply (notified),
+// and check() polls the index.
 reindex = function(notified) {
 	let changed = load_index();
 	if (notified || changed)
 		st.passthrough = false;	// the reload applies the normal rules
-	if (!changed)
-		return;
 	if (st.reloading) {
-		// changed again while xray settles: wait for the latest config
-		if (settling)
+		// changed again, or polling saw the change before the reload finished:
+		// count the pause from the latest config and from fw-apply
+		if (settling && (changed || notified))
 			timers.settle.set(3000);
 		return;	// our own reload: after_reload() takes over
 	}
+	if (!changed)
+		return;
 	log('server list changed by a reload outside the daemon');
 	st.reloading = true;
 	settle();
