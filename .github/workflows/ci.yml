@@ -1,11 +1,12 @@
-# Tests, integration test and ipk build on every push and PR; a v* tag also
-# publishes a GitHub Release with the ipk. The jobs run the same scripts as a
-# local checkout (scripts/test.sh, itest.sh, build.sh), only with plain docker.
+# Tests, integration test and ipk build on every PR (its merge with the base
+# branch) and push to main; a v* tag also publishes a GitHub Release with the ipk.
+# The jobs run the same scripts as a local checkout (scripts/test.sh, itest.sh,
+# build.sh), only with plain docker.
 name: CI
 
 on:
   push:
-    branches: ['**']
+    branches: [main]
     tags: ['v*']
   pull_request:
 
@@ -17,10 +18,32 @@ concurrency:
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
-  test:
-    # a PR from a branch of this repository is already tested by its push
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
+  # a tag that does not match the package fails at once, before the long jobs
+  version:
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      ipk: ${{ steps.check.outputs.ipk }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Check the tag against PKG_VERSION and PKG_RELEASE
+        id: check
+        run: |
+          ver=$(sed -n 's/^PKG_VERSION:=//p' luci-app-xvpn/Makefile)
+          rel=$(sed -n 's/^PKG_RELEASE:=//p' luci-app-xvpn/Makefile)
+          want="v$ver"; [ "$rel" = 1 ] || want="v$ver-r$rel"
+          [ "$GITHUB_REF_NAME" = "$want" ] || {
+            echo "::error::tag $GITHUB_REF_NAME does not match the package: expected $want (PKG_VERSION $ver, PKG_RELEASE $rel)"
+            exit 1
+          }
+          echo "ipk=luci-app-xvpn_${ver}-r${rel}_all.ipk" >> "$GITHUB_OUTPUT"
+
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
@@ -29,13 +52,19 @@ jobs:
         xray: [feed, latest]
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Download the latest xray
         if: matrix.xray == 'latest'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release download --repo XTLS/Xray-core --pattern Xray-linux-64.zip --dir "$RUNNER_TEMP"
-          unzip -o "$RUNNER_TEMP/Xray-linux-64.zip" xray -d "$RUNNER_TEMP/xray"
+          cd "$RUNNER_TEMP"
+          gh release download --repo XTLS/Xray-core --pattern Xray-linux-64.zip --pattern Xray-linux-64.zip.dgst
+          sum=$(sed -n 's/^SHA2-256= *//p' Xray-linux-64.zip.dgst)
+          [ -n "$sum" ] || { echo "::error::no SHA2-256 in Xray-linux-64.zip.dgst"; exit 1; }
+          echo "$sum  Xray-linux-64.zip" | sha256sum -c -
+          unzip -o Xray-linux-64.zip xray -d xray
           echo "XRAY_BIN=$RUNNER_TEMP/xray/xray" >> "$GITHUB_ENV"
       - name: scripts/test.sh
         # the latest xray may reject the config before #14: warn, do not fail
@@ -43,29 +72,31 @@ jobs:
         run: sh scripts/test.sh
 
   itest:
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: scripts/itest.sh
         # it takes ~5 min; a hung run is stopped after 12 with the container state in the log
+        # (timeout kills the script without its EXIT trap, so the container is still there)
         run: |
-          sh scripts/itest.sh & pid=$!
-          ( sleep 720
-            echo "::error::itest hangs, killed"
-            docker exec xvpn-itest sh -c 'ps w; ubus -t 3 call xvpn status; ubus -t 3 call service list "{\"name\":\"xvpn\"}"; logread | tail -80'
-            kill $pid ) & watchdog=$!
-          rc=0; wait $pid || rc=$?
-          kill $watchdog 2>/dev/null || true
+          rc=0; timeout 720 sh scripts/itest.sh || rc=$?
+          if [ $rc = 124 ]; then
+            echo "::error::itest hangs, killed after 12 min"
+            timeout 60 docker exec xvpn-itest sh -c 'ps w; ubus -t 3 call xvpn status; ubus -t 3 call service list "{\"name\":\"xvpn\"}"; logread | tail -80' || true
+            docker rm -f xvpn-itest >/dev/null
+          fi
           exit $rc
 
   build:
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: scripts/build.sh
         env:
           DOCKER: docker
@@ -75,11 +106,13 @@ jobs:
           name: ipk
           path: dist/*.ipk
           if-no-files-found: error
+          retention-days: 30
 
   release:
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: [test, itest, build]
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [version, test, itest, build]
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: write
     steps:
@@ -87,13 +120,11 @@ jobs:
         with:
           name: ipk
           path: dist
-      - name: Check that the tag matches PKG_VERSION
+      - name: Check the built package
+        env:
+          IPK: ${{ needs.version.outputs.ipk }}
         run: |
-          ver="${GITHUB_REF_NAME#v}"
-          ls dist/luci-app-xvpn_"$ver"-r*_all.ipk >/dev/null 2>&1 || {
-            echo "::error::tag $GITHUB_REF_NAME does not match the package: $(ls dist)"
-            exit 1
-          }
+          [ -f "dist/$IPK" ] || { echo "::error::no dist/$IPK: $(ls dist)"; exit 1; }
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}

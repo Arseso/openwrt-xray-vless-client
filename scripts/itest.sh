@@ -24,6 +24,19 @@ NET=$($DOCKER inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}/{{.I
 $DOCKER exec -i -e NET="$NET" $NAME sh -e <<'IN'
 UUID=11111111-2222-3333-4444-555555555555
 mkdir -p /var/lock
+# every ubus call is bounded: a hung procd or xvpnd ends in TIMEOUT with diag below
+# instead of 30 s per call; the calls that timed out go to /tmp/ubus-timeouts
+ubus() {
+	_rc=0; command ubus -t 5 "$@" || _rc=$?
+	[ $_rc != 249 ] || echo "$(date +%T) ubus timeout: $*" | tee -a /tmp/ubus-timeouts >&2	# -UBUS_STATUS_TIMEOUT
+	return $_rc
+}
+diag() {
+	echo "--- xvpn status"; command ubus -t 3 call xvpn status || echo "(rc=$?)"
+	echo "--- service list"; command ubus -t 3 call service list '{"name":"xvpn"}' || echo "(rc=$?)"
+	[ ! -s /tmp/ubus-timeouts ] || { echo "--- ubus timeouts"; cat /tmp/ubus-timeouts; }
+	echo "--- logread"; logread | grep -E 'xvpn|xray|procd' | tail -30
+}
 i=0; until logread 2>/dev/null | grep -q 'init complete'; do [ $i -lt 30 ] || break; sleep 1; i=$((i+1)); done
 # netifd puts eth0 into br-lan and drops the docker address: give it back as wan
 set -- $NET
@@ -115,8 +128,9 @@ JSON
 link() { echo "vless://$UUID@127.0.0.1:$1?type=tcp&security=none#$2"; }
 status() { ubus call xvpn status | jsonfilter -e "$1"; }
 wait_for() { # expr value timeout
-	i=0; while [ $i -lt $3 ]; do [ "$(status "$1" 2>/dev/null)" = "$2" ] && return 0; sleep 1; i=$((i+1)); done
-	echo "TIMEOUT waiting for $1 == $2"; ubus call xvpn status; logread | grep -E 'xvpn|xray' | tail -20; exit 1
+	_end=$(($(date +%s) + $3))
+	while [ $(date +%s) -lt $_end ]; do [ "$(status "$1" 2>/dev/null)" = "$2" ] && return 0; sleep 1; done
+	echo "TIMEOUT waiting for $1 == $2 ($3 s)"; diag; exit 1
 }
 active_name() { ubus call xvpn status | jsonfilter -e "@.servers[@.id='$(status @.active)'].name"; }
 active_is() { [ "$(active_name)" = "$1" ]; }
@@ -127,9 +141,9 @@ xvpnd_restarted() { p=$(xvpnd_pid); [ -n "$p" ] && [ "$p" != "$1" ] && ubus call
 xray_pid() { ubus call service list '{"name":"xvpn"}' | jsonfilter -e '@.xvpn.instances.xray.pid'; }
 xray_restarted() { p=$(xray_pid); [ -n "$p" ] && [ "$p" != "$1" ]; }
 wait_cmd() { # timeout cmd...
-	t=$1; shift; i=0
-	while [ $i -lt $t ]; do "$@" >/dev/null 2>&1 && return 0; sleep 1; i=$((i+1)); done
-	echo "TIMEOUT waiting for: $*"; ubus call xvpn status; logread | grep -E 'xvpn|xray' | tail -20; exit 1
+	_end=$(($(date +%s) + $1)); shift
+	while [ $(date +%s) -lt $_end ]; do "$@" >/dev/null 2>&1 && return 0; sleep 1; done
+	echo "TIMEOUT waiting for: $*"; diag; exit 1
 }
 
 
@@ -316,7 +330,7 @@ echo "OK: rules refreshed when a VPN network came up"
 uci set wireless.homeap.ssid=Staged
 uci add_list xvpn.access.wifi=homeap; uci commit xvpn
 /etc/init.d/xvpn reload
-wait_cmd 20 sh -c 'ubus call luci.xvpn firewall | grep -q uncommitted'
+wait_cmd 20 sh -c 'ubus -t 5 call luci.xvpn firewall | grep -q uncommitted'
 uci_is wireless.homeap.ifname ''
 grep -q Staged /etc/config/wireless && { echo "FAIL: someone's change was committed"; exit 1; }
 uci revert wireless
@@ -506,7 +520,7 @@ wait_for @.state xray_down 40
 status @.last_error | grep -q 'corrupted binary' || { echo "FAIL: last_error: $(status @.last_error)"; exit 1; }
 count_is $n || { echo "FAIL: broken xray dropped the servers"; ubus call xvpn status; exit 1; }
 no_quarantine "broken xray_bin"
-wait_cmd 90 sh -c "ubus call xvpn status | jsonfilter -e @.last_error | grep -q 'restarts did not help'"
+wait_cmd 90 sh -c "ubus -t 5 call xvpn status | jsonfilter -e @.last_error | grep -q 'restarts did not help'"
 [ "$(status @.state)" = xray_down ] && [ "$(status @.xray_restarts)" = 3 ] || { echo "FAIL: no give-up"; ubus call xvpn status; exit 1; }
 no_quarantine "gave up on xray"
 want_mode full full
