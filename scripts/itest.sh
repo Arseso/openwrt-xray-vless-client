@@ -11,7 +11,9 @@ IMAGE="${IMAGE:-openwrt/rootfs:x86-64-24.10.4}"
 NAME=${NAME:-xvpn-itest}
 
 $DOCKER rm -f $NAME >/dev/null 2>&1 || true
-$DOCKER run -d --name $NAME --privileged -v "$PWD:/src:ro" "$IMAGE" /sbin/init >/dev/null
+# without S11sysctl: in a privileged container it would write the host's kernel.* sysctls
+$DOCKER run -d --name $NAME --privileged -v "$PWD:/src:ro" "$IMAGE" \
+	sh -c 'rm -f /etc/rc.d/S11sysctl; exec /sbin/init' >/dev/null
 trap '$DOCKER rm -f $NAME >/dev/null' EXIT
 sleep 5
 
