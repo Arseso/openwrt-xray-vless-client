@@ -8,6 +8,7 @@ import { cursor } from 'uci';
 import { connect } from 'ubus';
 import { load_config, read_json, run, shq, update_running, INDEX_FILE, ACTIVE_FILE } from 'xvpn.util';
 import { all_servers, load_cache, load_status, due_in } from 'xvpn.subscription';
+import { parse_link } from 'xvpn.links';
 
 const CLI = '/usr/share/xvpn/cli.uc';
 const INIT = '/etc/init.d/xvpn';
@@ -21,8 +22,16 @@ function bg(cmd) {
 // LuCI cannot call the daemon itself: uhttpd adds ubus_rpc_session to the arguments
 // and the ucode ubus object rejects arguments missing from its policy.
 // A hung daemon must not stall rpcd (and with it all of LuCI) for the default 30 s.
+// Without an answer daemon_error says why: 'timeout' — xvpnd is on ubus but busy, the call
+// may still be done; 'not running' — there is no xvpnd object.
+const UBUS_STATUS_TIMEOUT = 7;
+let daemon_error = null;
+
 function daemon(method, args) {
-	return connect(null, 2)?.call('xvpn', method, args ?? {});
+	let conn = connect(null, 2);
+	let r = conn?.call('xvpn', method, args ?? {});
+	daemon_error = (r != null) ? null : (conn?.error(true) == UBUS_STATUS_TIMEOUT) ? 'timeout' : 'not running';
+	return r;
 }
 
 const methods = {
@@ -31,13 +40,16 @@ const methods = {
 			let d = daemon('status');
 			// enabled and the router clock: the status tab needs no other call each poll
 			let base = { enabled: cursor().get('xvpn', 'main', 'enabled') == '1', time: time() };
-			return d ? { ...base, running: true, ...d } : { ...base, running: false };
+			if (d)
+				return { ...base, running: true, ...d };
+			// timeout: the daemon is there but did not answer in 2 s
+			return { ...base, running: false, timeout: (daemon_error == 'timeout') };
 		}
 	},
 
 	test: {
 		call: function() {
-			return daemon('test') ?? { ok: false, error: 'not running' };
+			return daemon('test') ?? { ok: false, error: daemon_error };
 		}
 	},
 
@@ -48,7 +60,7 @@ const methods = {
 				return { ok: false, error: 'invalid id' };
 			let r = daemon('select', { id: req.args.id });
 			if (!r)
-				return { ok: false, error: 'not running' };
+				return { ok: false, error: daemon_error };
 			// the daemon answers a bare ok: false for an id missing from its index
 			if (r.ok === false && !r.error)
 				r.error = 'unknown server';
@@ -83,11 +95,12 @@ const methods = {
 					due_in: s.enabled ? due_in(s, c, st) : null,
 				};
 			});
+			// router clock: the subscriptions tab counts the ages from it
 			if (req.args?.updating === false)
-				return { subscriptions: subs };
+				return { subscriptions: subs, time: time() };
 			// the daemon also counts the moment before `cli.uc update` takes the lock
 			let d = daemon('status');
-			return { subscriptions: subs, updating: d ? !!d.updating : !!update_running() };
+			return { subscriptions: subs, updating: d ? !!d.updating : !!update_running(), time: time() };
 		}
 	},
 
@@ -99,6 +112,9 @@ const methods = {
 			let r = daemon('update', sid ? { sid } : {});
 			if (r)
 				return r;
+			// a busy daemon may be updating already: do not start a second update beside it
+			if (daemon_error == 'timeout')
+				return { ok: false, error: 'timeout' };
 
 			// no daemon (service disabled or being restarted by procd): the lock in cli.uc
 			// keeps it the one update at a time, the daemon picks up the reload by itself
@@ -106,6 +122,22 @@ const methods = {
 				return { ok: false, error: 'busy' };
 			bg(sprintf('/usr/bin/ucode %s update %s && %s running && %s reload', CLI, shq(sid ?? 'all'), INIT, INIT));
 			return { ok: true };
+		}
+	},
+
+	// checks share links for the manual list: what the backend makes of each one
+	// (no outbound: it holds the credentials)
+	parse_links: {
+		args: { links: [] },
+		call: function(req) {
+			let links = req.args?.links;
+			if (type(links) != 'array')
+				return { error: 'invalid links' };
+			return { links: map(slice(links, 0, 200), (l) => {
+				let s = (type(l) == 'string') ? parse_link(l) : { error: 'not a link' };
+				return s.error ? { error: s.error }
+					: { id: s.id, name: s.name, proto: s.proto, address: s.address, port: s.port };
+			}) };
 		}
 	},
 
