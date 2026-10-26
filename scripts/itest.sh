@@ -548,6 +548,7 @@ echo "OK: connected again once xray_bin is fixed"
 tested() { ubus call xvpn status | jsonfilter -e "@.servers[@.id='$1'].tested"; }
 tested_after() { [ "$(tested $1)" -gt "$2" ]; }
 killed() { logread | grep -c 'and was killed'; }
+select_ok() { [ "$(ubus call xvpn select "{\"id\":\"$1\"}" | jsonfilter -e @.ok)" = true ]; }
 hung_reload() { # what
 	[ "$(ubus call xvpn select "{\"id\":\"$id\"}" | jsonfilter -e @.error)" = busy ] || { echo "FAIL: no busy while reloading ($1)"; exit 1; }
 	[ "$(status @.state)" = connected ] || { echo "FAIL: state while the reload waits ($1)"; ubus call xvpn status; exit 1; }
@@ -561,7 +562,7 @@ id=$(status @.active)
 sed -i 's/^start_service() {$/&\n [ -e \/tmp\/hang-reload ] \&\& sleep 1000/' /etc/init.d/xvpn
 grep -q hang-reload /etc/init.d/xvpn || { echo "FAIL: test setup, no sleep in init.d"; exit 1; }
 touch /tmp/hang-reload
-[ "$(ubus call xvpn select "{\"id\":\"$id\"}" | jsonfilter -e @.ok)" = true ] || { echo "FAIL: select"; exit 1; }
+wait_cmd 15 select_ok "$id"	# busy for the pause after the last reload
 wait_cmd 10 sh -c "ps w | grep -q '[s]leep 1000'"
 hung_reload "sleep in start_service"
 ps w | grep -q '[s]leep 1000' && { echo "FAIL: the hung reload was not killed"; exit 1; }
@@ -575,7 +576,7 @@ echo "OK: the daemon reloaded again and is connected"
 # someone holds procd's service lock: the reload waits for it, the same as hung
 flock /var/lock/procd_xvpn.lock sleep 1001 & lk=$!
 sleep 1
-[ "$(ubus call xvpn select "{\"id\":\"$id\"}" | jsonfilter -e @.ok)" = true ] || { echo "FAIL: select"; exit 1; }
+wait_cmd 15 select_ok "$id"	# busy for the pause after the last reload
 sleep 2
 hung_reload "procd lock held"
 kill $lk $(ps w | awk '/[s]leep 1001/ { print $1 }') 2>/dev/null || true
@@ -591,7 +592,7 @@ uci set xvpn.main.xray_bin=/tmp/xray-slow
 uci add_list xvpn.manual.link="vless://$UUID@127.0.0.9:18449?type=tcp&security=none#bad"
 uci commit xvpn	# no reload_config: the daemon reloads, xvpnd is not restarted
 k=$(killed)
-[ "$(ubus call xvpn select "{\"id\":\"$id\"}" | jsonfilter -e @.ok)" = true ] || { echo "FAIL: select"; exit 1; }
+wait_cmd 15 select_ok "$id"	# busy for the pause after the last reload
 wait_cmd 200 sh -c "logread | grep -q 'rejected 1 server(s): bad'"
 sleep 5	# fw-apply, procd and the pause after the reload
 wait_for @.state connected 40
