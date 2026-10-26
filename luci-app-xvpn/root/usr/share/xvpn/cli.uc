@@ -4,11 +4,11 @@
 
 'use strict';
 
-import { readfile, unlink, access, open, symlink, readlink } from 'fs';
+import { readfile, unlink, access, open, symlink, readlink, rename } from 'fs';
 import * as ubus from 'ubus';
 import * as uloop from 'uloop';
 import {
-	load_config, read_json, write_json, write_file, mkdir_p, log, run, shq, is_updater,
+	load_config, read_json, write_json, write_file, mkdir_p, log, run, shq, is_updater, kill_tree,
 	ACTIVE_FILE, CONFIG_FILE, INDEX_FILE, VAR_DIR, RUN_DIR, UPDATE_LOCK,
 	FW_WANT_FILE, FW_MODE_FILE, FW_ERROR_FILE, FW_WARN_FILE, FW_LOCK_FILE
 } from 'xvpn.util';
@@ -18,29 +18,38 @@ import { resolve, apply, remove, fix_ifnames, ifnames_applied } from 'xvpn.firew
 
 const cfg = load_config();
 
-// generate runs in init.d under procd's service lock: a hung binary is killed after
-// XRAY_TEST_TIMEOUT (busybox in OpenWrt has no timeout), twice at most for one generate
-const XRAY_TEST_TIMEOUT = 15;
+// generate runs in init.d under procd's service lock, the daemon kills a reload that makes
+// no progress for 60 s: a test of the whole config may take long with hundreds of outbounds,
+// of one server or none it is short; all the tests together fit in GENERATE_BUDGET
+const TEST_FULL = 40, TEST_ONE = 15, GENERATE_BUDGET = 240;
+const STARTED = clock(true)[0];
 
-// uloop.process reports a killed process as exit code 0
-function xray_ok(path) {
-	let code = null, hung = false, t;
+// true: xray accepts the config; false: rejects it, hung or was killed (OOM); null: out of
+// time. uloop.process reports a killed process as exit code 0: sh writes xray's own code.
+function xray_ok(path, limit) {
+	let left = GENERATE_BUDGET - (clock(true)[0] - STARTED);
+	if (left <= 0)
+		return null;
+	let out = `${VAR_DIR}/xray-ok`, wait = min(limit, left), hung = false, t;
+	unlink(out);
 	uloop.init();
-	let p = uloop.process('/bin/sh', [ '-c', `exec ${shq(cfg.main.xray_bin)} run -test -c ${shq(path)} >/dev/null 2>&1` ],
-		{ PATH: '/usr/sbin:/usr/bin:/sbin:/bin' }, (c) => {
-			code = c;
-			uloop.end();
-		});
+	let p = uloop.process('/bin/sh', [ '-c', `${shq(cfg.main.xray_bin)} run -test -c ${shq(path)} >/dev/null 2>&1; echo $? > ${shq(out)}` ],
+		{ PATH: '/usr/sbin:/usr/bin:/sbin:/bin' }, () => uloop.end());
 	if (!p)
 		return false;
-	t = uloop.timer(XRAY_TEST_TIMEOUT * 1000, () => {
-		log(`${cfg.main.xray_bin} run -test hung for ${XRAY_TEST_TIMEOUT} s, killed`);
+	t = uloop.timer(wait * 1000, () => {
 		hung = true;
-		system([ '/bin/kill', '-9', `${p.pid()}` ]);
+		kill_tree(p.pid());
 	});
 	uloop.run();
 	t.cancel();
-	return !hung && code == 0;
+	let code = readfile(out);
+	unlink(out);
+	if (hung && wait < limit)
+		return null;
+	if (hung)
+		log(`${cfg.main.xray_bin} run -test hung for ${limit} s, killed`);
+	return !hung && code != null && int(code) == 0;
 }
 
 const MODES = { full: {}, passthrough: { passthrough: true }, block: { block: true }, minimal: { minimal: true } };
@@ -132,42 +141,59 @@ case 'generate': {
 	let servers = all_servers(cfg);
 	let active = trim(readfile(ACTIVE_FILE) ?? '');
 	let idx = build_index(cfg, servers, active);
+	// xray and the daemon keep the running config until the end: a generate killed
+	// midway changes nothing
+	let next = `${VAR_DIR}/config.new.json`, tmp = `${VAR_DIR}/check.json`;	// xray goes by the extension
 	mkdir_p(VAR_DIR);
-	write_json(CONFIG_FILE, generate(cfg, servers, idx));
+	write_json(next, generate(cfg, servers, idx));
+
+	function commit(code) {
+		unlink(tmp);
+		if (!rename(next, CONFIG_FILE))
+			die(`cannot write ${CONFIG_FILE}`);
+		write_json(INDEX_FILE, idx);
+		if (code == 4)
+			log(`xray does not work, check: ${cfg.main.xray_bin} run -test -c ${CONFIG_FILE}`);
+		else
+			print(`${length(servers)} servers, active ${idx.active ?? 'none'}\n`);
+		exit(code ?? (length(servers) ? 0 : 3));
+	}
+	function check(path, limit) {
+		let ok = xray_ok(path, limit);
+		if (ok == null) {
+			unlink(tmp);
+			unlink(next);
+			log(`generate ran out of time (${GENERATE_BUDGET} s), the running config is kept`);
+			exit(5);
+		}
+		return ok;
+	}
 
 	// one malformed server must not take the whole VPN down: drop the ones xray rejects
-	if (length(servers) && access(cfg.main.xray_bin, 'x') && !xray_ok(CONFIG_FILE)) {
-		let good = [], bad = [], tmp = `${VAR_DIR}/check.json`;
+	if (length(servers) && access(cfg.main.xray_bin, 'x') && !check(next, TEST_FULL)) {
+		let good = [], bad = [];
 		// xray that rejects a config without servers is broken itself: keep the servers,
 		// the daemon reports xray_down rather than "no servers"
 		write_json(tmp, generate(cfg, [], build_index(cfg, [], null)));
-		if (!xray_ok(tmp)) {
-			unlink(tmp);
-			write_json(INDEX_FILE, idx);
-			log(`xray does not work, check: ${cfg.main.xray_bin} run -test -c ${CONFIG_FILE}`);
-			exit(4);
-		}
+		if (!check(tmp, TEST_ONE))
+			commit(4);
 		for (let s in servers) {
 			write_json(tmp, generate(cfg, [ s ], build_index(cfg, [ s ], s.id)));
-			if (xray_ok(tmp))
+			if (check(tmp, TEST_ONE))
 				push(good, s);
 			else
 				push(bad, s.name);
 		}
-		unlink(tmp);
 		log(`xray rejected ${length(bad)} server(s): ${join(', ', bad)}`);
 		servers = good;
 		idx = build_index(cfg, servers, active);
-		write_json(CONFIG_FILE, generate(cfg, servers, idx));
-		if (length(servers) && !xray_ok(CONFIG_FILE)) {
-			log(`xray rejects the generated config, check: ${cfg.main.xray_bin} run -test -c ${CONFIG_FILE}`);
-			exit(4);
+		write_json(next, generate(cfg, servers, idx));
+		if (length(servers) && !check(next, TEST_FULL)) {
+			log(`xray rejects the generated config`);
+			commit(4);
 		}
 	}
-
-	write_json(INDEX_FILE, idx);
-	print(`${length(servers)} servers, active ${idx.active ?? 'none'}\n`);
-	exit(length(servers) ? 0 : 3);
+	commit(null);
 }
 
 case 'fw-apply':
@@ -194,7 +220,8 @@ case 'ifnames': {
 		run('ubus call network reload');
 		// hostapd usually renames the interfaces in place (kernel "move", not "add"): another
 		// SSID may now have the name the VPN SSID had, so refresh once the fixed names are on
-		system('/usr/bin/ucode /usr/share/xvpn/cli.uc ifnames-wait >/dev/null 2>&1 </dev/null &');
+		// without fd 1000 of init.d: procd's service lock, it would hold the next reload
+		system('/usr/bin/ucode /usr/share/xvpn/cli.uc ifnames-wait >/dev/null 2>&1 </dev/null 1000>&- &');
 	}
 	exit(0);
 }

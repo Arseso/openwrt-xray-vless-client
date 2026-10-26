@@ -3,7 +3,7 @@
 
 'use strict';
 
-import { readfile, writefile, rename, mkdir, stat, popen, readlink } from 'fs';
+import { readfile, writefile, rename, mkdir, stat, popen, readlink, lsdir } from 'fs';
 import { cursor } from 'uci';
 
 export const ETC_DIR = '/etc/xvpn';
@@ -60,6 +60,46 @@ export function write_file(path, text) {
 
 export function write_json(path, obj) {
 	return write_file(path, sprintf('%J\n', obj));
+};
+
+// Running processes: { pid: { ppid, cpu (utime + stime ticks), cmd } }.
+export function procs() {
+	let ps = {};
+	for (let d in lsdir('/proc') ?? []) {
+		if (!match(d, /^[0-9]+$/))
+			continue;
+		// the name in parentheses may contain spaces and ')'
+		let f = split(replace(readfile(`/proc/${d}/stat`) ?? '', /^.*\) /, ''), ' ');
+		if (length(f) < 13)
+			continue;
+		ps[d] = { ppid: f[1], cpu: int(f[11]) + int(f[12]), cmd: replace(readfile(`/proc/${d}/cmdline`) ?? '', /\0/g, ' ') };
+	}
+	return ps;
+};
+
+// pid and all its descendants in ps.
+export function tree(pid, ps) {
+	let kids = {}, pids = [ `${pid}` ];
+	for (let p, e in ps)
+		push(kids[e.ppid] ??= [], p);
+	for (let i = 0; i < length(pids); i++)
+		push(pids, ...(kids[pids[i]] ?? []));
+	return pids;
+};
+
+// Kills pid with everything it started: stopped first, so that none forks behind the
+// walk (a child left alive keeps procd's service lock, fd 1000 of init.d scripts).
+export function kill_tree(pid) {
+	let seen = {}, all = [];
+	for (let i = 0; i < 5; i++) {
+		let fresh = filter(tree(pid, procs()), (p) => !seen[p]);
+		if (!length(fresh))
+			break;
+		for (let p in fresh)
+			seen[p] = push(all, p);
+		system(`/bin/kill -STOP ${join(' ', fresh)} 2>/dev/null`);
+	}
+	system(`/bin/kill -9 ${join(' ', all)} 2>/dev/null`);
 };
 
 // The pid is alive and still is `cli.uc` (pids get reused).

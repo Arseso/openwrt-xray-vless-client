@@ -7,9 +7,9 @@
 
 import * as uloop from 'uloop';
 import * as ubus from 'ubus';
-import { readfile, unlink, access, stat, lsdir } from 'fs';
+import { readfile, unlink, access, stat } from 'fs';
 import {
-	load_config, read_json, write_json, write_file, mkdir_p, shq, update_running,
+	load_config, read_json, write_json, write_file, mkdir_p, shq, update_running, procs, tree, kill_tree,
 	ETC_DIR, RUN_DIR, CONFIG_FILE, INDEX_FILE, ACTIVE_FILE, STATE_FILE, FW_ERROR_FILE
 } from 'xvpn.util';
 import { due_in } from 'xvpn.subscription';
@@ -21,12 +21,13 @@ const XRAY_RETRY = 15;		// s between our restarts of xray
 const XRAY_RESTARTS = 3;
 const XRAY_BACKOFF = 600;	// s between tries once the restarts did not help
 const XRAY_UNKNOWN = 'unknown';	// procd does not answer: neither xray nor the server is blamed
-const RELOAD_TIMEOUT = 60;	// s before a hung `init.d/xvpn reload` is killed
+const RELOAD_IDLE = 60;		// s a reload may make no progress before it is killed, see watch_reload()
+const RELOAD_MAX = 360;		// s at most for a reload; generate gives up after 240
 const RELOAD_RETRY = 30;	// s between a failed reload and the next try
 
 const cfg = load_config();
 const H = cfg.health;
-const STALL = max(2 * RELOAD_TIMEOUT, 3 * H.interval);	// s without health checks: see watchdog()
+const STALL = 3 * H.interval + RELOAD_MAX + 30;	// s without health checks: see watchdog()
 
 let index = { servers: [] }, index_raw = null;
 let prev = read_json(STATE_FILE) ?? {};
@@ -41,7 +42,7 @@ let st = {
 	updating: false,
 	reloading: false,	// a reload is running or xray is settling after one
 	reload_pending: false,
-	reload_failed: null,	// when the last reload hung or did not start (monotonic)
+	reload_error: null,	// the last reload hung or failed: status shows error until one goes through
 	choose_pending: null,	// choose_best() decision put off until the reload settles
 	passthrough: false,
 	last_error: null,
@@ -51,6 +52,7 @@ let st = {
 	quarantine: prev.quarantine ?? {},
 	xray: {},	// see xray_down()
 	xray_choose: null,	// choose_best() decision put off while xray does not work
+	xray_choose_code: null,	// 7: the aborted test saw a refused test port, see test_abort
 };
 let test_waiters = [], testq = null, test_resume = null, test_abort = null;
 let timers = {}, settling = false, reload = null;
@@ -59,26 +61,14 @@ let conn;
 // ucode does not hoist functions: these call each other in a cycle, defined below
 let reload_service, reindex, choose_best, check;
 
-// pid and everything it started: a child left alive keeps procd's service lock
-function kill_tree(pid) {
-	let pids = [ pid ], kids = {};
-	for (let d in lsdir('/proc') ?? []) {
-		let m = match(d, /^[0-9]+$/) && match(readfile(`/proc/${d}/stat`) ?? '', /^.*\) . ([0-9]+) /);
-		if (m)
-			push(kids[m[1]] ??= [], d);
-	}
-	for (let i = 0; i < length(pids); i++)
-		push(pids, ...(kids[pids[i]] ?? []));
-	system([ '/bin/kill', '-9', ...map(pids, (p) => `${p}`) ]);
-}
-
 // The daemon must not wait for logd (logger and logread do): messages go to one logger
-// at a time in the background, a stuck one is killed, at most LOG_QUEUE wait meanwhile.
+// at a time in the background, at most LOG_QUEUE wait meanwhile. A logger stuck with logd
+// is not killed: that would lose its messages, they arrive once logd is back.
 const LOG_QUEUE = 100;
 let logq = [], logging = false, log_dropped = 0;
 
 function flush_log() {
-	let batch = logq, p, t;
+	let batch = logq, p;
 	logq = [];
 	if (log_dropped)
 		push(batch, `${log_dropped} log messages dropped, logd is stuck`);
@@ -86,16 +76,12 @@ function flush_log() {
 	logging = true;
 	p = uloop.process('/bin/sh', [ '-c', 'printf "%s\\n" "$@" | /usr/bin/logger -t xvpn', 'sh', ...batch ],
 		{ PATH: '/usr/sbin:/usr/bin:/sbin:/bin' }, () => {
-			t?.cancel();
 			logging = false;
 			if (length(logq))
 				flush_log();
 		});
-	if (!p) {
+	if (!p)
 		logging = false;	// out of memory: these are lost
-		return;
-	}
-	t = uloop.timer(10000, () => kill_tree(p.pid()));
 }
 
 function log(msg) {
@@ -251,7 +237,7 @@ function xray_err() {
 // Async like xray_test(): logread waits for logd, a stuck one is killed after 5 s.
 // The lines land in x.log, the state is updated once they are there.
 function xray_log(pid) {
-	let x = st.xray, out = `${RUN_DIR}/xray-log`, p, t;
+	let x = st.xray, out = `${RUN_DIR}/xray-log-${++probe_seq}`, p, t;
 	if (x.reading)
 		return;
 	x.reading = true;
@@ -275,7 +261,7 @@ function xray_log(pid) {
 // What `xray run -test` says about the config cli.uc did not start xray with. Async:
 // a hung binary is killed after 5 s; the result is kept until the next restart.
 function xray_test() {
-	let x = st.xray, out = `${RUN_DIR}/xray-test`, p, t;
+	let x = st.xray, out = `${RUN_DIR}/xray-test-${++probe_seq}`, p, t;
 	if (x.testing)
 		return;
 	x.testing = true;
@@ -488,8 +474,13 @@ function test_all(cb) {
 	}
 
 	test_resume = next;
-	// nothing is known about xray: choose_best() puts its decision off (see check())
-	test_abort = () => done(XRAY_UNKNOWN);
+	// nothing is known about xray: choose_best() puts its decision off (see check()),
+	// a refused test port is checked there
+	test_abort = () => {
+		if (q.refused)
+			st.xray_choose_code = 7;
+		done(XRAY_UNKNOWN);
+	};
 	next();
 }
 
@@ -543,24 +534,62 @@ function settle() {
 }
 
 function after_reload() {
-	st.reload_failed = null;
+	st.reload_error = null;
 	load_index();
 	st.passthrough = false;
 	settle();
 }
 
-// The reload hung or did not start: what xray runs now is unknown. The state is error
-// until a reload goes through: check() tries again every RELOAD_RETRY, a select or an
-// update tries at once, a reload past the daemon (reindex) counts too.
+// The reload hung or failed: what xray runs is likely the old config (generate writes the
+// new one at the end), so the checks, failover and passthrough go on. The status shows
+// error until a reload goes through: another try every RELOAD_RETRY, select and updates
+// try at once, a reload past the daemon (reindex) counts too.
 function reload_failed(why) {
 	log(`${why}, next try in ${RELOAD_RETRY} s`);
-	st.reload_failed = now();
+	st.reload_error = why;
 	st.reloading = st.reload_pending = false;
 	load_index();
 	st.gen++;
-	set_state('error', why);
 	if (st.testing)
 		test_abort();
+	timers.retry?.cancel();
+	timers.retry = uloop.timer(RELOAD_RETRY * 1000, () => {
+		log('trying the reload again');
+		reload_service();
+	});
+}
+
+// What a working reload changes: its processes and their CPU time, and those of another
+// `init.d/xvpn` (rpcd, UCI triggers) that holds procd's service lock meanwhile. One waiting
+// for the lock or for a stuck procd changes nothing.
+function reload_sig(pid) {
+	let ps = procs(), seen = {}, cpu = 0;
+	for (let root in [ pid, ...filter(keys(ps), (p) => match(ps[p].cmd, /\/etc\/init\.d\/xvpn/)) ])
+		for (let p in tree(root, ps))
+			if (!seen[p]) {
+				seen[p] = true;
+				cpu += ps[p]?.cpu ?? 0;
+			}
+	return `${join(',', sort(keys(seen)))} ${cpu}`;
+}
+
+function watch_reload(r) {
+	r.t = uloop.timer(10000, () => {
+		if (reload !== r)
+			return;
+		let sig = reload_sig(r.p.pid()), t = now();
+		if (sig != r.sig) {
+			r.sig = sig;
+			r.last = t;
+		}
+		if (t - r.last < RELOAD_IDLE && t - r.at < RELOAD_MAX)
+			return r.t.set(10000);
+		reload = null;
+		kill_tree(r.p.pid());
+		unlink(r.out);
+		reload_failed(t - r.at >= RELOAD_MAX ? `reload did not finish in ${RELOAD_MAX} s and was killed`
+			: `reload made no progress for ${RELOAD_IDLE} s and was killed`);
+	});
 }
 
 reload_service = function() {
@@ -568,27 +597,28 @@ reload_service = function() {
 		st.reload_pending = true;
 		return;
 	}
+	timers.retry?.cancel();
 	st.reloading = true;
 	st.gen++;	// measurements in flight go through the config being replaced
-	let r = reload = {};
-	r.p = spawn('/etc/init.d/xvpn', [ 'reload' ], (code) => {
+	let r = reload = { at: now(), out: `${RUN_DIR}/reload-${++probe_seq}` };
+	r.last = r.at;
+	// uloop.process reports a killed process as exit code 0: sh writes the script's own
+	r.p = spawn('/bin/sh', [ '-c', `/etc/init.d/xvpn reload; echo $? > ${shq(r.out)}` ], (code) => {
 		if (reload !== r)
-			return;	// killed by the timeout
+			return;	// killed by watch_reload()
 		reload = null;
 		r.t?.cancel();
+		let rc = readfile(r.out);
+		unlink(r.out);
 		if (code < 0)
 			return reload_failed('cannot start /etc/init.d/xvpn reload');
+		if (rc == null || int(rc) >= 128)
+			return reload_failed('reload was killed (out of memory?)');
 		after_reload();
 	});
-	// a stuck procd or generate must not stop the health checks for good
+	// a stuck procd must not stop the reloads for good
 	if (r.p)
-		r.t = uloop.timer(RELOAD_TIMEOUT * 1000, () => {
-			if (reload !== r)
-				return;
-			reload = null;
-			kill_tree(r.p.pid());
-			reload_failed(`reload did not finish in ${RELOAD_TIMEOUT} s and was killed`);
-		});
+		watch_reload(r);
 };
 
 // The service is also reloaded past the daemon (rpcd, UCI triggers on wireless and
@@ -605,8 +635,10 @@ reindex = function(notified) {
 			timers.settle.set(3000);
 		return;	// our own reload: after_reload() takes over
 	}
-	if (notified)
-		st.reload_failed = null;	// whoever ran it, the config is applied
+	if (notified && st.reload_error) {
+		st.reload_error = null;	// whoever ran it, the config is applied
+		timers.retry?.cancel();
+	}
 	if (!changed)
 		return;
 	log('server list changed by a reload outside the daemon');
@@ -678,13 +710,6 @@ check = function() {
 	if (st.testing || st.reloading)
 		return;
 	alive();
-	if (st.reload_failed != null) {
-		if (now() - st.reload_failed >= RELOAD_RETRY) {
-			log('trying the reload again');
-			reload_service();
-		}
-		return;
-	}
 	if (!length(index.servers)) {
 		set_state('no_servers', 'no servers in subscriptions');
 		return;
@@ -697,7 +722,9 @@ check = function() {
 	let gen = st.gen;
 	if (st.xray_choose) {
 		// a decision put off while xray did not work
-		xray_check(null, (problem, inst) => {
+		let code = st.xray_choose_code;
+		st.xray_choose_code = null;
+		xray_check(code, (problem, inst) => {
 			if (!valid(gen) || !st.xray_choose || problem == XRAY_UNKNOWN)
 				return;
 			if (problem)
@@ -732,8 +759,8 @@ check = function() {
 				set_state('degraded', `${st.fails} failed checks`);
 				return;
 			}
-			probe(null, (dms) => {
-				if (!valid(gen) || st.active != e.id)
+			probe(null, (dms, dcode) => {
+				if (!valid(gen) || st.active != e.id || dcode < 0)
 					return;
 				if (dms < 0)
 					set_state('wan_down', 'no direct internet access');
@@ -745,7 +772,7 @@ check = function() {
 };
 
 function rank() {
-	if (st.testing || st.reloading || st.state != 'connected')
+	if (st.testing || st.reloading || st.reload_error || st.state != 'connected')
 		return;
 	test_all((problem) => {
 		if (problem || !H.auto_best || st.reloading)
@@ -786,17 +813,18 @@ function status() {
 		quarantined: quarantined(e.id),
 	}));
 	// cli.uc could not apply the rules and blocked the clients (fail closed)
-	let fw_error = readfile(FW_ERROR_FILE);
+	// and a reload that failed: what xray runs may be not what the daemon wants
+	let fw_error = readfile(FW_ERROR_FILE), error = fw_error ?? st.reload_error;
 	return {
-		state: fw_error ? 'error' : st.state, active: st.active, since: st.since, fails: st.fails,
+		state: error ? 'error' : st.state, active: st.active, since: st.since, fails: st.fails,
 		testing: st.testing, updating: st.updating || !!update_running(), passthrough: st.passthrough,
-		last_error: fw_error ?? st.last_error, last_switch: st.last_switch, last_test: st.last_test,
+		last_error: error ?? st.last_error, last_switch: st.last_switch, last_test: st.last_test,
 		xray_restarts: st.xray.restarts ?? 0, servers,
 	};
 }
 
 // Last resort for a flag left set by a path nobody thought of: no check got past
-// testing/reloading for STALL seconds. A hung reload is RELOAD_TIMEOUT's job.
+// testing/reloading for STALL seconds. A hung reload is watch_reload()'s job.
 function watchdog() {
 	let idle = now() - st.alive;
 	if (idle < STALL)
@@ -848,6 +876,9 @@ conn.publish('xvpn', {
 	},
 	test: {
 		call: () => {
+			// after a failed reload the test ports may not match what xray runs
+			if (st.reload_error)
+				return { ok: false, error: 'busy' };
 			test_all(null);
 			return { ok: true };
 		},
@@ -896,3 +927,7 @@ else {
 }
 
 uloop.run();
+
+// SIGTERM (stop, restart): what is still queued goes out now
+for (let m in logq)
+	system([ '/usr/bin/logger', '-t', 'xvpn', m ]);
