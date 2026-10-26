@@ -131,8 +131,10 @@ export function update(sub, proxy_port) {
 };
 
 // Seconds until the subscription is due for an update (<= 0 means now).
-export function due_in(sub) {
-	let cache = load_cache(sub.id), st = load_status(sub.id);
+// cache and st: already loaded by the caller (rpcd lists every subscription)
+export function due_in(sub, cache, st) {
+	cache ??= load_cache(sub.id);
+	st ??= load_status(sub.id);
 	let hours = sub.update_interval || cache?.interval || 12;
 	let last = st.last_ok ?? 0;
 	if (st.error && st.last_attempt > last)

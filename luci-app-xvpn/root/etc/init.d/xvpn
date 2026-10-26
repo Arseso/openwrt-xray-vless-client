@@ -14,6 +14,9 @@ start_service() {
 	config_get_bool enabled main enabled 0
 	config_get xray_bin main xray_bin /usr/bin/xray
 
+	# VPN SSIDs get fixed names (xvpn-apN), deselected ones get theirs back; also when turned off
+	$CLI ifnames
+
 	if [ "$enabled" != 1 ]; then
 		$CLI fw-remove
 		return 0

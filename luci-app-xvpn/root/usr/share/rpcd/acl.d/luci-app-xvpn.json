@@ -3,15 +3,13 @@
 		"description": "Grant access to XVPN",
 		"read": {
 			"ubus": {
-				"luci.xvpn": [ "status", "servers", "subscriptions", "access_points", "stats", "log", "firewall" ],
-				"xvpn": [ "status" ]
+				"luci.xvpn": [ "status", "servers", "subscriptions", "access_points", "stats", "log", "firewall" ]
 			},
 			"uci": [ "xvpn", "firewall" ]
 		},
 		"write": {
 			"ubus": {
-				"luci.xvpn": [ "update", "service" ],
-				"xvpn": [ "test", "select", "update", "check" ]
+				"luci.xvpn": [ "update", "service", "test", "select" ]
 			},
 			"uci": [ "xvpn" ]
 		}

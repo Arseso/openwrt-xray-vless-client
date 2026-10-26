@@ -1,6 +1,6 @@
 #!/usr/bin/ucode
 // SPDX-License-Identifier: MIT
-// xvpn command line: generate | fw-apply [passthrough] | fw-guard | fw-refresh | fw-remove | update [sid...|all]
+// xvpn command line: generate | ifnames | ifnames-wait | fw-apply [passthrough] | fw-guard | fw-refresh | fw-remove | update [sid...|all]
 
 'use strict';
 
@@ -9,11 +9,11 @@ import * as ubus from 'ubus';
 import {
 	load_config, read_json, write_json, write_file, mkdir_p, log, run, shq, is_updater,
 	ACTIVE_FILE, CONFIG_FILE, INDEX_FILE, VAR_DIR, RUN_DIR, UPDATE_LOCK,
-	FW_WANT_FILE, FW_MODE_FILE, FW_ERROR_FILE, FW_LOCK_FILE
+	FW_WANT_FILE, FW_MODE_FILE, FW_ERROR_FILE, FW_WARN_FILE, FW_LOCK_FILE
 } from 'xvpn.util';
 import { all_servers, update } from 'xvpn.subscription';
 import { build_index, generate } from 'xvpn.xrayconf';
-import { resolve, apply, remove } from 'xvpn.firewall';
+import { resolve, apply, remove, fix_ifnames, ifnames_applied } from 'xvpn.firewall';
 
 const cfg = load_config();
 
@@ -35,6 +35,8 @@ function fw_lock() {
 // Applies the wanted mode (full | passthrough | block; null: the last wanted one, fw-refresh).
 // When nft rejects it, falls back to block, then minimal (fail closed); FW_MODE_FILE gets
 // what is applied and FW_ERROR_FILE the error until the wanted mode applies.
+// An SSID that has no device name cannot be in the rules: its clients would go around the
+// tunnel, so all VPN clients are blocked (passthrough lets them out anyway) and it is an error.
 function fw(want) {
 	let lock = fw_lock();
 	want ??= readfile(FW_WANT_FILE);
@@ -44,23 +46,34 @@ function fw(want) {
 	mkdir_p(RUN_DIR);
 	write_file(FW_WANT_FILE, want);
 	let res = resolve(cfg, ubus.connect());
-	let err = apply(cfg, res, MODES[want]);
-	if (err == null) {
-		write_file(FW_MODE_FILE, want);
+	let errs = [], mode = want;
+	if (length(res.errors)) {
+		push(errs, `access points not found: ${join('; ', res.errors)}`);
+		log(errs[0]);
+		if (want != 'passthrough')
+			mode = 'block';
+	}
+
+	let err = apply(cfg, res, MODES[mode]);
+	if (err != null) {
+		push(errs, `firewall rules failed: ${err}`);
+		let tried = mode;
+		mode = null;
+		for (let m in [ 'block', 'minimal' ])
+			if (m != tried && apply(cfg, res, MODES[m]) == null) {
+				mode = m;
+				break;
+			}
+	}
+	if (mode)
+		write_file(FW_MODE_FILE, mode);
+	if (!length(errs)) {
 		unlink(FW_ERROR_FILE);
 		return true;
 	}
-
-	for (let m in [ 'block', 'minimal' ]) {
-		if (m == want)
-			continue;
-		if (apply(cfg, res, MODES[m]) == null) {
-			write_file(FW_MODE_FILE, m);
-			log(`VPN clients are blocked (${m}) until the firewall rules are fixed`);
-			break;
-		}
-	}
-	write_file(FW_ERROR_FILE, `firewall rules failed: ${err}`);
+	if (mode && mode != want)
+		log(`VPN clients are blocked (${mode}) until the firewall rules are fixed`);
+	write_file(FW_ERROR_FILE, join('\n', errs));
 	return false;
 }
 
@@ -103,6 +116,15 @@ case 'generate': {
 	// one malformed server must not take the whole VPN down: drop the ones xray rejects
 	if (length(servers) && access(cfg.main.xray_bin, 'x') && !xray_ok(CONFIG_FILE)) {
 		let good = [], bad = [], tmp = `${VAR_DIR}/check.json`;
+		// xray that rejects a config without servers is broken itself: keep the servers,
+		// the daemon reports xray_down rather than "no servers"
+		write_json(tmp, generate(cfg, [], build_index(cfg, [], null)));
+		if (!xray_ok(tmp)) {
+			unlink(tmp);
+			write_json(INDEX_FILE, idx);
+			log(`xray does not work, check: ${cfg.main.xray_bin} run -test -c ${CONFIG_FILE}`);
+			exit(4);
+		}
 		for (let s in servers) {
 			write_json(tmp, generate(cfg, [ s ], build_index(cfg, [ s ], s.id)));
 			if (xray_ok(tmp))
@@ -133,9 +155,34 @@ case 'fw-apply':
 case 'fw-guard':
 	exit(fw(cfg.access.killswitch ? 'block' : 'passthrough') ? 0 : 1);
 
-// devices changed (a wifi came up) or fw4 flushed the tables: the wanted mode again
+// devices changed (a wifi or a network came up) or fw4 flushed the tables: the wanted mode again
 case 'fw-refresh':
 	exit(fw(null) ? 0 : 1);
+
+// before the rules (init.d): fixed names for the VPN SSIDs; the rules match both the fixed
+// and the current name until netifd applies them
+case 'ifnames': {
+	let r = fix_ifnames(cfg);
+	mkdir_p(RUN_DIR);
+	if (r.warning)
+		write_file(FW_WARN_FILE, r.warning);
+	else
+		unlink(FW_WARN_FILE);
+	if (r.changed) {
+		run('ubus call network reload');
+		// hostapd usually renames the interfaces in place (kernel "move", not "add"): another
+		// SSID may now have the name the VPN SSID had, so refresh once the fixed names are on
+		system('/usr/bin/ucode /usr/share/xvpn/cli.uc ifnames-wait >/dev/null 2>&1 </dev/null &');
+	}
+	exit(0);
+}
+
+case 'ifnames-wait': {
+	let conn = ubus.connect();
+	for (let i = 0; i < 30 && !ifnames_applied(cfg, conn); i++)
+		system('sleep 1');
+	exit(fw(null) ? 0 : 1);
+}
 
 case 'fw-remove': {
 	let lock = fw_lock();
@@ -168,6 +215,6 @@ case 'update': {
 }
 
 default:
-	warn('usage: cli.uc generate | fw-apply [passthrough] | fw-guard | fw-refresh | fw-remove | update [sid...|all]\n');
+	warn('usage: cli.uc generate | ifnames | ifnames-wait | fw-apply [passthrough] | fw-guard | fw-refresh | fw-remove | update [sid...|all]\n');
 	exit(1);
 }
