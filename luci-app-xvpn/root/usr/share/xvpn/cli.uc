@@ -11,7 +11,7 @@ import {
 	ACTIVE_FILE, CONFIG_FILE, INDEX_FILE, VAR_DIR, RUN_DIR, UPDATE_LOCK,
 	FW_WANT_FILE, FW_MODE_FILE, FW_ERROR_FILE, FW_WARN_FILE, FW_LOCK_FILE
 } from 'xvpn.util';
-import { all_servers, update } from 'xvpn.subscription';
+import { all_servers, update, prune } from 'xvpn.subscription';
 import { build_index, generate } from 'xvpn.xrayconf';
 import { resolve, apply, remove, fix_ifnames, ifnames_applied } from 'xvpn.firewall';
 
@@ -107,6 +107,7 @@ function unlock_update() {
 
 switch (ARGV[0]) {
 case 'generate': {
+	prune(cfg);
 	let servers = all_servers(cfg);
 	let active = trim(readfile(ACTIVE_FILE) ?? '');
 	let idx = build_index(cfg, servers, active);

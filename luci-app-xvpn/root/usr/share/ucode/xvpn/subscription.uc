@@ -3,7 +3,7 @@
 
 'use strict';
 
-import { readfile, unlink } from 'fs';
+import { readfile, unlink, lsdir } from 'fs';
 import { SUBS_DIR, RUN_DIR, read_json, write_json, mkdir_p, shq, run } from 'xvpn.util';
 import { b64, parse_link, parse_subscription } from 'xvpn.links';
 
@@ -61,7 +61,8 @@ function parse_title(v) {
 function download(sub, proxy_port) {
 	mkdir_p(RUN_DIR);
 	let hdr = `${RUN_DIR}/sub-${sub.id}.hdr`, body = `${RUN_DIR}/sub-${sub.id}.body`;
-	let cmd = sprintf("curl -sS -L --connect-timeout 10 --max-time 40 -A %s -D %s -o %s -w '%%{http_code}' %s %s 2>&1",
+	// the URL comes from UCI as is: no file://, scp:// and the like, also not through a redirect
+	let cmd = sprintf("curl -sS -L --proto =http,https --proto-redir =http,https --connect-timeout 10 --max-time 40 -A %s -D %s -o %s -w '%%{http_code}' %s %s 2>&1",
 		shq(sub.user_agent), shq(hdr), shq(body),
 		proxy_port ? `-x socks5h://127.0.0.1:${proxy_port}` : '',
 		shq(sub.url));
@@ -128,6 +129,23 @@ export function update(sub, proxy_port) {
 	write_json(status_path(sub.id), st);
 
 	return { changed, count: length(parsed.servers), skipped: parsed.skipped, error: null };
+};
+
+// Removes the cache and the status of subscriptions that are no longer in UCI.
+export function prune(cfg) {
+	let known = {};
+	for (let sub in cfg.subscriptions)
+		known[sub.id] = true;
+	for (let f in (lsdir(SUBS_DIR) ?? [])) {
+		let m = match(f, /^(.+)\.json$/);
+		if (m && !known[m[1]])
+			unlink(`${SUBS_DIR}/${f}`);
+	}
+	for (let f in (lsdir(RUN_DIR) ?? [])) {
+		let m = match(f, /^sub-(.+)\.(json|hdr|body)$/);
+		if (m && !known[m[1]])
+			unlink(`${RUN_DIR}/${f}`);
+	}
 };
 
 // Seconds until the subscription is due for an update (<= 0 means now).

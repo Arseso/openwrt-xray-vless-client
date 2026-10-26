@@ -11,9 +11,12 @@
 
 const callSubscriptions = rpc.declare({ object: 'luci.xvpn', method: 'subscriptions' });
 const callUpdate = rpc.declare({ object: 'luci.xvpn', method: 'update', params: [ 'sid' ] });
+// the policy of rpcd rejects "sid": null
+const callUpdateAll = rpc.declare({ object: 'luci.xvpn', method: 'update' });
 const callParseLinks = rpc.declare({ object: 'luci.xvpn', method: 'parse_links', params: [ 'links' ] });
 
 const SCHEMES = /^(vless|vmess|trojan|ss):\/\/\S+$/i;
+const URL_MAX = 2048;
 
 function errorText(err) {
 	return {
@@ -68,8 +71,9 @@ function notify(msg, type) {
 		ui.addNotification(null, E('p', {}, [ txt(msg) ]), type);
 }
 
-// sections made in the UI get a fixed name: an anonymous one is renamed by uci whenever its
-// options change, and the downloaded servers and the status are kept under that name
+// sections made in the UI get a fixed name: the downloaded servers and the status are kept
+// under it, and an anonymous section is renumbered when one above it is moved or deleted
+// (uci-defaults gives the old anonymous ones a name too)
 function newName() {
 	const rnd = new Uint8Array(4);
 	crypto.getRandomValues(rnd);
@@ -119,9 +123,11 @@ const LinksValue = form.TextValue.extend({
 		uci.unset('xvpn', section_id, 'link');
 	},
 
+	// saving waits for the check of every line
 	validate(section_id, value) {
 		this.schedule(section_id, value);
 		const lines = (value ?? '').split('\n');
+		let unchecked = false;
 		for (let i = 0; i < lines.length; i++) {
 			const l = lines[i].trim();
 			if (!l)
@@ -130,23 +136,42 @@ const LinksValue = form.TextValue.extend({
 				return _('Line %d: not a vless://, vmess://, trojan:// or ss:// link').format(i + 1);
 			if (this.parsed?.[l]?.error)
 				return _('Line %d: %s').format(i + 1, this.parsed[l].error);
+			if (!this.parsed?.[l])
+				unchecked = true;
 		}
+		if (unchecked)
+			return this.failed ? _('Could not check the links: %s').format(this.failed) : _('The links are being checked…');
 		return true;
 	},
 
-	// asks the backend about the lines it has not seen yet, then validates again
+	// asks the backend about the lines it has not seen yet, then validates again;
+	// after a failed check it asks again only once the text changes
 	schedule(section_id, value) {
+		if (value === this.failedValue)
+			return;
+		this.failed = this.failedValue = null;
 		this.value_ = value;
 		window.clearTimeout(this.timer);
 		this.timer = window.setTimeout(() => {
 			const todo = [ ...new Set(this.lines(this.value_).filter((l) => SCHEMES.test(l) && !this.parsed[l])) ];
 			if (!todo.length)
 				return this.showResults();
+			const fail = (msg) => {
+				this.failed = msg;
+				this.failedValue = value;
+			};
 			callParseLinks(todo).then((res) => {
-				(res?.links ?? []).forEach((r, i) => this.parsed[todo[i]] = r);
+				if (typeof(res) == 'number')
+					fail(rpc.getStatusText(res));
+				else if (!Array.isArray(res?.links) || res.links.length != todo.length)
+					fail(res?.error ?? _('unexpected answer'));
+				else
+					res.links.forEach((r, i) => this.parsed[todo[i]] = r);
+			// the message of an RPC error carries a stack trace after the first line
+			}).catch((e) => fail(String(e.message).split('\n')[0])).finally(() => {
 				this.triggerValidation(section_id);
 				this.showResults();
-			}).catch((e) => notify(_('Could not check the links: %s').format(e.message), 'error'));
+			});
 		}, 400);
 	},
 
@@ -167,7 +192,9 @@ const LinksValue = form.TextValue.extend({
 				return;
 			const r = SCHEMES.test(l) ? this.parsed[l] : { error: _('not a vless://, vmess://, trojan:// or ss:// link') };
 			let check;
-			if (!r)
+			if (!r && this.failed)
+				check = red(_('not checked: %s').format(this.failed));
+			else if (!r)
 				check = E('em', {}, _('checking…'));
 			else if (r.error)
 				check = red(r.error);
@@ -305,7 +332,8 @@ return view.extend({
 		const btn = this.buttons[sid ?? ''] = E('button', {
 			'class': 'cbi-button cbi-button-action',
 			'title': sid ? _('Download this subscription now') : _('Download all enabled subscriptions now'),
-			'click': ui.createHandlerFn(this, 'handleUpdate', sid),
+			// not ui.createHandlerFn: it enables the button again when the call returns
+			'click': () => this.handleUpdate(sid),
 		}, sid ? _('Update') : _('Update all'));
 		this.fillButton(sid ?? '');
 		return btn;
@@ -325,7 +353,7 @@ return view.extend({
 		const key = sid ?? '';
 		this.busy[key] = true;
 		this.fillButton(key);
-		return callUpdate(sid ?? null).then((res) => {
+		return (sid ? callUpdate(sid) : callUpdateAll()).then((res) => {
 			if (typeof(res) == 'number' && res != 0)
 				notify(_('Request failed: %s').format(rpc.getStatusText(res)), 'error');
 			else if (res?.ok === false)
@@ -398,7 +426,9 @@ return view.extend({
 
 		o = s.option(form.Value, 'url', _('URL'));
 		o.rmempty = false;
-		o.validate = (sid, v) => /^https?:\/\/[^\s/?#]+\S*$/i.test(v.trim()) || _('Enter an http:// or https:// URL');
+		o.validate = (sid, v) => (v.length > URL_MAX) ? _('The URL is longer than %d characters').format(URL_MAX)
+			: /^https?:\/\/[^\s/?#]+\S*$/i.test(v.trim()) || _('Enter an http:// or https:// URL');
+		o.write = (sid, v) => uci.set('xvpn', sid, 'url', v.trim());
 		o.textvalue = (sid) => {
 			const url = uci.get('xvpn', sid, 'url') ?? '';
 			return E('span', {
