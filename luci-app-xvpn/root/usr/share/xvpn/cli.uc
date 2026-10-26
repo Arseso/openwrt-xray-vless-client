@@ -103,6 +103,15 @@ case 'generate': {
 	// one malformed server must not take the whole VPN down: drop the ones xray rejects
 	if (length(servers) && access(cfg.main.xray_bin, 'x') && !xray_ok(CONFIG_FILE)) {
 		let good = [], bad = [], tmp = `${VAR_DIR}/check.json`;
+		// xray that rejects a config without servers is broken itself: keep the servers,
+		// the daemon reports xray_down rather than "no servers"
+		write_json(tmp, generate(cfg, [], build_index(cfg, [], null)));
+		if (!xray_ok(tmp)) {
+			unlink(tmp);
+			write_json(INDEX_FILE, idx);
+			log(`xray does not work, check: ${cfg.main.xray_bin} run -test -c ${CONFIG_FILE}`);
+			exit(4);
+		}
 		for (let s in servers) {
 			write_json(tmp, generate(cfg, [ s ], build_index(cfg, [ s ], s.id)));
 			if (xray_ok(tmp))

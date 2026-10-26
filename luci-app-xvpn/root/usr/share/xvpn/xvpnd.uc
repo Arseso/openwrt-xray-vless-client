@@ -7,15 +7,18 @@
 
 import * as uloop from 'uloop';
 import * as ubus from 'ubus';
-import { readfile, unlink } from 'fs';
+import { readfile, unlink, access } from 'fs';
 import {
-	load_config, read_json, write_json, write_file, mkdir_p, log, shq, update_running,
-	ETC_DIR, RUN_DIR, INDEX_FILE, ACTIVE_FILE, STATE_FILE, FW_ERROR_FILE
+	load_config, read_json, write_json, write_file, mkdir_p, log, run, shq, update_running,
+	ETC_DIR, RUN_DIR, CONFIG_FILE, INDEX_FILE, ACTIVE_FILE, STATE_FILE, FW_ERROR_FILE
 } from 'xvpn.util';
 import { due_in } from 'xvpn.subscription';
 
 const CLI = '/usr/share/xvpn/cli.uc';
 const SUB_CHECK = 300;
+const XRAY_GRACE = 10;		// s xray may be down before it counts: start, procd respawn
+const XRAY_RETRY = 15;		// s between our restarts of xray
+const XRAY_RESTARTS = 3;
 
 const cfg = load_config();
 const H = cfg.health;
@@ -40,10 +43,13 @@ let st = {
 	last_test: prev.last_test,
 	latency: prev.latency ?? {},
 	quarantine: prev.quarantine ?? {},
+	xray: { since: null, at: null, restarts: 0, why: null },	// see xray_down()
+	xray_choose: null,	// choose_best() decision put off while xray does not work
 };
 let test_waiters = [], testq = null, test_resume = null;
 let timers = {}, settling = false;
 let probe_seq = 0;
+let conn;
 // ucode does not hoist functions: these call each other in a cycle, defined below
 let reload_service, reindex, choose_best, check;
 
@@ -110,7 +116,7 @@ function spawn(cmd, args, cb) {
 }
 
 // HTTP ping through a SOCKS test port (or direct when port is null).
-// Calls cb(ms), ms < 0 on failure.
+// Calls cb(ms, code), ms < 0 on failure, code is the curl exit code.
 function probe(port, cb) {
 	let out = `${RUN_DIR}/probe-${++probe_seq}`;
 	let cmd = sprintf("/usr/bin/curl -s -o /dev/null --connect-timeout %d --max-time %d -w '%%{http_code} %%{time_starttransfer}' %s %s > %s 2>/dev/null",
@@ -121,8 +127,103 @@ function probe(port, cb) {
 		unlink(out);
 		let http = int(r[0]);
 		let ok = (code == 0 && (http == 204 || http == 200));
-		cb(ok ? int(+r[1] * 1000) : -1);
+		cb(ok ? int(+r[1] * 1000) : -1, code);
 	});
+}
+
+function xray_instance() {
+	return conn.call('service', 'list', { name: 'xvpn' })?.xvpn?.instances?.xray;
+}
+
+// Why xray does not work, for last_error. cli.uc did not start it (no instance): what
+// `xray run -test` says; otherwise its last log lines (procd logs its stdout and stderr
+// under the binary name), those of the latest pid without the banner.
+function xray_why(inst) {
+	let bin = cfg.main.xray_bin;
+	if (!access(bin, 'x'))
+		return `${bin} is missing or not executable`;
+	let lines = [];
+	if (inst) {
+		let tag = replace(bin, /.*\//, ''), pid = null;
+		for (let l in split(run('/sbin/logread -l 300 2>/dev/null').out, '\n')) {
+			let m = match(l, / daemon\.[a-z]+ ([^ []+)\[([0-9]+)\]: (.*)$/);
+			if (!m || m[1] != tag)
+				continue;
+			if (m[2] != pid) {
+				pid = m[2];
+				lines = [];
+			}
+			push(lines, m[3]);
+		}
+	}
+	else
+		lines = split(run(`${shq(bin)} run -test -c ${shq(CONFIG_FILE)} 2>&1`).out, '\n');
+	lines = filter(map(lines, (l) => trim(replace(l, /^[0-9\/]+ [0-9:.]+ /, ''))),
+		(l) => l != '' && !match(l, /^Xray [0-9]|^A unified platform|^\[Info\]/));
+	return substr(join('; ', slice(lines, -3)), 0, 400);
+}
+
+// Tells "xray does not work" from "the server is down": the instance runs under procd,
+// is not stopped and answers on its api port, which needs no server. code: curl exit
+// code of the failed probe, 7 = the test port refused the connection.
+// Calls cb(problem), null when xray works.
+function xray_check(code, cb) {
+	let inst = xray_instance();
+	if (!inst?.running)
+		return cb('xray is not running', inst);
+	if (match(readfile(`/proc/${inst.pid}/stat`) ?? '', /\) T /))
+		return cb('xray is stopped', inst);
+	spawn('/usr/bin/curl', [ '-s', '-o', '/dev/null', '--max-time', '3', `http://127.0.0.1:${cfg.main.api_port}/` ], (c) => {
+		if (c == 7 || c == 28)
+			cb(c == 7 ? 'xray does not accept connections' : 'xray does not respond', inst);
+		else if (code == 7)
+			cb('xray does not accept connections on the test port', inst);
+		else
+			cb(null);
+	});
+}
+
+function xray_up() {
+	st.xray = { since: null, at: null, restarts: 0, why: null };
+}
+
+function restart_xray(inst) {
+	let x = st.xray;
+	x.restarts++;
+	x.at = time();
+	x.why = null;	// fresh log lines after the restart
+	log(`restarting xray (${x.restarts}/${XRAY_RESTARTS})`);
+	if (inst?.running) {
+		// hung or stopped: procd starts it again after the kill
+		st.gen++;
+		conn.call('service', 'signal', { name: 'xvpn', instance: 'xray', signal: 9 });
+	}
+	else
+		reload_service();	// procd gave up on it, or cli.uc did not start it
+}
+
+// xray does not work: no server is to blame, so none goes to quarantine and
+// passthrough stays as it is. After XRAY_GRACE the state is xray_down, then up to
+// XRAY_RESTARTS restarts XRAY_RETRY apart. reason: a choose_best() decision to take
+// once xray works again.
+function xray_down(problem, inst, reason) {
+	let x = st.xray, now = time();
+	if (reason)
+		st.xray_choose = reason;
+	if (st.active)
+		delete st.quarantine[st.active];
+	x.since ??= now;
+	if (now - x.since < XRAY_GRACE)
+		return;
+	x.why ??= xray_why(inst);
+	let err = problem + (x.why ? `: ${x.why}` : '');
+	if (x.restarts >= XRAY_RESTARTS) {
+		set_state('xray_down', `${err} (${XRAY_RESTARTS} restarts did not help)`);
+		return;
+	}
+	set_state('xray_down', err);
+	if (now - (x.at ?? x.since) >= XRAY_RETRY)
+		restart_xray(inst);
 }
 
 function quarantined(id) {
@@ -295,6 +396,7 @@ function switch_to(id, reason) {
 }
 
 choose_best = function(reason) {
+	st.xray_choose = null;
 	test_all(() => {
 		// the test may end mid-reload with partial data: decide once it settles
 		if (st.reloading) {
@@ -303,9 +405,19 @@ choose_best = function(reason) {
 		}
 		let b = best() ?? best(true);
 		if (!b) {
-			set_state('no_servers', 'no live servers');
-			if (!cfg.access.killswitch)
-				set_passthrough(true);
+			// every server failed: maybe it is xray
+			xray_check(null, (problem, inst) => {
+				if (st.reloading) {
+					st.choose_pending = reason;
+					return;
+				}
+				if (problem)
+					return xray_down(problem, inst, reason);
+				xray_up();
+				set_state('no_servers', 'no live servers');
+				if (!cfg.access.killswitch)
+					set_passthrough(true);
+			});
 			return;
 		}
 		set_passthrough(false);
@@ -339,28 +451,51 @@ check = function() {
 		return failover('no active server');
 
 	let gen = st.gen;
-	probe(e.test_port, (ms) => {
+	if (st.xray_choose) {
+		// a decision put off while xray did not work
+		xray_check(null, (problem, inst) => {
+			if (!valid(gen) || !st.xray_choose)
+				return;
+			if (problem)
+				return xray_down(problem, inst);
+			xray_up();
+			let reason = st.xray_choose;
+			st.xray_choose = null;
+			choose_best(reason);
+		});
+		return;
+	}
+	probe(e.test_port, (ms, code) => {
 		if (!valid(gen) || st.active != e.id)
 			return;
-		st.latency[e.id] = { ms, at: time() };
 		if (ms >= 0) {
+			st.latency[e.id] = { ms, at: time() };
+			xray_up();
 			st.fails = 0;
 			set_passthrough(false);
 			set_state('connected', null);
 			return;
 		}
-		st.fails++;
-		if (st.fails < H.fail_threshold) {
-			set_state('degraded', `${st.fails} failed checks`);
-			return;
-		}
-		probe(null, (dms) => {
+		xray_check(code, (problem, inst) => {
 			if (!valid(gen) || st.active != e.id)
 				return;
-			if (dms < 0)
-				set_state('wan_down', 'no direct internet access');
-			else
-				failover(`"${e.name}" is down`);
+			if (problem)
+				return xray_down(problem, inst);
+			xray_up();
+			st.latency[e.id] = { ms, at: time() };
+			st.fails++;
+			if (st.fails < H.fail_threshold) {
+				set_state('degraded', `${st.fails} failed checks`);
+				return;
+			}
+			probe(null, (dms) => {
+				if (!valid(gen) || st.active != e.id)
+					return;
+				if (dms < 0)
+					set_state('wan_down', 'no direct internet access');
+				else
+					failover(`"${e.name}" is down`);
+			});
 		});
 	});
 };
@@ -412,7 +547,7 @@ function status() {
 		state: fw_error ? 'error' : st.state, active: st.active, since: st.since, fails: st.fails,
 		testing: st.testing, updating: st.updating || !!update_running(), passthrough: st.passthrough,
 		last_error: fw_error ?? st.last_error, last_switch: st.last_switch, last_test: st.last_test,
-		servers,
+		xray_restarts: st.xray.restarts, servers,
 	};
 }
 
@@ -431,7 +566,7 @@ st.active = index.active;
 
 uloop.init();
 
-let conn = ubus.connect();
+conn = ubus.connect();
 if (!conn)
 	die('cannot connect to ubus');
 

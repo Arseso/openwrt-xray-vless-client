@@ -3,7 +3,8 @@
 # local VLESS "remote" servers, checks server selection, failover, subscription update and
 # that a VPN client (network namespace behind a bridge port) never reaches the "internet"
 # (another namespace) directly: boot guard, restart, stop, broken fw-apply, fw4 flush;
-# subscription update from LuCI through the daemon and by a reload past it.
+# subscription update from LuCI through the daemon and by a reload past it; a hung xray
+# and a broken xray_bin are xray_down, not dead servers.
 set -e
 cd "$(dirname "$0")/.."
 DOCKER="${DOCKER:-docker}"
@@ -116,6 +117,8 @@ latency() { ubus call xvpn status | jsonfilter -e "@.servers[@.name='$1'].latenc
 count_is() { [ "$(ubus call xvpn status | jsonfilter -e '@.servers[*].name' | wc -l)" = "$1" ]; }
 xvpnd_pid() { ubus call service list '{"name":"xvpn"}' | jsonfilter -e '@.xvpn.instances.xvpnd.pid'; }
 xvpnd_restarted() { p=$(xvpnd_pid); [ -n "$p" ] && [ "$p" != "$1" ] && ubus call xvpn status >/dev/null; }
+xray_pid() { ubus call service list '{"name":"xvpn"}' | jsonfilter -e '@.xvpn.instances.xray.pid'; }
+xray_restarted() { p=$(xray_pid); [ -n "$p" ] && [ "$p" != "$1" ]; }
 wait_cmd() { # timeout cmd...
 	t=$1; shift; i=0
 	while [ $i -lt $t ]; do "$@" >/dev/null 2>&1 && return 0; sleep 1; i=$((i+1)); done
@@ -310,6 +313,51 @@ r=$(ubus call luci.xvpn update '{"sid":"s2"}')
 wait_cmd 20 test -s /etc/xvpn/subs/s2.json
 [ ! -e /var/run/xvpn/updating ] || { echo "FAIL: lock left after update"; exit 1; }
 echo "OK: fresh subscription updated"
+
+# xray hangs (killall -STOP xray, but the remotes are xray too): xray_down, no server
+# is blamed, the daemon restarts xray
+quarantined() { ubus call xvpn status | jsonfilter -e '@.servers[@.quarantined=true].name'; }
+no_quarantine() { # what; earlier failovers left their quarantine, nothing new may be added
+	for q in $(quarantined); do
+		case " $q0 " in *" $q "*) ;; *) echo "FAIL: $q in quarantine ($1)"; ubus call xvpn status; exit 1;; esac
+	done
+	[ "$(status @.passthrough)" = false ] || { echo "FAIL: passthrough ($1)"; exit 1; }
+}
+a=$(active_name); n=$(ubus call xvpn status | jsonfilter -e '@.servers[*].name' | wc -l); q0=$(quarantined | tr '\n' ' ')
+x=$(xray_pid); kill -STOP $x
+wait_for @.state xray_down 30
+status @.last_error | grep -q 'xray is stopped' || { echo "FAIL: last_error: $(status @.last_error)"; exit 1; }
+no_quarantine "xray stopped"
+echo "OK: stopped xray is xray_down, no quarantine"
+wait_cmd 40 xray_restarted "$x"
+wait_for @.state connected 40
+active_is "$a" && [ "$(status @.xray_restarts)" = 0 ] || { echo "FAIL: after the xray restart"; ubus call xvpn status; exit 1; }
+logread | grep -q 'restarting xray (1/3)' || { echo "FAIL: no restart in the log"; exit 1; }
+echo "OK: the daemon restarted the hung xray"
+
+# broken xray_bin, kill switch off: xray_down with what xray says, no passthrough,
+# a few restarts, then the daemon gives up
+printf '#!/bin/sh\necho "xray: corrupted binary" >&2\nexit 1\n' > /tmp/xray-broken; chmod +x /tmp/xray-broken
+uci set xvpn.main.xray_bin=/tmp/xray-broken; uci set xvpn.access.killswitch=0; uci commit xvpn
+old=$(xvpnd_pid); reload_config
+wait_cmd 30 xvpnd_restarted "$old"
+wait_for @.state xray_down 40
+status @.last_error | grep -q 'corrupted binary' || { echo "FAIL: last_error: $(status @.last_error)"; exit 1; }
+count_is $n || { echo "FAIL: broken xray dropped the servers"; ubus call xvpn status; exit 1; }
+no_quarantine "broken xray_bin"
+wait_cmd 90 sh -c "ubus call xvpn status | jsonfilter -e @.last_error | grep -q 'restarts did not help'"
+[ "$(status @.state)" = xray_down ] && [ "$(status @.xray_restarts)" = 3 ] || { echo "FAIL: no give-up"; ubus call xvpn status; exit 1; }
+no_quarantine "gave up on xray"
+want_mode full full
+# kill switch off lets ICMP out, TCP still goes to xray: no passthrough
+tunnel && { echo "FAIL: client gets out with xray down"; exit 1; }
+echo "OK: broken xray_bin is xray_down, 3 restarts, no passthrough"
+uci set xvpn.main.xray_bin=/usr/bin/xray; uci set xvpn.access.killswitch=1; uci commit xvpn
+old=$(xvpnd_pid); reload_config
+wait_cmd 30 xvpnd_restarted "$old"
+wait_for @.state connected 40
+active_is "$a" || { echo "FAIL: expected $a after xray is fixed, got $(active_name)"; exit 1; }
+echo "OK: connected again once xray_bin is fixed"
 
 /etc/init.d/xvpn stop
 no_tproxy "stop with the service enabled"
