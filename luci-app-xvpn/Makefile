@@ -3,7 +3,7 @@
 include $(TOPDIR)/rules.mk
 
 LUCI_TITLE:=XVPN - xray VPN client with auto failover
-LUCI_DEPENDS:=+xray-core +curl +kmod-nft-tproxy +kmod-nft-socket +kmod-nft-bridge \
+LUCI_DEPENDS:=+luci-base +xray-core +curl +kmod-nft-tproxy +kmod-nft-socket +kmod-nft-bridge \
 	+ucode +ucode-mod-fs +ucode-mod-uci +ucode-mod-ubus +ucode-mod-uloop
 LUCI_PKGARCH:=all
 
