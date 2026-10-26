@@ -1,10 +1,22 @@
 #!/bin/sh
 # SPDX-License-Identifier: MIT
-# A wifi interface appeared (wifi up after xvpn started, renamed after reconfiguration):
-# resolve the access points again so that a VPN SSID gets into the rules.
+# A wifi interface appeared (wifi up after xvpn started, radio restarted): resolve the access
+# points again. VPN SSIDs have fixed names that are in the rules already; this drops the names
+# netifd used before and picks up SSIDs whose fixed name is not applied yet.
 
 [ "$ACTION" = add ] && [ "$DEVTYPE" = wlan ] || exit 0
-[ -f /var/run/xvpn/fw_mode ] && [ -n "$(uci -q get xvpn.access.wifi)" ] || exit 0
+[ -f /var/run/xvpn/fw_want ] || exit 0
+[ -n "$(uci -q get xvpn.access.wifi)$(uci -q get xvpn.access.network)" ] || exit 0
 
-# netifd reports the new ifname in network.wireless status a little later
-( sleep 3; /usr/bin/ucode /usr/share/xvpn/cli.uc fw-refresh ) >/dev/null 2>&1 </dev/null &
+# netifd reports the new ifname in network.wireless status a little later (up to ~15 s
+# when the radio restarts with several SSIDs)
+(
+	i=0
+	while [ $i -lt 15 ]; do
+		ubus call network.wireless status 2>/dev/null \
+			| jsonfilter -e "@.*.interfaces[@.ifname='$INTERFACE']" >/dev/null 2>&1 && break
+		sleep 1
+		i=$((i + 1))
+	done
+	/usr/bin/ucode /usr/share/xvpn/cli.uc fw-refresh
+) >/dev/null 2>&1 </dev/null &

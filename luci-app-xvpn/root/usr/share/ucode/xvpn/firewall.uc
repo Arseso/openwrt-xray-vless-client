@@ -4,7 +4,7 @@
 'use strict';
 
 import { cursor } from 'uci';
-import { NFT_FILE, VAR_DIR, IFNAMES_FILE, mkdir_p, read_json, write_json, write_file, run, log } from 'xvpn.util';
+import { NFT_FILE, VAR_DIR, mkdir_p, write_file, run, log } from 'xvpn.util';
 
 const BYPASS4 = [
 	'0.0.0.0/8', '10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8', '169.254.0.0/16',
@@ -23,63 +23,131 @@ function elements(list, quote) {
 	return sprintf('elements = { %s }; ', join(', ', map(list, (e) => quote ? `"${e}"` : e)));
 }
 
+// Our fixed names for the SSIDs in the rules: known before the radio is up and do not move
+// to another SSID when the radio restarts (phy1-ap0 / phy1-ap1 are given out in order).
+const IFNAME_PREFIX = 'xvpn-ap';
+const OUR_IFNAME = /^xvpn-ap[0-9]+$/;
+
+// longer names do not exist (IFNAMSIZ) and make nft reject the whole file
+function valid(dev) {
+	if (length(dev) <= 15)
+		return true;
+	log(`device name "${dev}" is longer than 15 characters, skipped`);
+	return false;
+}
+
+function words(v) {
+	return filter(split(type(v) == 'array' ? join(' ', v) : (v ?? ''), /[ \t]+/), (w) => w != '');
+}
+
+// wifi-iface sections attached to the given networks
+function wifi_of(uci, networks) {
+	let r = [];
+	uci.foreach('wireless', 'wifi-iface', (s) => {
+		for (let n in words(s.network))
+			if (n in networks)
+				push(r, s['.name']);
+	});
+	return r;
+}
+
+// SSIDs that need their own name in the rules: the selected ones and those of selected
+// networks without a device (Wi-Fi only network: the SSID itself is the L3 device)
+function wifi_sections(cfg, uci) {
+	let nodev = filter(cfg.access.networks,
+		(n) => uci.get('network', n) == 'interface' && !uci.get('network', n, 'device'));
+	return uniq([ ...cfg.access.wifi, ...(length(nodev) ? wifi_of(uci, nodev) : []) ]);
+}
+
+// Gives the SSIDs of wifi_sections() a fixed ifname (xvpn-apN) in /etc/config/wireless; a name
+// set by the user stays as is. Our names are removed from SSIDs that are no longer needed.
+// Returns true when wireless was committed: the names apply when netifd sets the radio up again.
+export function fix_ifnames(cfg, uci) {
+	uci ??= cursor();
+	// committing would commit someone's unfinished `uci set wireless...` too
+	if (length(uci.changes('wireless') ?? {})) {
+		log('wireless has uncommitted changes, SSID names are not fixed');
+		return false;
+	}
+	let need = wifi_sections(cfg, uci), used = {}, add = [], drop = [];
+	uci.foreach('wireless', 'wifi-iface', (s) => {
+		if (s.ifname)
+			used[s.ifname] = true;
+		if (s['.name'] in need) {
+			if (!s.ifname)
+				push(add, s['.name']);
+		}
+		else if (match(s.ifname ?? '', OUR_IFNAME))
+			push(drop, s['.name']);
+	});
+	for (let sec in add) {
+		let n = 0;
+		while (used[IFNAME_PREFIX + n])
+			n++;
+		used[IFNAME_PREFIX + n] = true;
+		uci.set('wireless', sec, 'ifname', IFNAME_PREFIX + n);
+		log(`wifi "${sec}" gets the fixed name ${IFNAME_PREFIX + n}`);
+	}
+	for (let sec in drop) {
+		uci.delete('wireless', sec, 'ifname');
+		log(`wifi "${sec}" is not a VPN access point any more, its name is restored`);
+	}
+	if (!length(add) && !length(drop))
+		return false;
+	uci.commit('wireless');
+	return true;
+};
+
 // Resolves access points to device names:
-//   networks -> L3 devices (br-guest), wifi sections -> ifnames (phy1-ap0), ports as is.
-// A wifi that is not up yet (boot, reconfiguration) gets its last known ifname from
-// ifnames_file or the configured one: its clients must not slip past the rules meanwhile.
-export function resolve(cfg, ubus_conn, ifnames_file) {
-	let nets = [], ports = [ ...cfg.access.ports ];
-	let uci = cursor();
+//   networks -> L3 devices (br-guest): from netifd when up, from UCI before (boot guard);
+//   SSIDs -> the fixed ifname from UCI and the current one from netifd, into both sets:
+//   a bridged SSID is seen by the bridge table, an SSID that is a network itself only by inet;
+//   ports as is.
+// errors: enabled SSIDs that have no name at all, the rules cannot cover their clients.
+export function resolve(cfg, ubus_conn, uci) {
+	let nets = [], ports = [ ...cfg.access.ports ], errors = [];
+	uci ??= cursor();
 
 	if (length(cfg.access.networks)) {
 		let dump = ubus_conn?.call('network.interface', 'dump') ?? {};
 		for (let name in cfg.access.networks) {
 			let ifc = filter(dump.interface ?? [], (i) => i.interface == name)[0];
-			let dev = ifc?.l3_device ?? ifc?.device ?? uci.get('network', name, 'device');
-			if (dev)
-				push(nets, dev);
-			else
+			let devs = filter([ ifc?.l3_device, ifc?.device, uci.get('network', name, 'device') ],
+				(d) => d && substr(d, 0, 1) != '@');
+			if (length(devs))
+				push(nets, ...devs);
+			else if (!length(wifi_of(uci, [ name ])))
 				log(`network "${name}" has no device, skipped`);
 		}
 	}
 
-	if (length(cfg.access.wifi)) {
+	let wifi = wifi_sections(cfg, uci);
+	if (length(wifi)) {
 		let st = ubus_conn?.call('network.wireless', 'status') ?? {};
-		let file = ifnames_file ?? IFNAMES_FILE;
-		let known = read_json(file) ?? {}, next = {}, fresh = false;
-		for (let section in cfg.access.wifi) {
-			let found = null;
+		for (let section in wifi) {
+			let s = uci.get_all('wireless', section);
+			if (!s) {
+				log(`wifi "${section}" does not exist, skipped`);
+				continue;
+			}
+			let names = s.ifname ? [ s.ifname ] : [];
 			for (let radio, r in st)
 				for (let i in (r.interfaces ?? []))
 					if (i.section == section && i.ifname)
-						found = i.ifname;
-			fresh ||= !!found;
-			found ??= known[section] ?? uci.get('wireless', section, 'ifname');
-			if (found) {
-				push(ports, found);
-				next[section] = found;
+						push(names, i.ifname);
+			names = filter(uniq(names), valid);
+			if (length(names)) {
+				push(nets, ...names);
+				push(ports, ...names);
 			}
+			else if (s.disabled == '1' || uci.get('wireless', s.device, 'disabled') == '1')
+				log(`wifi "${section}" is disabled, skipped`);
 			else
-				log(`wifi "${section}" is not up, skipped`);
+				push(errors, `wifi "${section}"${s.ssid ? ` (SSID "${s.ssid}")` : ''} has no interface name`);
 		}
-		// flash is written only when a name changes
-		if (fresh)
-			try {
-				write_json(file, next);
-			}
-			catch (e) {
-				log(`cannot save ${file}`);
-			}
 	}
 
-	// longer names do not exist (IFNAMSIZ) and make nft reject the whole file
-	let valid = (dev) => {
-		if (length(dev) <= 15)
-			return true;
-		log(`device name "${dev}" is longer than 15 characters, skipped`);
-		return false;
-	};
-	return { nets: filter(uniq(nets), valid), ports: filter(uniq(ports), valid) };
+	return { nets: filter(uniq(nets), valid), ports: filter(uniq(ports), valid), errors };
 };
 
 // opts.passthrough: keep marking but do not intercept (kill switch off and no live server).

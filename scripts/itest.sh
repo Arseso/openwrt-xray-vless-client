@@ -3,6 +3,7 @@
 # local VLESS "remote" servers, checks server selection, failover, subscription update and
 # that a VPN client (network namespace behind a bridge port) never reaches the "internet"
 # (another namespace) directly: boot guard, restart, stop, broken fw-apply, fw4 flush;
+# fixed SSID names in /etc/config/wireless, fail closed for an SSID without a name;
 # subscription update from LuCI through the daemon and by a reload past it.
 set -e
 cd "$(dirname "$0")/.."
@@ -76,6 +77,10 @@ fw() { ubus call luci.xvpn firewall | jsonfilter -e "$1"; }
 want_mode() { # want mode
 	[ "$(fw @.want)" = "$1" ] && [ "$(fw @.mode)" = "$2" ] || { echo "FAIL: firewall want/mode: $(ubus call luci.xvpn firewall)"; exit 1; }
 }
+uci_is() { # option value
+	[ "$(uci -q get $1)" = "$2" ] || { echo "FAIL: $1 is '$(uci -q get $1)', expected '$2'"; exit 1; }
+}
+in_set() { nft list set $1 xvpn $2 2>/dev/null | grep -q "\"$3\""; }
 full_rules() { # what
 	nft list table inet xvpn 2>/dev/null | grep -q tproxy || { echo "FAIL: no full rules ($1)"; exit 1; }
 }
@@ -176,6 +181,97 @@ full_rules "after firewall restart"
 full_rules "after firewall stop + start"
 tunnel || { echo "FAIL: no tunnel after firewall stop + start"; exit 1; }
 echo "OK: rules restored after fw4 flush"
+
+# SSIDs: fixed names in /etc/config/wireless; there is no radio in the container,
+# so the names come from UCI alone, as on boot before Wi-Fi is up
+cat > /etc/config/wireless <<'W'
+config wifi-device 'radio0'
+	option type 'mac80211'
+	option path 'virtual/none'
+	option band '5g'
+
+config wifi-iface 'vpnap'
+	option device 'radio0'
+	option network 'lan'
+	option mode 'ap'
+	option ssid 'VPN'
+
+config wifi-iface 'homeap'
+	option device 'radio0'
+	option network 'lan'
+	option mode 'ap'
+	option ssid 'Home'
+
+config wifi-iface 'ownap'
+	option device 'radio0'
+	option network 'lan'
+	option mode 'ap'
+	option ssid 'Own'
+	option ifname 'myvpn0'
+
+config wifi-iface 'onlyap'
+	option device 'radio0'
+	option network 'wonly'
+	option mode 'ap'
+	option ssid 'Only'
+W
+uci batch <<UCI
+set network.wonly=interface
+set network.wonly.proto=none
+commit network
+add_list xvpn.access.wifi=vpnap
+add_list xvpn.access.wifi=ownap
+add_list xvpn.access.network=wonly
+commit xvpn
+UCI
+/etc/init.d/xvpn reload
+sleep 1
+wait_for @.state connected 40
+uci_is wireless.vpnap.ifname xvpn-ap0
+uci_is wireless.onlyap.ifname xvpn-ap1
+uci_is wireless.ownap.ifname myvpn0
+uci_is wireless.homeap.ifname ''
+# a bridged SSID is seen by the bridge table, a Wi-Fi only network (no bridge) by inet only
+for d in xvpn-ap0 xvpn-ap1 myvpn0; do
+	in_set inet nets $d && in_set bridge ports $d || { echo "FAIL: $d is not in the rules"; nft list ruleset; exit 1; }
+done
+echo "OK: VPN SSIDs got fixed names, the user's name is kept, all are in the rules"
+tunnel || { echo "FAIL: no tunnel after fixing the SSID names"; exit 1; }
+
+# an SSID without a usable name cannot be covered: everyone is blocked, status "error"
+uci set wireless.ownap.ifname=a-very-long-name0; uci commit wireless
+ucode /usr/share/xvpn/cli.uc fw-refresh && { echo "FAIL: fw-refresh ignores an unresolved SSID"; exit 1; }
+want_mode full block
+wait_for @.state error 10
+fw @.error | grep -q '"ownap"' || { echo "FAIL: no error about the SSID: $(fw @.error)"; exit 1; }
+blocked "SSID without a name"
+# disabled, it has no clients: no error
+uci set wireless.ownap.disabled=1; uci commit wireless
+ucode /usr/share/xvpn/cli.uc fw-refresh
+want_mode full full
+wait_for @.state connected 10
+tunnel || { echo "FAIL: no tunnel after the SSID was disabled"; exit 1; }
+uci set wireless.ownap.ifname=myvpn0; uci delete wireless.ownap.disabled; uci commit wireless
+ucode /usr/share/xvpn/cli.uc fw-refresh
+echo "OK: fail closed while an SSID has no name"
+
+# a VPN network comes up (its device may be known only now): hotplug iface resolves again
+nft delete element inet xvpn nets '{ "br-lan" }'
+in_set inet nets br-lan && { echo "FAIL: test setup, br-lan still in the set"; exit 1; }
+ifup lan
+wait_cmd 20 in_set inet nets br-lan
+echo "OK: rules refreshed when a VPN network came up"
+
+# deselected: our name is removed, the user's one stays
+uci del_list xvpn.access.wifi=vpnap; uci commit xvpn
+/etc/init.d/xvpn reload
+sleep 1
+wait_for @.state connected 40
+uci_is wireless.vpnap.ifname ''
+uci_is wireless.ownap.ifname myvpn0
+uci_is wireless.onlyap.ifname xvpn-ap1
+in_set inet nets xvpn-ap0 && { echo "FAIL: deselected SSID is still in the rules"; exit 1; }
+echo "OK: deselected SSID got its name back"
 
 # fw-* run one at a time: fw-remove waits for the lock
 ucode -l fs -e 'let f = fs.open("/var/lock/xvpn-fw", "w"); f.lock("x"); system("sleep 3");' &
@@ -313,6 +409,7 @@ echo "OK: fresh subscription updated"
 
 /etc/init.d/xvpn stop
 no_tproxy "stop with the service enabled"
+in_set inet nets xvpn-ap1 && in_set bridge ports myvpn0 || { echo "FAIL: guard without the SSIDs"; exit 1; }
 blocked "stopped, service enabled"
 
 uci set xvpn.main.enabled=0; uci commit xvpn
@@ -327,4 +424,10 @@ uci set xvpn.main.enabled=1; uci commit xvpn
 /etc/init.d/xvpn disable; /etc/init.d/xvpn stop
 nft list table inet xvpn >/dev/null 2>&1 && { echo "FAIL: table left after disable + stop"; exit 1; }
 echo "OK: rules removed on package removal"
+sed -n '/^define Package\/luci-app-xvpn\/postrm/,/^endef/p' /src/luci-app-xvpn/Makefile | sed '1d;$d; s/\$\$/$/g' > /tmp/postrm
+sh /tmp/postrm
+uci_is wireless.onlyap.ifname ''
+uci_is wireless.ownap.ifname myvpn0
+uci -q get firewall.xvpn >/dev/null && { echo "FAIL: postrm left the fw4 include"; exit 1; }
+echo "OK: postrm restores the SSID names"
 IN

@@ -7,7 +7,8 @@ import { readfile, writefile } from 'fs';
 import { parse_link, parse_subscription } from 'xvpn.links';
 import { parse_userinfo } from 'xvpn.subscription';
 import { build_index, generate } from 'xvpn.xrayconf';
-import { render, resolve } from 'xvpn.firewall';
+import { render, resolve, fix_ifnames } from 'xvpn.firewall';
+import { cursor } from 'uci';
 
 const FIX = ARGV[0] ?? 'tests/fixtures';
 const OUT = ARGV[1] ?? '/tmp';
@@ -112,17 +113,105 @@ ok('minimal rejects nets', index(min, 'iifname @nets reject with icmpx type admi
 ok('minimal is inet only', index(min, 'bridge') < 0 && index(min, 'tproxy') < 0 && index(min, 'mark') < 0);
 writefile(`${OUT}/minimal.nft`, min);
 
-// wifi that is not up yet keeps its last known ifname
-let wcfg = { access: { networks: [], ports: [ 'lan2' ], wifi: [ 'wifinet2', 'wifinet3' ] } };
-let up = { call: (o, m) => (o == 'network.wireless' ? { radio1: { interfaces: [ { section: 'wifinet2', ifname: 'phy1-ap1' } ] } } : null) };
-let down = { call: () => null };
-let cache = `${OUT}/ifnames.json`;
-eq('resolve wifi up', resolve(wcfg, up, cache), { nets: [], ports: [ 'lan2', 'phy1-ap1' ] });
-eq('resolve caches ifnames', json(readfile(cache)), { wifinet2: 'phy1-ap1' });
-eq('resolve wifi down uses cache', resolve(wcfg, down, cache), { nets: [], ports: [ 'lan2', 'phy1-ap1' ] });
-eq('resolve without ubus', resolve(wcfg, null, `${OUT}/none.json`), { nets: [], ports: [ 'lan2' ] });
-eq('resolve drops names over 15 chars', resolve({ access: { networks: [], ports: [ 'lan2', 'a-very-long-port0' ], wifi: [] } }, null),
-	{ nets: [], ports: [ 'lan2' ] });
+// access points: fixed SSID names in a test UCI tree
+let confdir = `${OUT}/conf`;
+system([ 'mkdir', '-p', confdir, `${OUT}/delta` ]);
+writefile(`${confdir}/network`, `
+config interface 'lan'
+	option device 'br-lan'
+
+config interface 'wonly'
+	option proto 'static'
+
+config interface 'alias'
+	option device '@lan'
+`);
+writefile(`${confdir}/wireless`, `
+config wifi-device 'radio0'
+	option band '2g'
+
+config wifi-device 'radio1'
+	option band '5g'
+	option disabled '1'
+
+config wifi-iface 'vpn'
+	option device 'radio0'
+	option network 'lan'
+	option ssid 'VPN'
+
+config wifi-iface 'home'
+	option device 'radio0'
+	option network 'lan'
+	option ssid 'Home'
+
+config wifi-iface 'own'
+	option device 'radio0'
+	option network 'lan'
+	option ifname 'myvpn0'
+
+config wifi-iface 'only'
+	option device 'radio0'
+	option network 'wonly'
+
+config wifi-iface 'off'
+	option device 'radio1'
+	option network 'lan'
+
+config wifi-iface 'old'
+	option device 'radio0'
+	option network 'lan'
+	option ifname 'xvpn-ap0'
+`);
+let ucur = () => cursor(confdir, `${OUT}/delta`);
+let wcfg = { access: { networks: [ 'wonly' ], ports: [ 'lan2' ], wifi: [ 'vpn', 'own', 'off' ] } };
+ok('fix ifnames changes wireless', fix_ifnames(wcfg, ucur()));
+let wl = ucur();
+eq('fixed names: free numbers, own name kept, Wi-Fi only network included',
+	map([ 'vpn', 'own', 'only', 'off', 'home', 'old' ], (x) => wl.get('wireless', x, 'ifname')),
+	[ 'xvpn-ap1', 'myvpn0', 'xvpn-ap2', 'xvpn-ap3', null, null ]);
+ok('fix ifnames is idempotent', !fix_ifnames(wcfg, ucur()));
+
+// no netifd yet (boot guard): names from UCI, SSIDs in both sets
+let none = { call: () => null };
+eq('resolve from UCI', resolve(wcfg, none, ucur()), {
+	nets: [ 'xvpn-ap1', 'myvpn0', 'xvpn-ap3', 'xvpn-ap2' ],
+	ports: [ 'lan2', 'xvpn-ap1', 'myvpn0', 'xvpn-ap3', 'xvpn-ap2' ], errors: [] });
+
+// netifd up: live L3 device of the network, the current SSID name besides the fixed one
+let up = { call: (o, m) => (o == 'network.wireless')
+	? { radio0: { interfaces: [ { section: 'vpn', ifname: 'phy0-ap0' }, { section: 'home', ifname: 'phy0-ap1' } ] } }
+	: { interface: [ { interface: 'wonly', l3_device: 'xvpn-ap2', device: 'xvpn-ap2' }, { interface: 'alias', l3_device: 'br-lan' } ] } };
+let lcfg = { access: { networks: [ 'lan', 'alias' ], ports: [], wifi: [ 'vpn' ] } };
+eq('resolve live names', resolve(lcfg, up, ucur()),
+	{ nets: [ 'br-lan', 'xvpn-ap1', 'phy0-ap0' ], ports: [ 'xvpn-ap1', 'phy0-ap0' ], errors: [] });
+
+// deselected: our name goes away, the user's stays
+let dcfg = { access: { networks: [], ports: [], wifi: [ 'own' ] } };
+ok('deselect changes wireless', fix_ifnames(dcfg, ucur()));
+wl = ucur();
+eq('deselected names removed', map([ 'vpn', 'own', 'only', 'off' ], (x) => wl.get('wireless', x, 'ifname')),
+	[ null, 'myvpn0', null, null ]);
+
+// an enabled SSID without a usable name is an error (fail closed), a disabled one is not
+wl = ucur();
+wl.set('wireless', 'own', 'ifname', 'a-very-long-name0');
+wl.commit('wireless');
+let ecfg = { access: { networks: [], ports: [], wifi: [ 'own', 'off', 'gone' ] } };
+let er = resolve(ecfg, none, ucur());
+eq('unresolved SSID is an error', [ er.ports, er.errors ], [ [], [ 'wifi "own" has no interface name' ] ]);
+wl = ucur();
+wl.set('wireless', 'own', 'disabled', '1');
+wl.commit('wireless');
+eq('disabled SSID without a name is skipped', resolve(ecfg, none, ucur()).errors, []);
+ok('user changes in wireless are not committed', (() => {
+	let c = ucur();
+	c.set('wireless', 'home', 'ssid', 'Staged');
+	c.save('wireless');
+	return !fix_ifnames(wcfg, ucur()) && ucur().get('wireless', 'vpn', 'ifname') == null;
+})());
+
+eq('resolve drops names over 15 chars', resolve({ access: { networks: [], ports: [ 'lan2', 'a-very-long-port0' ], wifi: [] } }, null, ucur()),
+	{ nets: [], ports: [ 'lan2' ], errors: [] });
 
 print(`${passed} passed, ${failed} failed\n`);
 exit(failed ? 1 : 0);

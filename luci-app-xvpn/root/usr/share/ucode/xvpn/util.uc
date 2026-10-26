@@ -9,7 +9,6 @@ import { cursor } from 'uci';
 export const ETC_DIR = '/etc/xvpn';
 export const SUBS_DIR = '/etc/xvpn/subs';
 export const ACTIVE_FILE = '/etc/xvpn/active';
-export const IFNAMES_FILE = '/etc/xvpn/ifnames.json';
 export const VAR_DIR = '/var/etc/xvpn';
 export const RUN_DIR = '/var/run/xvpn';
 export const CONFIG_FILE = '/var/etc/xvpn/config.json';
