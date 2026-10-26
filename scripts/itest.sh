@@ -5,7 +5,8 @@
 # (another namespace) directly: boot guard, restart, stop, broken fw-apply, fw4 flush;
 # fixed SSID names in /etc/config/wireless, fail closed for an SSID without a name;
 # subscription update from LuCI through the daemon and by a reload past it; a hung xray
-# and a broken xray_bin are xray_down, not dead servers.
+# and a broken xray_bin are xray_down, not dead servers; a hung reload does not stop
+# the health checks.
 set -e
 cd "$(dirname "$0")/.."
 DOCKER="${DOCKER:-docker}"
@@ -523,6 +524,25 @@ wait_cmd 30 xvpnd_restarted "$old"
 wait_for @.state connected 40
 active_is "$a" || { echo "FAIL: expected $a after xray is fixed, got $(active_name)"; exit 1; }
 echo "OK: connected again once xray_bin is fixed"
+
+# a reload hangs (procd lock, a slow generate): the daemon kills it after 60 s with all it
+# started, shows error and tries again, the health checks go on
+sed -i 's/^start_service() {$/&\n [ -e \/tmp\/hang-reload ] \&\& sleep 1000/' /etc/init.d/xvpn
+grep -q hang-reload /etc/init.d/xvpn || { echo "FAIL: test setup, no sleep in init.d"; exit 1; }
+touch /tmp/hang-reload
+id=$(status @.active)
+[ "$(ubus call xvpn select "{\"id\":\"$id\"}" | jsonfilter -e @.ok)" = true ] || { echo "FAIL: select"; exit 1; }
+wait_cmd 10 sh -c "ps w | grep -q '[s]leep 1000'"
+[ "$(ubus call xvpn select "{\"id\":\"$id\"}" | jsonfilter -e @.error)" = busy ] || { echo "FAIL: no busy while reloading"; exit 1; }
+wait_for @.state error 80
+status @.last_error | grep -q 'reload did not finish' || { echo "FAIL: last_error: $(status @.last_error)"; exit 1; }
+ps w | grep -q '[s]leep 1000' && { echo "FAIL: the hung reload was not killed"; exit 1; }
+echo "OK: hung reload killed, state error"
+rm /tmp/hang-reload
+wait_for @.state connected 60
+logread | grep -q 'trying the reload again' && active_is "$a" || { echo "FAIL: after the hung reload"; ubus call xvpn status; exit 1; }
+sed -i '/hang-reload/d' /etc/init.d/xvpn
+echo "OK: the daemon reloaded again and is connected"
 
 /etc/init.d/xvpn stop
 no_tproxy "stop with the service enabled"

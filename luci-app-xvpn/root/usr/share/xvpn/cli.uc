@@ -6,6 +6,7 @@
 
 import { readfile, unlink, access, open, symlink, readlink } from 'fs';
 import * as ubus from 'ubus';
+import * as uloop from 'uloop';
 import {
 	load_config, read_json, write_json, write_file, mkdir_p, log, run, shq, is_updater,
 	ACTIVE_FILE, CONFIG_FILE, INDEX_FILE, VAR_DIR, RUN_DIR, UPDATE_LOCK,
@@ -17,8 +18,29 @@ import { resolve, apply, remove, fix_ifnames, ifnames_applied } from 'xvpn.firew
 
 const cfg = load_config();
 
+// generate runs in init.d under procd's service lock: a hung binary is killed after
+// XRAY_TEST_TIMEOUT (busybox in OpenWrt has no timeout), twice at most for one generate
+const XRAY_TEST_TIMEOUT = 15;
+
+// uloop.process reports a killed process as exit code 0
 function xray_ok(path) {
-	return run(`${shq(cfg.main.xray_bin)} run -test -c ${shq(path)} >/dev/null 2>&1`).code == 0;
+	let code = null, hung = false, t;
+	uloop.init();
+	let p = uloop.process('/bin/sh', [ '-c', `exec ${shq(cfg.main.xray_bin)} run -test -c ${shq(path)} >/dev/null 2>&1` ],
+		{ PATH: '/usr/sbin:/usr/bin:/sbin:/bin' }, (c) => {
+			code = c;
+			uloop.end();
+		});
+	if (!p)
+		return false;
+	t = uloop.timer(XRAY_TEST_TIMEOUT * 1000, () => {
+		log(`${cfg.main.xray_bin} run -test hung for ${XRAY_TEST_TIMEOUT} s, killed`);
+		hung = true;
+		system([ '/bin/kill', '-9', `${p.pid()}` ]);
+	});
+	uloop.run();
+	t.cancel();
+	return !hung && code == 0;
 }
 
 const MODES = { full: {}, passthrough: { passthrough: true }, block: { block: true }, minimal: { minimal: true } };
@@ -190,6 +212,7 @@ case 'fw-remove': {
 	unlink(FW_WANT_FILE);
 	unlink(FW_MODE_FILE);
 	unlink(FW_ERROR_FILE);
+	unlink(FW_WARN_FILE);
 	exit(0);
 }
 
