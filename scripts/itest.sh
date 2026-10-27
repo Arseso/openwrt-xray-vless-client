@@ -421,6 +421,8 @@ not_quarantined() { # what
 	ubus call xvpn status | grep -q '"quarantined": true' && { echo "FAIL: quarantine while waiting for the time ($1)"; ubus call xvpn status; exit 1; }
 	return 0
 }
+# /etc/config/system is put back byte for byte: reload_config below would reload log and sysntpd
+cp /etc/config/system /tmp/system.orig
 uci batch <<UCI
 set system.ntp=timeserver
 add_list system.ntp.server=127.0.0.1
@@ -462,7 +464,7 @@ wait_for @.passthrough false 10
 active_is first && tunnel || { echo "FAIL: after the time wait ran out"; ubus call xvpn status; exit 1; }
 echo "OK: passthrough while waiting for the time, going on after time_wait"
 uci set xvpn.access.killswitch=1; uci delete xvpn.health.time_wait; uci commit xvpn
-uci delete system.ntp; uci commit system
+cp /tmp/system.orig /etc/config/system
 /etc/init.d/xvpn restart
 wait_for @.state connected 40
 
