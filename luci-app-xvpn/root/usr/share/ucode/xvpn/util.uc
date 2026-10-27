@@ -9,6 +9,8 @@ import { cursor } from 'uci';
 export const ETC_DIR = '/etc/xvpn';
 export const SUBS_DIR = '/etc/xvpn/subs';
 export const ACTIVE_FILE = '/etc/xvpn/active';
+// the id of ACTIVE_FILE when the user chose it (select), not the daemon: kept out of auto selection
+export const MANUAL_FILE = '/etc/xvpn/active_manual';
 export const VAR_DIR = '/var/etc/xvpn';
 export const RUN_DIR = '/var/run/xvpn';
 export const CONFIG_FILE = '/var/etc/xvpn/config.json';

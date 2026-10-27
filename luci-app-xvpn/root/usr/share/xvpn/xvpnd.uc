@@ -11,7 +11,7 @@ import { cursor } from 'uci';
 import { readfile, unlink, access, stat } from 'fs';
 import {
 	load_config, read_json, write_json, write_file, mkdir_p, shq, update_running, procs, tree, kill_tree,
-	no_auto_ids, set_no_auto, fastest, ETC_DIR, RUN_DIR, CONFIG_FILE, INDEX_FILE, ACTIVE_FILE, STATE_FILE, FW_ERROR_FILE, GENERATE_ERROR_FILE, STALE_FILE
+	no_auto_ids, set_no_auto, fastest, MANUAL_FILE, ETC_DIR, RUN_DIR, CONFIG_FILE, INDEX_FILE, ACTIVE_FILE, STATE_FILE, FW_ERROR_FILE, GENERATE_ERROR_FILE, STALE_FILE
 } from 'xvpn.util';
 import { due_in } from 'xvpn.subscription';
 
@@ -427,6 +427,12 @@ function chosen() {
 	return trim(readfile(ACTIVE_FILE) ?? '');
 }
 
+// The user chose it (select): it stays while it answers, also left out of auto selection.
+// One the daemon chose is left as soon as it is left out (set_auto, check()).
+function by_hand(id) {
+	return chosen() == id && trim(readfile(MANUAL_FILE) ?? '') == id;
+}
+
 // Only the servers in auto selection: the fastest out of quarantine, else out of all of them.
 function best(ignore_quarantine) {
 	let off = no_auto();
@@ -751,7 +757,7 @@ reindex = function(notified) {
 	settle();
 };
 
-function switch_to(id, reason) {
+function switch_to(id, reason, manual) {
 	let e = server(id);
 	if (!e)
 		return false;
@@ -764,6 +770,10 @@ function switch_to(id, reason) {
 	delete st.quarantine[id];
 	mkdir_p(ETC_DIR);
 	write_file(ACTIVE_FILE, id);
+	if (manual)
+		write_file(MANUAL_FILE, id);
+	else
+		unlink(MANUAL_FILE);
 	save();
 	set_state('connected', null);
 	reload_service();
@@ -803,10 +813,9 @@ choose_best = function(reason) {
 		xray_up();
 		let b = best() ?? best(true);
 		if (!b) {
-			// a server left out of auto selection that the user (or the daemon, before it was
-			// left out) chose stays while it answers
+			// a server left out of auto selection that the user chose stays while it answers
 			let e = server(st.active);
-			if (e && no_auto()[e.id] && chosen() == e.id && !quarantined(e.id) && (st.latency[e.id]?.ms ?? -1) >= 0) {
+			if (e && no_auto()[e.id] && by_hand(e.id) && !quarantined(e.id) && (st.latency[e.id]?.ms ?? -1) >= 0) {
 				st.fails = 0;
 				set_passthrough(false);
 				set_state('connected', `${no_candidates()}, staying on "${e.name}"`);
@@ -855,14 +864,6 @@ check = function() {
 	}
 	if (!e)
 		return failover('no active server');
-	// generate's fallback (nothing chosen yet, or the chosen one gone) is left out of auto
-	// selection: choose again, while there is nothing to choose as often as a dead server fails over
-	if (no_auto()[e.id] && chosen() != e.id) {
-		if (st.state != 'no_servers' || now() - (st.choose_at ?? 0) >= H.interval * H.fail_threshold)
-			choose_best(`"${e.name}" is excluded from auto selection`);
-		return;
-	}
-
 	let gen = st.gen;
 	if (st.xray_choose) {
 		// a decision put off while xray did not work
@@ -878,6 +879,15 @@ check = function() {
 			st.xray_choose = null;
 			choose_best(reason);
 		});
+		return;
+	}
+	// left out of auto selection and not chosen by hand (the daemon chose it before, or
+	// generate's fallback: nothing chosen yet, the chosen one gone): choose again; while
+	// there is nothing to choose as often as a dead server fails over. Not after a failed
+	// reload: the active one is then what xray runs, not what was chosen (reload_failed())
+	if (no_auto()[e.id] && !by_hand(e.id) && !st.reload_error && !st.reload_pending) {
+		if (st.state != 'no_servers' || now() - (st.choose_at ?? 0) >= H.interval * H.fail_threshold)
+			choose_best(`"${e.name}" is excluded from auto selection`);
 		return;
 	}
 	probe(e.test_port, (ms, code) => {
@@ -1050,7 +1060,7 @@ conn.publish('xvpn', {
 		call: (req) => {
 			if (st.reloading)
 				return { ok: false, error: 'busy' };
-			return { ok: switch_to(req.args.id, 'manual selection') };
+			return { ok: switch_to(req.args.id, 'manual selection', true) };
 		},
 	},
 	// the server takes part in auto selection or not (health.no_auto): UCI only, xray and
@@ -1076,6 +1086,9 @@ conn.publish('xvpn', {
 			// nothing to choose from until now: this one may be
 			if (auto && st.state == 'no_servers' && !st.testing && !st.reloading)
 				choose_best(`"${e.name}" is back in auto selection`);
+			// the daemon chose it: another one now, one chosen by hand stays (see check())
+			if (!auto && id == st.active && !by_hand(id) && !st.reload_error)
+				choose_best(`"${e.name}" is excluded from auto selection`);
 			return { ok: true };
 		},
 	},

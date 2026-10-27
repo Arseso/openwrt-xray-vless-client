@@ -3,10 +3,10 @@
 
 'use strict';
 
-import { readfile, writefile, mkdir } from 'fs';
+import { readfile, writefile, mkdir, stat } from 'fs';
 import { parse_link, parse_subscription } from 'xvpn.links';
-import { parse_userinfo, assign_ids, list_change, known_ids, prune_no_auto } from 'xvpn.subscription';
-import { load_config, fastest, no_auto_ids, set_no_auto } from 'xvpn.util';
+import { parse_userinfo, assign_ids, list_change, known_ids, prune_no_auto, NO_AUTO_GRACE } from 'xvpn.subscription';
+import { load_config, fastest, no_auto_ids, set_no_auto, mkdir_p, read_json, SUBS_DIR } from 'xvpn.util';
 import { build_index, generate, ports_error } from 'xvpn.xrayconf';
 import { render, resolve, fix_ifnames, ifnames_applied } from 'xvpn.firewall';
 import { ipv6_up, busy_ports } from 'xvpn.host';
@@ -438,17 +438,37 @@ let mcfg = load_config(confdir);
 let man = known_ids({ subscriptions: [ { id: 'nocache' } ], manual: mcfg.manual });
 eq('known ids: the manual links, a subscription without a cache has none',
 	keys(man), [ assign_ids([ parse_link(lines[0]) ], 'manual')[0].id ]);
-eq('prune drops the ids that are gone', prune_no_auto(xcur(), { ...man, [servers[0].id]: true }), [ 'gone1', 'gone2' ]);
-eq('prune keeps the ids that are there', no_auto_ids(xcur()), [ servers[0].id ]);
-eq('nothing to prune: no commit', prune_no_auto(xcur(), { [servers[0].id]: true }), []);
+// the cache of a disabled subscription with filters that match nothing: its servers are still known
+mkdir_p(SUBS_DIR);
+writefile(`${SUBS_DIR}/xvpntest.json`, sprintf('%J', { servers: b.servers }));
+let off_sub = known_ids({ subscriptions: [ { id: 'xvpntest', enabled: false, include: 'nothing', exclude: '.' } ], manual: [] });
+system([ 'rm', '-f', `${SUBS_DIR}/xvpntest.json` ]);
+eq('known ids: a disabled subscription, before include/exclude', sort(keys(off_sub)), sort(map(assign_ids(b.servers, 'xvpntest'), (s) => s.id)));
+
+// a server gone from the subscriptions keeps its flag NO_AUTO_GRACE: a stub list for a while
+let gone = `${OUT}/no_auto_gone.json`, T = 1800000000;
+let known = { ...man, [servers[0].id]: true };
+let ino = () => stat(`${confdir}/xvpn`).inode;
+let i0 = ino();
+eq('gone: nothing dropped at once', prune_no_auto(xcur(), known, gone, T), []);
+eq('gone: since when', [ no_auto_ids(xcur()), read_json(gone) ], [ [ 'gone1', servers[0].id, 'gone2' ], { gone1: T, gone2: T } ]);
+ok('gone: no commit', ino() == i0);
+eq('back in the list: its time goes', [ prune_no_auto(xcur(), { ...known, gone2: true }, gone, T + 100), read_json(gone) ], [ [], { gone1: T } ]);
+eq('a clock set back starts over', [ prune_no_auto(xcur(), known, gone, T - 100), read_json(gone) ], [ [], { gone1: T - 100, gone2: T - 100 } ]);
+eq('gone for the grace: dropped', prune_no_auto(xcur(), known, gone, T - 100 + NO_AUTO_GRACE), [ 'gone1', 'gone2' ]);
+eq('prune keeps the ids that are there', [ no_auto_ids(xcur()), read_json(gone) ], [ [ servers[0].id ], null ]);
+i0 = ino();
+eq('nothing to prune', prune_no_auto(xcur(), known, gone, T), []);
+ok('nothing to prune: no commit', ino() == i0);
 eq('other options stay', xcur().get('xvpn', 'health', 'interval'), '30');
 let xc = xcur();
 xc.set('xvpn', 'health', 'interval', '60');
 xc.save('xvpn');
 eq('uncommitted changes: no commit', [ set_no_auto(xcur(), []), cursor(confdir, `${OUT}/empty-delta`).get('xvpn', 'health', 'no_auto') ],
 	[ 'xvpn has uncommitted changes', [ servers[0].id ] ]);
-eq('uncommitted changes: nothing pruned', prune_no_auto(xcur(), {}), []);
-system([ 'rm', '-f', `${OUT}/delta/xvpn` ]);	// the change is dropped
+eq('uncommitted changes: nothing pruned, the time kept', [ prune_no_auto(xcur(), {}, gone, T), prune_no_auto(xcur(), {}, gone, T + NO_AUTO_GRACE), read_json(gone) ],
+	[ [], [], { [servers[0].id]: T } ]);
+system([ 'rm', '-f', `${OUT}/delta/xvpn`, gone ]);	// the change is dropped
 eq('the last id goes: the option goes', [ set_no_auto(xcur(), []), xcur().get('xvpn', 'health', 'no_auto') ], [ null, null ]);
 writefile(`${confdir}/xvpn`, "config manual 'manual'\n");
 eq('no health section: it is made', [ set_no_auto(xcur(), [ 'x' ]), no_auto_ids(xcur()) ], [ null, [ 'x' ] ]);

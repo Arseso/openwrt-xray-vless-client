@@ -65,7 +65,7 @@ start_service() {
 	# the new settings, but not one of health.no_auto (#60): the daemon reads that list while it
 	# runs, its own set_auto must not cost its state. procd compares env, not data
 	procd_set_param env GOMEMLIMIT="$gomemlimit" GOGC="$gogc" \
-		XVPN_CONF="$(uci -q export xvpn | grep -v '^[[:space:]]*list no_auto ' | md5sum | cut -d' ' -f1)"
+		XVPN_CONF="$(uci -q export xvpn | grep -Ev '^[[:space:]]*(list|option) no_auto ' | md5sum | cut -d' ' -f1)"
 	procd_set_param stdout 1
 	procd_set_param stderr 1
 	procd_set_param respawn 3600 5 0

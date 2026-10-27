@@ -5,7 +5,7 @@
 
 import { readfile, unlink, lsdir } from 'fs';
 import { cursor } from 'uci';
-import { SUBS_DIR, RUN_DIR, read_json, write_json, mkdir_p, shq, run, fnv1a, log, no_auto_ids, set_no_auto } from 'xvpn.util';
+import { SUBS_DIR, RUN_DIR, ETC_DIR, read_json, write_json, mkdir_p, shq, run, fnv1a, log, no_auto_ids, set_no_auto } from 'xvpn.util';
 import { b64, parse_link, parse_subscription } from 'xvpn.links';
 
 // Failed downloads are retried after this many seconds.
@@ -244,23 +244,53 @@ export function known_ids(cfg) {
 	return ids;
 };
 
-// Drops the health.no_auto ids of servers that are gone (#60), commits only then.
-// c: a uci cursor; returns the ids dropped.
-export function prune_no_auto(c, known) {
-	let ids = no_auto_ids(c), keep = filter(ids, (id) => known[id]);
-	if (length(keep) == length(ids))
-		return [];
-	let err = set_no_auto(c, keep);
-	if (err) {
-		log(`${err}: ids of servers that are gone stay in health.no_auto`);
-		return [];
+// A server gone from the subscriptions keeps its health.no_auto flag this long: a provider
+// may hand out a stub list for a while, the server would come back into auto selection
+export const NO_AUTO_GRACE = 7 * 86400;
+const NO_AUTO_GONE = `${ETC_DIR}/no_auto_gone.json`;
+
+// Drops the health.no_auto ids of servers gone for NO_AUTO_GRACE (#60), commits only then.
+// gone: a JSON file { id: since } of the ones missing now. c: a uci cursor; returns the ids dropped.
+export function prune_no_auto(c, known, gone, at) {
+	gone ??= NO_AUTO_GONE;
+	at ??= time();
+	let ids = no_auto_ids(c), seen = read_json(gone) ?? {}, still = {}, drop = [];
+	for (let id in ids) {
+		if (known[id])
+			continue;
+		let since = seen[id];
+		// a clock set back (NTP after boot) does not make it older
+		if (type(since) != 'int' || since > at) {
+			since = at;
+			log(`server ${id} is gone from the subscriptions and links, its health.no_auto flag goes in ${NO_AUTO_GRACE / 86400} days`);
+		}
+		if (at - since >= NO_AUTO_GRACE)
+			push(drop, id);
+		else
+			still[id] = since;
 	}
-	return filter(ids, (id) => !known[id]);
+	if (length(drop)) {
+		let err = set_no_auto(c, filter(ids, (id) => !(id in drop)));
+		if (err) {
+			log(`${err}: ids of servers that are gone stay in health.no_auto`);
+			for (let id in drop)
+				still[id] = seen[id];
+			drop = [];
+		}
+		for (let id in drop)
+			log(`server ${id} is gone for ${NO_AUTO_GRACE / 86400} days, removed from health.no_auto`);
+	}
+	if (length(still))
+		write_json(gone, still);
+	else
+		unlink(gone);
+	return drop;
 };
 
 // Removes the cache and the status of subscriptions that are no longer in UCI
 // and the ids of servers that are gone from health.no_auto.
 export function prune(cfg) {
+	mkdir_p(ETC_DIR);
 	prune_no_auto(cursor(), known_ids(cfg));
 	let known = {};
 	for (let sub in cfg.subscriptions)
