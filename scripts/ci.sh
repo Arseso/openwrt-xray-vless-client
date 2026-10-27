@@ -3,7 +3,8 @@
 # uncommitted changes are not checked.
 #   test         scripts/test.sh with xray-core from the OpenWrt 24.10 feed
 #   test-latest  scripts/test.sh with the latest xray release from GitHub (sha256 from
-#                its .dgst); informational until #14, a failure is only a warning
+#                its .dgst): the config must pass, the fixture servers that xray forbids
+#                (LATEST_REJECT) are rejected one by one by cli.uc generate (#14)
 #   itest        scripts/itest.sh; a hung run is killed after 12 min, the container
 #                state goes to the log
 #   build        scripts/build.sh, the packages are copied to dist/
@@ -51,7 +52,9 @@ mkdir -p "$SRC"
 git archive HEAD | tar -x -C "$SRC"
 
 failed=
-warned=
+# the fixture links (tests/fixtures/links.txt) that xray 26 forbids: vless without TLS to
+# a public address, allowInsecure
+LATEST_REJECT="HTTPUpgrade Insecure"
 # step <name> <command...>: output to .ci/<name>.log
 step() {
 	name=$1; shift
@@ -73,7 +76,7 @@ test_latest() {
 		sum=$(sed -n 's/^SHA2-256= *//p' Xray-linux-64.zip.dgst)
 		[ -n "$sum" ] || { echo "no SHA2-256 in Xray-linux-64.zip.dgst"; exit 1; }
 		echo "$sum  Xray-linux-64.zip" | sha256sum -c - && unzip -o Xray-linux-64.zip xray
-	) && XRAY_BIN="$CI/xray/xray" sh "$SRC/scripts/test.sh"
+	) && XRAY_BIN="$CI/xray/xray" XRAY_REJECT="$LATEST_REJECT" sh "$SRC/scripts/test.sh"
 }
 
 itest() {
@@ -95,11 +98,10 @@ build() {
 
 echo "ci: HEAD $(git rev-parse --short HEAD), package $ipk"
 step test sh "$SRC/scripts/test.sh" || failed="$failed test"
-step test-latest test_latest || warned="$warned test-latest"
+step test-latest test_latest || failed="$failed test-latest"
 step itest itest || failed="$failed itest"
 step build build || failed="$failed build"
 
-[ -z "$warned" ] || echo "ci: warning:$warned failed (informational until #14)"
 [ -z "$failed" ] || die "failed:$failed"
 echo "ci: ok, dist/$ipk"
 

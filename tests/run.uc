@@ -54,14 +54,18 @@ ok('hysteria2 unsupported', p[9].error);
 ok('h2 unsupported', p[10].error);
 ok('vless encryption unsupported', p[11].error);
 ok('ss 2022 bad key', p[12].error);
-ok('hashes unique', length(uniq(map(filter(p, (s) => !s.error), (s) => s.hash))) == 9);
+eq('allowInsecure kept (xray 26 rejects the server, #14)', p[13].outbound.streamSettings.tlsSettings,
+	{ serverName: 'ins.example.com', allowInsecure: true });
+eq('pcs and vcn', p[14].outbound.streamSettings.tlsSettings, { serverName: 'pin.example.com',
+	pinnedPeerCertSha256: '7b2d8f0c3a6e9b14d5f8a2c7e0b3d6f9a1c4e7b0d3f6a9c2e5b8d1f4a7c0e3b6', verifyPeerCertByName: 'pin.example.com' });
+ok('hashes unique', length(uniq(map(filter(p, (s) => !s.error), (s) => s.hash))) == 11);
 eq('hash stable', parse_link(lines[0]).hash, p[0].hash);
 
 // subscriptions
 let b = parse_subscription(readfile(`${FIX}/sub-base64.txt`));
 eq('base64 sub', [ b.format, length(b.servers), b.skipped ], [ 'base64', 9, 4 ]);
 let pl = parse_subscription(readfile(`${FIX}/links.txt`));
-eq('plain sub', [ pl.format, length(pl.servers) ], [ 'plain', 9 ]);
+eq('plain sub', [ pl.format, length(pl.servers) ], [ 'plain', 11 ]);
 let xj = parse_subscription(readfile(`${FIX}/sub-xray.json`));
 eq('xray json sub', [ xj.format, length(xj.servers), xj.skipped, xj.servers[0].name ], [ 'xray-json', 1, 1, '🇫🇮 Finland' ]);
 ok('xray json drops sockopt', xj.servers[0].outbound.streamSettings.sockopt == null);

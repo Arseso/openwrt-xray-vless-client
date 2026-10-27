@@ -11,3 +11,5 @@ hysteria2://pass@hy.example.com:443#Hy2
 vless://11111111-2222-3333-4444-555555555555@h2.example.com:443?type=h2&security=tls#H2
 vless://11111111-2222-3333-4444-555555555555@pq.example.com:443?type=tcp&security=reality&encryption=mlkem768x25519plus.native.0rtt.xxx&pbk=abc#PQ
 ss://MjAyMi1ibGFrZTMtYWVzLTI1Ni1nY206WWNKRmJmZ2xkZz09OmFiYw@bad.example.com:8388#SS2022 bad key
+vless://11111111-2222-3333-4444-555555555555@ins.example.com:443?type=tcp&security=tls&sni=ins.example.com&allowInsecure=1#Insecure
+trojan://p%40ss@pin.example.com:443?sni=pin.example.com&pcs=7b2d8f0c3a6e9b14d5f8a2c7e0b3d6f9a1c4e7b0d3f6a9c2e5b8d1f4a7c0e3b6&vcn=pin.example.com#Pinned
