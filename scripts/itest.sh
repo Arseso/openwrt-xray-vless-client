@@ -670,6 +670,48 @@ set_auto "$id3" true
 [ "$(ubus call luci.xvpn set_auto "{\"id\":\"nope\",\"auto\":false}" | jsonfilter -e @.error)" = 'unknown server' ] \
 	|| { echo "FAIL: set_auto of an unknown id"; exit 1; }
 remote 18444
+# auto_best does not leave a server out of auto selection chosen by hand for a faster one
+# (slow first, second is fast now); one in auto selection is left as before
+dp=$(xvpnd_pid)
+uci set xvpn.health.auto_best=1; uci set xvpn.health.rank_interval=5; uci commit xvpn
+reload_config
+wait_cmd 30 xvpnd_restarted "$dp"
+wait_for @.state connected 30
+id1=$(id_of first)
+set_auto "$id1" false
+wait_cmd 15 select_ok "$id1"
+wait_for @.state connected 30
+sleep 15	# three ranks
+active_is first && [ "$(latency second)" -ge 0 ] && [ "$(latency second)" -lt "$(latency first)" ] \
+	|| { echo "FAIL: auto_best left a server chosen by hand"; ubus call xvpn status; exit 1; }
+echo "OK: auto_best keeps a server out of auto selection chosen by hand"
+set_auto "$id1" true
+wait_cmd 30 active_is second
+wait_for @.state connected 30
+echo "OK: auto_best leaves a server in auto selection for a faster one"
+dp=$(xvpnd_pid)
+uci delete xvpn.health.auto_best; uci delete xvpn.health.rank_interval; uci commit xvpn
+reload_config
+wait_cmd 30 xvpnd_restarted "$dp"
+wait_for @.state connected 30
+# chosen by hand, gone from the list for a while (here: the link, reload_config restarts the
+# daemon), back: the daemon returns to it
+remote 18449
+wait_cmd 15 select_ok "$id3"
+wait_for @.state connected 30
+uci del_list xvpn.manual.link="$(link 18449 third)"; uci commit xvpn
+reload_config
+wait_cmd 30 count_is 2
+wait_cmd 30 active_is second
+wait_for @.state connected 30
+[ "$(cat /etc/xvpn/active_manual)" = "$id3" ] || { echo "FAIL: the choice by hand was forgotten"; exit 1; }
+uci add_list xvpn.manual.link="$(link 18449 third)"; uci commit xvpn
+reload_config
+wait_cmd 30 count_is 3
+wait_cmd 30 active_is third
+wait_for @.state connected 30
+echo "OK: back to the server chosen by hand once it is back in the list"
+kill $(cat /tmp/remote-18449.pid)
 wait_cmd 15 select_ok "$(id_of second)"
 wait_for @.state connected 30
 kill $(cat /tmp/remote-18443.pid)

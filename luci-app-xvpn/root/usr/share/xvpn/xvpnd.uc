@@ -429,8 +429,12 @@ function chosen() {
 
 // The user chose it (select): it stays while it answers, also left out of auto selection.
 // One the daemon chose is left as soon as it is left out (set_auto, check()).
+function manual_id() {
+	return trim(readfile(MANUAL_FILE) ?? '');
+}
+
 function by_hand(id) {
-	return chosen() == id && trim(readfile(MANUAL_FILE) ?? '') == id;
+	return chosen() == id && manual_id() == id;
 }
 
 // Only the servers in auto selection: the fastest out of quarantine, else out of all of them.
@@ -772,7 +776,9 @@ function switch_to(id, reason, manual) {
 	write_file(ACTIVE_FILE, id);
 	if (manual)
 		write_file(MANUAL_FILE, id);
-	else
+	// the choice by hand gives way to the daemon's, unless it is gone from the list for now:
+	// once it is back, check() returns to it
+	else if (server(manual_id()))
 		unlink(MANUAL_FILE);
 	save();
 	set_state('connected', null);
@@ -881,6 +887,11 @@ check = function() {
 		});
 		return;
 	}
+	// the server chosen by hand is back in the list (an update dropped it for a while, the
+	// daemon chose another meanwhile): back to it. Not after a failed reload (see below)
+	let m = manual_id();
+	if (m && m != e.id && server(m) && !st.reload_error && !st.reload_pending)
+		return switch_to(m, 'chosen by hand, back in the list', true);
 	// left out of auto selection and not chosen by hand (the daemon chose it before, or
 	// generate's fallback: nothing chosen yet, the chosen one gone): choose again; while
 	// there is nothing to choose as often as a dead server fails over. Not after a failed
@@ -930,6 +941,9 @@ function rank() {
 		return;
 	test_all((problem) => {
 		if (problem || !H.auto_best || st.reloading)
+			return;
+		// a server out of auto selection the user chose is not left for a faster one
+		if (no_auto()[st.active] && by_hand(st.active))
 			return;
 		let b = best(), cur = st.latency[st.active];
 		if (!b || b.id == st.active || !cur || cur.ms < 0 || st.latency[b.id].ms + H.hysteresis >= cur.ms)
