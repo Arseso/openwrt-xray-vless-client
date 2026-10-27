@@ -5,7 +5,7 @@
 
 import { readfile, writefile, mkdir } from 'fs';
 import { parse_link, parse_subscription } from 'xvpn.links';
-import { parse_userinfo } from 'xvpn.subscription';
+import { parse_userinfo, assign_ids, list_change } from 'xvpn.subscription';
 import { load_config } from 'xvpn.util';
 import { build_index, generate } from 'xvpn.xrayconf';
 import { render, resolve, fix_ifnames, ifnames_applied } from 'xvpn.firewall';
@@ -53,8 +53,8 @@ ok('hysteria2 unsupported', p[9].error);
 ok('h2 unsupported', p[10].error);
 ok('vless encryption unsupported', p[11].error);
 ok('ss 2022 bad key', p[12].error);
-ok('ids unique', length(uniq(map(filter(p, (s) => !s.error), (s) => s.id))) == 9);
-eq('id stable', parse_link(lines[0]).id, p[0].id);
+ok('hashes unique', length(uniq(map(filter(p, (s) => !s.error), (s) => s.hash))) == 9);
+eq('hash stable', parse_link(lines[0]).hash, p[0].hash);
 
 // subscriptions
 let b = parse_subscription(readfile(`${FIX}/sub-base64.txt`));
@@ -69,15 +69,56 @@ ok('html rejected', match(parse_subscription('<html></html>').errors[0], /HTML/)
 eq('userinfo', parse_userinfo('upload=1; download=2; total=10737418240; expire=1798761600'),
 	{ upload: 1, download: 2, total: 10737418240, expire: 1798761600 });
 
+// stable ids (#49): the subscription hands out another host of some servers on every download
+function vless(uuid, host, port, name) {
+	return `vless://${uuid}@${host}:${port}?type=tcp&security=tls&sni=sni.example.com&fp=chrome#${name}`;
+}
+const U1 = '11111111-2222-3333-4444-555555555555', U2 = '66666666-7777-8888-9999-000000000000';
+let v1 = assign_ids(parse_subscription(join('\n', [
+	vless(U1, 'ee24.example.com', 443, '⚡ Estonia'),
+	vless(U1, 'nl.example.com', 443, 'Netherlands'),
+	vless(U1, 'de1.example.com', 443, 'Germany'),
+	vless(U1, 'de2.example.com', 443, 'Germany'),
+])).servers, 's1');
+let v2 = assign_ids(parse_subscription(join('\n', [
+	vless(U1, 'ee23.example.com', 8443, '⚡ Estonia'),
+	vless(U1, 'nl.example.com', 443, 'Netherlands'),
+	vless(U1, 'de1.example.com', 443, 'Germany'),
+	vless(U1, 'de2.example.com', 443, 'Germany'),
+])).servers, 's1');
+eq('ids survive rotated hosts', map(v2, (s) => s.id), map(v1, (s) => s.id));
+ok('rotated host changes the hash', v1[0].hash != v2[0].hash);
+eq('rotated host reaches the outbound', v2[0].outbound.settings.vnext[0].address, 'ee23.example.com');
+ok('same name and uuid: told apart by order', v1[2].id != v1[3].id);
+ok('ids unique', length(uniq(map(v1, (s) => s.id))) == 4);
+ok('id depends on the source', assign_ids([ v1[0] ], 's2')[0].id != v1[0].id);
+eq('assign_ids keeps the hash of a cache from before #49', assign_ids([ { ...v1[1], hash: null, id: 'abcd0123' } ], 's1')[0].hash, 'abcd0123');
+eq('nothing changed', list_change(v1, v1, [ v1[1].id ]), null);
+eq('rotated host of an idle server: no reload', list_change(v1, v2, [ v1[1].id, '' ]), 'stale');
+eq('rotated host of the active server: reload', list_change(v1, v2, [ v1[1].id, v1[0].id ]), 'reload');
+eq('rotated host, xray runs another server than chosen: reload', list_change(v1, v2, [ v1[0].id, v1[1].id ]), 'reload');
+let v3 = assign_ids(parse_subscription(join('\n', [
+	vless(U1, 'ee23.example.com', 8443, '⚡ Estonia'),
+	vless(U2, 'nl.example.com', 443, 'Netherlands'),
+	vless(U1, 'de1.example.com', 443, 'Germany'),
+	vless(U1, 'de2.example.com', 443, 'Germany'),
+])).servers, 's1');
+ok('new uuid: new id', v3[1].id != v2[1].id);
+eq('new uuid: reload', list_change(v2, v3, [ v2[0].id ]), 'reload');
+eq('new server: reload', list_change(v2, [ ...v2, ...assign_ids([ p[5] ], 's2') ], [ v2[0].id ]), 'reload');
+eq('server gone: reload', list_change(v2, slice(v2, 0, 3), [ v2[0].id ]), 'reload');
+eq('new order: no reload', list_change(v2, [ v2[1], v2[0], v2[2], v2[3] ], [ v2[0].id ]), 'stale');
+
 // config generation
 let cfg = {
 	main: { tproxy_port: 12345, dns_port: 10853, api_port: 10085, test_port_base: 20000, loglevel: 'warning', sniffing: false,
 		client_mark: 0x01000000, tproxy_mark: 0x02000000, route_table: 100 },
 	access: { dns_server: '1.1.1.1', killswitch: true, ipv6: 'block', dns_hijack: true },
 };
-let servers = [ ...b.servers, ...xj.servers ];
-let idx = build_index(cfg, servers, p[2].id);
-eq('index active', idx.active, p[2].id);
+let servers = [ ...assign_ids(b.servers, 's1'), ...assign_ids(xj.servers, 's2') ];
+let idx = build_index(cfg, servers, servers[2].id);
+eq('index active', idx.active, servers[2].id);
+eq('index active by the hash (id before #49)', build_index(cfg, servers, servers[3].hash).active, servers[3].id);
 eq('index ports', [ idx.servers[0].test_port, idx.servers[9].test_port ], [ 20000, 20009 ]);
 eq('index fallback active', build_index(cfg, servers, 'nope').active, servers[0].id);
 let conf = generate(cfg, servers, idx);

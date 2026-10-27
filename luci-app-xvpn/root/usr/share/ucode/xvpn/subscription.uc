@@ -4,7 +4,7 @@
 'use strict';
 
 import { readfile, unlink, lsdir } from 'fs';
-import { SUBS_DIR, RUN_DIR, read_json, write_json, mkdir_p, shq, run } from 'xvpn.util';
+import { SUBS_DIR, RUN_DIR, read_json, write_json, mkdir_p, shq, run, fnv1a } from 'xvpn.util';
 import { b64, parse_link, parse_subscription } from 'xvpn.links';
 
 // Failed downloads are retried after this many seconds.
@@ -171,13 +171,51 @@ function compile(re) {
 	}
 }
 
+// What identifies a server's account: the user id or the password, not the address.
+function credentials(s) {
+	let st = s.outbound?.settings ?? {};
+	let t = st.vnext?.[0] ?? st.servers?.[0] ?? {};
+	return t.users?.[0]?.id ?? t.password ?? '';
+}
+
+// Server ids that survive a change of address or port: some subscriptions hand out
+// another host of the same server on every download (#49). The id comes from the
+// source (subscription id or "manual"), protocol, name and credentials; servers that
+// share all of them in one source are told apart by their order. hash: the connection
+// itself (links.uc), the server id before #49; caches written then hold it as id.
+export function assign_ids(servers, source) {
+	let seen = {};
+	return map(servers, (s) => {
+		let key = join('|', [ source, s.proto, s.name, credentials(s) ]);
+		let n = seen[key] = (seen[key] ?? 0) + 1;
+		return { ...s, hash: s.hash ?? s.id, id: fnv1a((n > 1) ? `${key}|${n}` : key) };
+	});
+};
+
+// What an update of the server list needs (cli.uc update): 'reload' when servers came
+// or went or one of active_ids changed, 'stale' when only the others changed (xray goes
+// on with their old addresses until the next reload), null when nothing changed.
+export function list_change(before, after, active_ids) {
+	let a = {}, b = {};
+	for (let s in before)
+		a[s.id] = sprintf('%J', s);
+	for (let s in after)
+		b[s.id] = sprintf('%J', s);
+	if (join('|', sort(keys(a))) != join('|', sort(keys(b))))
+		return 'reload';
+	for (let id in active_ids)
+		if (id && a[id] != b[id])
+			return 'reload';
+	return (sprintf('%J', before) != sprintf('%J', after)) ? 'stale' : null;
+};
+
 // All usable servers: enabled subscriptions (filtered) + manual links, deduplicated.
 export function all_servers(cfg) {
 	let out = [], seen = {};
 	let add = (s, sid, sname) => {
-		if (seen[s.id])
+		if (seen[s.hash] || seen[s.id])
 			return;
-		seen[s.id] = true;
+		seen[s.hash] = seen[s.id] = true;
 		push(out, { ...s, sub: sid, sub_name: sname });
 	};
 
@@ -185,7 +223,8 @@ export function all_servers(cfg) {
 		if (!sub.enabled)
 			continue;
 		let inc = compile(sub.include), exc = compile(sub.exclude);
-		for (let s in (load_cache(sub.id)?.servers ?? [])) {
+		// ids before the filters: changing them does not renumber the servers
+		for (let s in assign_ids(load_cache(sub.id)?.servers ?? [], sub.id)) {
 			if (inc && !match(s.name, inc))
 				continue;
 			if (exc && match(s.name, exc))
@@ -194,10 +233,8 @@ export function all_servers(cfg) {
 		}
 	}
 
-	for (let link in cfg.manual) {
-		let s = parse_link(link);
-		if (!s.error)
-			add(s, 'manual', 'manual');
-	}
+	let manual = filter(map(cfg.manual ?? [], (l) => parse_link(l)), (s) => !s.error);
+	for (let s in assign_ids(manual, 'manual'))
+		add(s, 'manual', 'manual');
 	return out;
 };

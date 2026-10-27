@@ -13,7 +13,10 @@ export function build_index(cfg, servers, active_id) {
 			tag: `srv-${i}`, test_port: cfg.main.test_port_base + i,
 		});
 
-	let active = filter(index, (e) => e.id == active_id)[0] ?? index[0];
+	// active_id may be the content hash: an id from before #49, or the server got another
+	// id (renamed) with the same connection
+	let active = filter(index, (e) => e.id == active_id)[0]
+		?? filter(index, (e, i) => servers[i].hash == active_id)[0] ?? index[0];
 	return { active: active?.id, servers: index };
 };
 

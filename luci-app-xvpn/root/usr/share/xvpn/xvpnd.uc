@@ -10,7 +10,7 @@ import * as ubus from 'ubus';
 import { readfile, unlink, access, stat } from 'fs';
 import {
 	load_config, read_json, write_json, write_file, mkdir_p, shq, update_running, procs, tree, kill_tree,
-	ETC_DIR, RUN_DIR, CONFIG_FILE, INDEX_FILE, ACTIVE_FILE, STATE_FILE, FW_ERROR_FILE, GENERATE_ERROR_FILE
+	ETC_DIR, RUN_DIR, CONFIG_FILE, INDEX_FILE, ACTIVE_FILE, STATE_FILE, FW_ERROR_FILE, GENERATE_ERROR_FILE, STALE_FILE
 } from 'xvpn.util';
 import { due_in } from 'xvpn.subscription';
 
@@ -498,6 +498,9 @@ function adopt_index() {
 		set_state('no_servers', 'no servers in subscriptions');
 		return;
 	}
+	// generate found the chosen server under a new id (cli.uc generate): the same server
+	if (index.active != st.active && !server(st.active) && trim(readfile(ACTIVE_FILE) ?? '') == index.active)
+		st.active = index.active;
 	if (index.active != st.active) {
 		// active server disappeared from the list
 		st.active = index.active;
@@ -677,6 +680,14 @@ function switch_to(id, reason) {
 
 choose_best = function(reason) {
 	st.xray_choose = null;
+	// an update moved servers xray does not use now (cli.uc update): measure them at their
+	// new addresses. A reload drops the connections, but the choice may switch anyway
+	if (access(STALE_FILE) && !st.reloading && !st.reload_error) {
+		log(`applying the updated server list before choosing (${reason})`);
+		st.choose_pending = reason;
+		reload_service();
+		return;
+	}
 	test_all((problem, inst, refused) => {
 		// the test may end mid-reload with partial data: decide once it settles
 		if (st.reloading) {
