@@ -56,9 +56,10 @@ commit network
 UCI
 /etc/init.d/network restart
 sleep 3
-# a feed may fail right after the network restart or on a busy host: wget returned 4
+# downloads.openwrt.org may fail right after the network restart or on a busy host
+# (wget returned 4): opkg update and install are tried again
 for i in 1 2 3 4 5; do opkg update >/dev/null && break; sleep 5; done
-opkg install ucode-mod-uloop xray-core curl ip-full >/dev/null
+for i in 1 2 3 4 5; do opkg install ucode-mod-uloop xray-core curl ip-full >/dev/null && break; sleep 5; done
 cp -a /src/luci-app-xvpn/root/. /
 /etc/uci-defaults/80_luci-xvpn
 /etc/init.d/rpcd restart
