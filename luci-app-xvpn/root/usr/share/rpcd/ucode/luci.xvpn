@@ -166,6 +166,8 @@ const methods = {
 				push(wifi, {
 					section: s['.name'], ssid: s.ssid, radio: s.device, band: dev.band,
 					network: s.network, disabled: (s.disabled == '1' || dev.disabled == '1'),
+					// the fixed name of a VPN SSID (DESIGN.md 7.2) or one set by the user
+					ifname: s.ifname,
 				});
 			});
 
@@ -202,7 +204,11 @@ const methods = {
 
 	log: {
 		call: function() {
-			let r = run("logread -e 'xvpn|xray' 2>/dev/null | tail -n 300");
+			// by the tag only: other lines may mention xvpn too (LuCI URLs in the log of uhttpd);
+			// procd tags xray with the name of its binary (logread -e takes a basic regex)
+			let xray = replace(load_config().main.xray_bin, /.*\//, '');
+			let re = sprintf(' (xvpn|%s)(\\[[0-9]+\\])?: ', replace(xray, /[^A-Za-z0-9_-]/g, '.') || 'xray');
+			let r = run(sprintf('logread 2>/dev/null | grep -E %s | tail -n 300', shq(re)));
 			return { log: r.out };
 		}
 	},
