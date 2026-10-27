@@ -4,11 +4,11 @@
 
 'use strict';
 
-import { readfile, unlink, access, open, symlink, readlink, rename } from 'fs';
+import { readfile, unlink, access, open, symlink, readlink, rename, stat } from 'fs';
 import * as ubus from 'ubus';
 import * as uloop from 'uloop';
 import {
-	load_config, read_json, write_json, write_file, mkdir_p, log, run, shq, is_updater, kill_tree,
+	load_config, read_json, write_json, write_file, mkdir_p, log, run, shq, is_updater, kill_tree, fnv1a,
 	ACTIVE_FILE, CONFIG_FILE, INDEX_FILE, VAR_DIR, RUN_DIR, UPDATE_LOCK,
 	FW_WANT_FILE, FW_MODE_FILE, FW_ERROR_FILE, FW_WARN_FILE, FW_LOCK_FILE, GENERATE_ERROR_FILE, STALE_FILE
 } from 'xvpn.util';
@@ -24,10 +24,49 @@ const cfg = load_config();
 const TEST_FULL = 40, TEST_ONE = 15, GENERATE_BUDGET = cfg.health.generate_budget;
 const STARTED = clock(true)[0];
 
+// xray's verdicts are kept (#7): `run -test` is a second xray beside the running one, with
+// hundreds of outbounds it takes as much memory. A reload that only selects a server or
+// follows a wifi change tests nothing; a changed server list is tested once (one test of the
+// whole config while xray accepts it; one by one only the servers it has not judged yet).
+// { bin: bin_sig(), frame: <main and access settings>, full: <the server set whose whole
+// config passed>, ok: { <outbound key>: bool } }; another binary or other settings start
+// anew. In /var: after a boot everything is tested once again
+const TESTED_FILE = `${VAR_DIR}/tested.json`;
+
+// another binary (an upgrade, xray_bin changed or fixed in place) may judge otherwise
+function bin_sig() {
+	let s = stat(cfg.main.xray_bin);
+	return s ? `${s.inode}:${s.size}:${s.mtime}` : null;
+}
+
+function conf_key(o) {
+	let j = sprintf('%J', o);
+	return `${fnv1a(j)}-${length(j)}`;
+}
+
+// init.d passes xray's GC settings (GOMEMLIMIT, GOGC) to the tests too
+const XRAY_ENV = { PATH: '/usr/sbin:/usr/bin:/sbin:/bin' };
+for (let k in [ 'GOMEMLIMIT', 'GOGC' ])
+	if (getenv(k))
+		XRAY_ENV[k] = getenv(k);
+
+// the last xray_ok was xray's own verdict on the config, so it may be kept: accepted, or
+// exit code 23 (config error); not hung, not killed (OOM), not a Go runtime error (2)
+let definite = false;
+
+// write_json that checks the file is whole: on a full tmpfs xray would reject a truncated
+// config with the same 23
+function put(path, obj) {
+	let text = sprintf('%J\n', obj);
+	write_file(path, text);
+	return readfile(path) === text;
+}
+
 // true: xray accepts the config; false: rejects it, hung or was killed (OOM); null: out of
 // time, reserve seconds of the budget kept for later. uloop.process reports a killed
 // process as exit code 0: sh writes xray's own code.
 function xray_ok(path, limit, reserve) {
+	definite = false;
 	let left = GENERATE_BUDGET - (clock(true)[0] - STARTED) - (reserve ?? 0);
 	if (left <= 0)
 		return null;
@@ -35,7 +74,7 @@ function xray_ok(path, limit, reserve) {
 	unlink(out);
 	uloop.init();
 	let p = uloop.process('/bin/sh', [ '-c', `${shq(cfg.main.xray_bin)} run -test -c ${shq(path)} >/dev/null 2>&1; echo $? > ${shq(out)}` ],
-		{ PATH: '/usr/sbin:/usr/bin:/sbin:/bin' }, () => uloop.end());
+		XRAY_ENV, () => uloop.end());
 	if (!p)
 		return false;
 	t = uloop.timer(wait * 1000, () => {
@@ -50,6 +89,7 @@ function xray_ok(path, limit, reserve) {
 		return null;
 	if (hung)
 		log(`${cfg.main.xray_bin} run -test hung for ${limit} s, killed`);
+	definite = !hung && code != null && int(code) in [ 0, 23 ];
 	return !hung && code != null && int(code) == 0;
 }
 
@@ -151,8 +191,20 @@ case 'generate': {
 	// set it again meanwhile
 	let stale = readfile(STALE_FILE);
 	prune(cfg);
-	let servers = all_servers(cfg);
+	let all = all_servers(cfg), servers = all;
 	let active = trim(readfile(ACTIVE_FILE) ?? ''), prev = read_json(INDEX_FILE);
+	// everything but the servers that goes into the config (ports, DNS, sniffing…)
+	let sig = bin_sig(), frame = conf_key([ cfg.main, cfg.access ]), tested = read_json(TESTED_FILE);
+	if (type(tested?.ok) != 'object' || tested.bin != sig || tested.frame != frame)
+		tested = { bin: sig, frame, full: null, ok: {} };
+	let verdict = (s) => tested.ok[s.key ??= conf_key(s.outbound)];
+	let set_key = (list) => conf_key(sort(map(list, (s) => s.key ?? conf_key(s.outbound))));
+	// rejected before: dropped without a test
+	let skipped = map(filter(servers, (s) => verdict(s) === false), (s) => s.name);
+	if (length(skipped)) {
+		log(`xray rejected ${length(skipped)} server(s) earlier: ${join(', ', skipped)}`);
+		servers = filter(servers, (s) => verdict(s) !== false);
+	}
 	let idx = build_index(cfg, servers, active, prev);
 	// xray and the daemon keep the running config until the end: a generate killed
 	// midway changes nothing
@@ -160,6 +212,21 @@ case 'generate': {
 	mkdir_p(VAR_DIR);
 	write_json(next, generate(cfg, servers, idx));
 
+	// the verdicts got so far are kept whatever the end: they are xray's own
+	function keep(passed) {
+		if (passed) {
+			tested.full = set_key(servers);
+			for (let s in servers)
+				tested.ok[s.key] = true;
+		}
+		// the servers gone from the subscriptions go from the file too
+		let ok = {};
+		for (let s in all)
+			if (verdict(s) != null)
+				ok[s.key] = verdict(s);
+		tested.ok = ok;
+		write_json(TESTED_FILE, tested);
+	}
 	function commit(code) {
 		unlink(tmp);
 		unlink(GENERATE_ERROR_FILE);
@@ -178,6 +245,7 @@ case 'generate': {
 		exit(code ?? (length(servers) ? 0 : 3));
 	}
 	function out_of_time() {
+		keep(false);
 		unlink(tmp);
 		unlink(next);
 		let err = `generate ran out of time (${GENERATE_BUDGET} s), xray goes on with the previous config`;
@@ -194,7 +262,10 @@ case 'generate': {
 	}
 
 	// one malformed server must not take the whole VPN down: drop the ones xray rejects
-	if (length(servers) && access(cfg.main.xray_bin, 'x') && !check(next, TEST_FULL)) {
+	// the same servers with the same settings were accepted by this binary before: no test
+	let known = (tested.full == set_key(servers));
+	let testing = length(servers) && !known && access(cfg.main.xray_bin, 'x');
+	if (testing && !check(next, TEST_FULL)) {
 		let good = [], bad = [];
 		// xray that rejects a config without servers is broken itself: keep the servers,
 		// the daemon reports xray_down rather than "no servers"
@@ -205,12 +276,20 @@ case 'generate': {
 		// dropped, a test of the whole config stays in the budget
 		let untested = 0;
 		for (let s in servers) {
+			if (verdict(s) === true) {
+				push(good, s);
+				continue;
+			}
 			if (untested) {
 				untested++;
 				continue;
 			}
-			write_json(tmp, generate(cfg, [ s ], build_index(cfg, [ s ], s.id)));
-			let ok = xray_ok(tmp, TEST_ONE, TEST_FULL);
+			let ok = false;
+			definite = false;
+			if (put(tmp, generate(cfg, [ s ], build_index(cfg, [ s ], s.id))))
+				ok = xray_ok(tmp, TEST_ONE, TEST_FULL);
+			if (definite)
+				tested.ok[s.key] = ok;
 			if (ok == null)
 				untested++;
 			else if (ok)
@@ -228,9 +307,12 @@ case 'generate': {
 		write_json(next, generate(cfg, servers, idx));
 		if (length(servers) && !check(next, TEST_FULL)) {
 			log(`xray rejects the generated config`);
+			keep(false);
 			commit(4);
 		}
 	}
+	if (testing)
+		keep(true);
 	commit(null);
 }
 

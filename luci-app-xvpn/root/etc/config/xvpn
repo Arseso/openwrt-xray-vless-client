@@ -27,6 +27,6 @@ config health 'health'
 	option auto_best '0'
 	option hysteresis '150'
 	option quarantine '300'
-	option concurrency '8'
+	option concurrency '4'
 
 config manual 'manual'

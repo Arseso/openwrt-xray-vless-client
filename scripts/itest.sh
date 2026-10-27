@@ -7,7 +7,8 @@
 # subscription update from LuCI through the daemon and by a reload past it; a hung xray
 # and a broken xray_bin are xray_down, not dead servers; a hung reload (sleep in init.d,
 # procd lock held) does not stop the health checks, a slow generate is not killed and a
-# killed one leaves the running config; before NTP sets the clock no server goes to quarantine.
+# killed one leaves the running config; before NTP sets the clock no server goes to quarantine;
+# the status tab and a reload of the same servers start no xray.
 set -e
 cd "$(dirname "$0")/.."
 DOCKER="${DOCKER:-docker}"
@@ -55,8 +56,10 @@ commit network
 UCI
 /etc/init.d/network restart
 sleep 3
-opkg update >/dev/null
-opkg install ucode-mod-uloop xray-core curl ip-full >/dev/null
+# downloads.openwrt.org may fail right after the network restart or on a busy host
+# (wget returned 4): opkg update and install are tried again
+for i in 1 2 3 4 5; do opkg update >/dev/null && break; sleep 5; done
+for i in 1 2 3 4 5; do opkg install ucode-mod-uloop xray-core curl ip-full >/dev/null && break; sleep 5; done
 cp -a /src/luci-app-xvpn/root/. /
 /etc/uci-defaults/80_luci-xvpn
 /etc/init.d/rpcd restart
@@ -526,6 +529,34 @@ echo "OK: failover after the update went to the live sub-live"
 tunnel || { echo "FAIL: no tunnel through sub-live"; exit 1; }
 echo "OK: client goes through the tunnel after the update"
 
+# memory (#7): the status tab starts no xray, stats reads the metrics section over HTTP;
+# a reload with the same servers and binary runs no `xray run -test`
+printf '#!/bin/sh\necho "$*" >> /tmp/xray-runs\nexec /usr/bin/xray "$@"\n' > /tmp/xray-count; chmod +x /tmp/xray-count
+uci set xvpn.main.xray_bin=/tmp/xray-count; uci commit xvpn
+/etc/init.d/xvpn reload
+wait_for @.state connected 40
+[ "$(grep -c -- '-test' /tmp/xray-runs)" = 1 ] || { echo "FAIL: another binary is not tested once: $(cat /tmp/xray-runs)"; exit 1; }
+: > /tmp/xray-runs
+/etc/init.d/xvpn reload
+wait_for @.state connected 40
+tunnel || { echo "FAIL: no tunnel with the counting xray"; exit 1; }
+for i in 1 2 3; do s=$(ubus call luci.xvpn stats); ubus call luci.xvpn status >/dev/null; done
+[ ! -s /tmp/xray-runs ] || { echo "FAIL: xray started by a reload or the status tab: $(cat /tmp/xray-runs)"; exit 1; }
+[ "$(echo "$s" | jsonfilter -e "@.traffic['$(status @.active)'].down")" -gt 0 ] \
+	|| { echo "FAIL: no traffic of the active server in stats: $s"; exit 1; }
+echo "OK: stats from the metrics section, a reload of the same servers runs no xray -test"
+# a GOMEMLIMIT Go cannot parse would stop xray at start: the default instead
+uci set xvpn.main.gomemlimit=80MB; uci commit xvpn
+/etc/init.d/xvpn reload
+wait_for @.state connected 40
+logread | grep -q "main.gomemlimit '80MB'" && tr '\0' '\n' < /proc/$(xray_pid)/environ | grep -qx GOMEMLIMIT=80MiB \
+	|| { echo "FAIL: bad gomemlimit: $(tr '\0' ' ' < /proc/$(xray_pid)/environ)"; exit 1; }
+echo "OK: a bad gomemlimit falls back to 80MiB"
+uci delete xvpn.main.gomemlimit
+uci set xvpn.main.xray_bin=/usr/bin/xray; uci commit xvpn
+/etc/init.d/xvpn reload
+wait_for @.state connected 40
+
 # reload past the daemon (UCI triggers on wireless/network): ports shift again,
 # sub-live moves from 20001 to 20002
 { link 18447 sub-x; link 18448 sub-y; link 18446 sub-live; } | ucode -l fs -e 'print(b64enc(fs.stdin.read("all")))' > /www/sub.b64
@@ -680,8 +711,10 @@ grep -q hang-reload /etc/init.d/xvpn || { echo "FAIL: test setup, no sleep in in
 touch /tmp/hang-reload
 wait_cmd 15 select_ok "$id"	# busy for the pause after the last reload
 wait_cmd 10 sh -c "ps w | grep -q '[s]leep 1000'"
+hung=$(ps w | awk '/[s]leep 1000/ { print $1 }')
 hung_reload "sleep in start_service"
-ps w | grep -q '[s]leep 1000' && { echo "FAIL: the hung reload was not killed"; exit 1; }
+# this very sleep: the retry after reload_retry may already sleep in a new one
+kill -0 $hung 2>/dev/null && { echo "FAIL: the hung reload was not killed"; exit 1; }
 rm /tmp/hang-reload
 wait_cmd 20 sh -c "logread | grep -q 'trying the reload again'"
 wait_for @.state connected 30
@@ -716,6 +749,8 @@ wait_for @.state connected 40
 echo "OK: a slow generate (~35 s) is not killed, the rejected server is dropped"
 
 # generate killed midway (OOM, the daemon): the config and the index xray runs with stay
+# (without the kept verdicts it tests everything again, slowly)
+rm /var/etc/xvpn/tested.json
 c=$(md5sum < /var/etc/xvpn/config.json); x=$(md5sum < /var/etc/xvpn/index.json)
 ucode /usr/share/xvpn/cli.uc generate >/dev/null 2>&1 & g=$!
 sleep 10

@@ -55,14 +55,16 @@ export function generate(cfg, servers, idx) {
 			// with the DNS module the address is a placeholder: dns-out answers A/AAAA itself
 			settings: { address: doh ? '1.1.1.1' : cfg.access.dns_server, port: 53, network: 'tcp,udp' },
 		},
+		// HTTP of the metrics section (/debug/vars: traffic counters), read by rpcd stats without
+		// starting xray; xray 25.1.30 has no metrics.listen, the inbound is the only way
 		{
-			tag: 'api', listen: '127.0.0.1', port: m.api_port, protocol: 'dokodemo-door',
+			tag: 'metrics', listen: '127.0.0.1', port: m.api_port, protocol: 'dokodemo-door',
 			settings: { address: '127.0.0.1' },
 		},
 	];
 
 	let outbounds = [];
-	let rules = [ { type: 'field', inboundTag: [ 'api' ], outboundTag: 'api' } ];
+	let rules = [ { type: 'field', inboundTag: [ 'metrics' ], outboundTag: 'metrics' } ];
 
 	for (let i, e in idx.servers) {
 		push(inbounds, {
@@ -91,7 +93,7 @@ export function generate(cfg, servers, idx) {
 
 	let conf = {
 		log: { loglevel: m.loglevel, access: 'none' },
-		api: { tag: 'api', services: [ 'StatsService' ] },
+		metrics: { tag: 'metrics' },
 		stats: {},
 		policy: { system: { statsOutboundUplink: true, statsOutboundDownlink: true } },
 		inbounds,

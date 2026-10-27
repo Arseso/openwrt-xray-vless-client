@@ -272,7 +272,9 @@ function xray_test() {
 	if (x.testing)
 		return;
 	x.testing = true;
-	p = spawn('/bin/sh', [ '-c', `exec ${shq(cfg.main.xray_bin)} run -test -c ${shq(CONFIG_FILE)} > ${shq(out)} 2>&1` ], () => {
+	// with xray's GC settings (init.d gives them to the daemon too): a bad one fails it alike
+	let env = join('', map(filter([ 'GOMEMLIMIT', 'GOGC' ], (k) => getenv(k)), (k) => `${k}=${shq(getenv(k))} `));
+	p = spawn('/bin/sh', [ '-c', `${env}exec ${shq(cfg.main.xray_bin)} run -test -c ${shq(CONFIG_FILE)} > ${shq(out)} 2>&1` ], () => {
 		t?.cancel();
 		let why = tidy(split(readfile(out) ?? '', '\n'));
 		unlink(out);

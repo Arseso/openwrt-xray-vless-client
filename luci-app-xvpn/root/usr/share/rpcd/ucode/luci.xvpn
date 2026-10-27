@@ -185,18 +185,16 @@ const methods = {
 	stats: {
 		call: function() {
 			let cfg = load_config(), idx = read_json(INDEX_FILE) ?? {};
-			let r = run(sprintf('%s api statsquery --server=127.0.0.1:%d 2>/dev/null', shq(cfg.main.xray_bin), cfg.main.api_port));
+			// expvar of the xray metrics section over loopback HTTP, no xray process is started;
+			// a hung xray must not stall rpcd
+			let r = run(sprintf('curl -s -m 1 http://127.0.0.1:%d/debug/vars 2>/dev/null', cfg.main.api_port));
 			let traffic = {};
 			try {
-				for (let s in (json(r.out)?.stat ?? [])) {
-					let m = match(s.name, /^outbound>>>(srv-[0-9]+)>>>traffic>>>(uplink|downlink)$/);
-					if (!m)
-						continue;
-					let e = filter(idx.servers ?? [], (x) => x.tag == m[1])[0];
-					if (!e)
-						continue;
-					traffic[e.id] ??= { up: 0, down: 0 };
-					traffic[e.id][(m[2] == 'uplink') ? 'up' : 'down'] = int(s.value ?? 0);
+				let out = json(r.out)?.stats?.outbound ?? {};
+				for (let e in (idx.servers ?? [])) {
+					let s = out[e.tag];
+					if (s)
+						traffic[e.id] = { up: int(s.uplink ?? 0), down: int(s.downlink ?? 0) };
 				}
 			}
 			catch (e) { }

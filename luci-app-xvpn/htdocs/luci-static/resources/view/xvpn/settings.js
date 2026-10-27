@@ -15,7 +15,7 @@ const DEFAULTS = {
 	tproxy_port: 12345, dns_port: 10853, api_port: 10085, test_port_base: 20000,
 	client_mark: '0x01000000', tproxy_mark: '0x02000000', route_table: 100,
 	url: 'https://www.gstatic.com/generate_204', interval: 30, timeout: 5, fail_threshold: 3,
-	rank_interval: 600, hysteresis: 150, quarantine: 300, concurrency: 8,
+	rank_interval: 600, hysteresis: 150, quarantine: 300, concurrency: 4,
 };
 
 const PORTS = [ 'tproxy_port', 'dns_port', 'api_port' ];
@@ -114,7 +114,7 @@ return view.extend({
 		o = s.option(form.Value, 'concurrency', _('Parallel tests'),
 			_('How many servers are tested at the same time.'));
 		o.placeholder = DEFAULTS.concurrency;
-		o.validate = integer(1, 64);
+		o.validate = integer(1, 8);
 
 		o = s.option(form.Flag, 'auto_best', _('Switch to a faster server'),
 			_('Off: the server is switched only when it fails. On: also when the background test finds a server that is faster by the hysteresis below.'));
@@ -176,7 +176,7 @@ return view.extend({
 			o = s.option(form.Value, name, portNames[name], {
 				tproxy_port: _('xray takes the traffic of the VPN clients on this port.'),
 				dns_port: _('xray takes the intercepted DNS queries on this port.'),
-				api_port: _('The statistics API of xray, on 127.0.0.1.'),
+				api_port: _('xray traffic statistics (metrics over HTTP), on 127.0.0.1.'),
 			}[name]);
 			o.placeholder = DEFAULTS[name];
 			o.validate = port(name);
