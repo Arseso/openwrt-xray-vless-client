@@ -738,6 +738,24 @@ wait_cmd 20 active_is second
 wait_for @.state connected 30
 status @.last_switch.reason | grep -q 'is limited' || { echo "FAIL: switch reason: $(status @.last_switch.reason)"; exit 1; }
 echo "OK: a test leaves a limited server the daemon chose"
+# url2 is dropped through every server (timeouts, as when its CDN is down) and there are
+# fewer live servers than URL2_CDN: all are limited, the start still chooses the fastest
+# of them, connected with the reason in last_error, not no_servers
+ip netns exec wan nft -f - <<NFT
+table inet drop81 { chain in { type filter hook input priority 0; tcp dport 81 drop; } }
+NFT
+uci set xvpn.health.url2=http://check2.test:81/; uci commit xvpn
+/etc/init.d/xvpn stop
+rm -f /etc/xvpn/active /var/run/xvpn/state.json
+/etc/init.d/xvpn start
+wait_cmd 30 tests_done 1
+wait_for @.state connected 30
+[ "$(limited_of second)" = true ] && [ "$(limited_of limited)" = true ] && active_is limited \
+	&& status @.last_error | grep -q 'only limited servers answer' && status @.last_switch.reason | grep -q 'only limited servers answer' \
+	|| { echo "FAIL: url2 down everywhere"; ubus call xvpn status; exit 1; }
+echo "OK: url2 timing out through every server: the fastest limited one, connected, the reason shown"
+ip netns exec wan nft delete table inet drop81
+uci set xvpn.health.url2=http://check2.test/
 kill $(cat /tmp/remote-18450.pid) $(cat /tmp/remote-18444.pid); remote 18444
 uci del_list xvpn.manual.link="$(link 18450 limited)"; uci commit xvpn
 # not reload_config: its md5 of the configs dates from before the link was added, the same as now

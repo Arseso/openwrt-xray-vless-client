@@ -83,9 +83,16 @@ return view.extend({
 			_('Opened through every server that answers the check URL when all servers are tested and a server is chosen. A server that fails it is marked limited and is not chosen automatically while there are others; you can still choose it by hand. Use a URL by domain on another CDN than the check URL. "off" turns this check off.'));
 		o.placeholder = DEFAULTS.url2;
 		o.value('https://cp.cloudflare.com/generate_204');
-		o.value('https://www.gstatic.com/generate_204');
 		o.value('off', _('off'));
-		o.validate = (sid, v) => !v || v.trim() == 'off' || /^https?:\/\/[^\s/?#]+\S*$/i.test(v.trim()) || _('Enter an http:// or https:// URL or "off"');
+		// the same URL as the first one would turn the check off without a word
+		o.validate = (sid, v) => {
+			v = (v ?? '').trim();
+			if (v && v != 'off' && !/^https?:\/\/[^\s/?#]+\S*$/i.test(v))
+				return _('Enter an http:// or https:// URL or "off"');
+			if ((v || DEFAULTS.url2) == String(this.value(h, sid, 'url')).trim())
+				return _('Use another URL than the check URL, preferably on another CDN');
+			return true;
+		};
 		o.write = (sid, v) => uci.set('xvpn', sid, 'url2', v.trim());
 
 		o = s.option(form.Value, 'interval', _('Check interval, s'),

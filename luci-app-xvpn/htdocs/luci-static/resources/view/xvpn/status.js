@@ -364,7 +364,7 @@ return view.extend({
 					: (activeId ? txt(activeId) : E('em', {}, _('none'))) ],
 				(up && active) ? [ _('Latency'), (lat == null) ? '—' : (lat < 0)
 					? [ label('error', _('failed')), ' ', txt(ago(now, active.tested)) ]
-					: [ txt(_('%d ms').format(lat) + ', ' + ago(now, active.tested)), ...(active.limited ? [ ' ', limited(status.url2) ] : []) ] ] : null,
+					: [ txt(_('%d ms').format(lat) + ', ' + ago(now, active.tested)), ...((active.limited && lat >= 0) ? [ ' ', limited(status.url2) ] : []) ] ] : null,
 				(up && active && status.since) ? [ sinceTitle, txt(dur(now - status.since)) ] : null,
 				(up && status.fails > 0) ? [ _('Failed checks in a row'), txt(String(status.fails)) ] : null,
 				sw ? [ _('Last switch'), txt(
@@ -440,7 +440,7 @@ return view.extend({
 				ping = (s.latency < 0) ? label('error', _('failed'))
 					: E('span', { 'title': ago(now, s.tested) }, [ txt(_('%d ms').format(s.latency)) ]);
 			// #61: answers the check URL, not the second one
-			if (s.limited)
+			if (s.limited && s.latency >= 0)	// one that does not answer at all is just failed
 				ping = [ ping, ' ', limited(status.url2) ];
 
 			const nameCell = [ isActive ? E('strong', {}, [ txt(s.name) ]) : txt(s.name) ];

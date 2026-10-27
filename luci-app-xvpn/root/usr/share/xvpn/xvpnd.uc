@@ -32,6 +32,7 @@ const STALL = 3 * H.interval + RELOAD_MAX + 30;	// s without health checks: see 
 const TIME_FLAG = `${RUN_DIR}/time_synced`;	// hotplug.d/ntp/50-xvpn: sysntpd has set the clock
 const TIME_UNTIL = `${RUN_DIR}/time_wait`;	// end of the wait (monotonic): restarts do not wait again
 const URL2 = (H.url2 && H.url2 != H.url) ? H.url2 : null;	// see limited_check()
+const URL2_CDN = 3;	// live servers in a row that fail url2 before any passes it: its CDN is down
 
 let index = { servers: [] }, index_raw = null;
 let prev = read_json(STATE_FILE) ?? {};
@@ -459,6 +460,11 @@ function best() {
 	return (p && !p.limited && !quarantined(p.server.id)) ? p.server : null;
 }
 
+// Why the daemon stays on a limited server or chose one (see auto_pick())
+function only_limited() {
+	return `only limited servers answer: ${URL2} fails through every one`;
+}
+
 // Why best() found nothing, for last_error.
 function no_candidates() {
 	let off = no_auto(), n = length(filter(index.servers, (e) => off[e.id]));
@@ -468,28 +474,46 @@ function no_candidates() {
 }
 
 // A server that answers health.url may let through only the sites on its whitelist (#61):
-// tests also open health.url2 through it, by domain on another CDN. When that fails twice
-// in a row, the server is limited: auto selection leaves it while there are others
-// (auto_pick()), the user may choose it by hand. No quarantine, the checks of the
-// active server go on with health.url alone: it works, maybe it is the CDN that does not.
-// The next test gives the verdict again.
-function limited_check(e, gen, cb, again) {
+// tests also open health.url2 through it, by domain on another CDN. A failure is tried once
+// more (not a timeout: a CDN that drops would cost 2 x timeout per server); the verdicts
+// of the run go to q.limited, set_limited() takes them once xray is known to work.
+// The first URL2_CDN live servers in a row that fail it: the CDN is down, no verdicts in
+// this run and no more url2 requests. No quarantine either way, the checks of the active
+// server go on with health.url alone.
+function limited_check(q, e, gen, cb, again) {
+	if (q.url2_off)
+		return cb();
 	probe(e.test_port, (ms, code) => {
 		// the test went on without us or the server went away: no verdict; 7 is xray's
-		if (testq == null || code < 0 || code == 7 || !valid(gen) || !server(e.id))
+		if (testq !== q || q.url2_off || code < 0 || code == 7 || !valid(gen) || !server(e.id))
 			return cb();
-		if (ms < 0 && !again)
-			return limited_check(e, gen, cb, true);
-		if (ms < 0 && !st.limited[e.id]) {
-			st.limited[e.id] = time();
-			log(`"${e.name}" is limited: ${URL2} fails through it (curl ${code})`);
+		if (ms < 0 && !again && code != 28)
+			return limited_check(q, e, gen, cb, true);
+		if (ms >= 0)
+			q.url2_ok = true;
+		else if (!q.url2_ok && ++q.url2_fails >= URL2_CDN) {
+			q.url2_off = true;
+			q.limited = {};
+			log(`${URL2} fails through ${URL2_CDN} servers in a row: its CDN is likely down, the limited marks stay as they are`);
+			return cb();
 		}
-		else if (ms >= 0 && st.limited[e.id]) {
-			delete st.limited[e.id];
-			log(`"${e.name}" is no longer limited`);
-		}
+		q.limited[e.id] = (ms < 0) ? `curl ${code}` : null;
 		cb();
 	}, URL2);
+}
+
+// The url2 verdicts of a test run (null: passes it).
+function set_limited(q) {
+	for (let id, why in q.limited) {
+		let e = server(id);
+		if (!e || !why == !st.limited[id])
+			continue;
+		if (why)
+			st.limited[id] = time();
+		else
+			delete st.limited[id];
+		log(why ? `"${e.name}" is limited: ${URL2} fails through it (${why})` : `"${e.name}" is no longer limited`);
+	}
 }
 
 function test_all(cb) {
@@ -501,7 +525,7 @@ function test_all(cb) {
 	reindex(false);
 	st.testing = true;
 	// testq is this run's until done(): callbacks of an aborted run see another one or null
-	let q = testq = { queue: [], seen: {}, failed: {}, refused: false };
+	let q = testq = { queue: [], seen: {}, failed: {}, refused: false, limited: {}, url2_fails: 0 };
 	for (let e in index.servers) {
 		q.seen[e.id] = true;
 		push(q.queue, e.id);
@@ -520,10 +544,13 @@ function test_all(cb) {
 			f(problem, inst, refused);
 	}
 
-	// failures count only when xray works: with xray down every server would look dead
+	// failures count only when xray works: with xray down every server would look dead;
+	// so do url2 failures (a hung xray times out)
 	function finish() {
-		if (!length(q.failed) && !q.refused)
+		if (!length(q.failed) && !q.refused && !length(filter(values(q.limited), (why) => why))) {
+			set_limited(q);
 			return done(null);
+		}
 		q.finishing = true;
 		let gen = st.gen;
 		xray_check(q.refused ? 7 : null, (problem, inst) => {
@@ -539,10 +566,12 @@ function test_all(cb) {
 				q.refused = false;
 				return next();
 			}
-			if (!problem)
+			if (!problem) {
 				for (let id, at in q.failed)
 					if (server(id))
 						st.latency[id] = { ms: -1, at };
+				set_limited(q);
+			}
 			done(problem, inst);
 		});
 	}
@@ -571,7 +600,7 @@ function test_all(cb) {
 					st.latency[id] = { ms, at: time() };
 					// the slot stays taken: one curl per slot, as without url2
 					if (URL2)
-						return limited_check(e, gen, () => {
+						return limited_check(q, e, gen, () => {
 							running--;
 							next();
 						});
@@ -881,28 +910,45 @@ choose_best = function(reason) {
 			return;
 		}
 		set_passthrough(false);
-		let why = p.limited ? `only limited servers answer: ${URL2} fails through every one` : null;
 		if (b.id == st.active && chosen() == b.id) {
 			st.fails = 0;
-			set_state('connected', why);
+			set_state('connected', null);
 			return;
 		}
-		switch_to(b.id, why ? `${reason}; ${why}` : reason);
+		switch_to(b.id, p.limited ? `${reason}; ${only_limited()}` : reason);
 	});
 };
 
 // A test found the server the daemon chose limited: another one, as when it is left out
-// of auto selection (check()). One chosen by hand stays. True when it switches.
+// of auto selection (check()). One chosen by hand stays. The switch drops the connections
+// of the clients: url2 is tried once more through it LEAVE_RECHECK s later, a short CDN
+// failure passes meanwhile. True when it may switch: the rank leaves auto_best alone.
+const LEAVE_RECHECK = 3;
+let leave_limited_pending = false;
 function leave_limited() {
-	let e = server(st.active), b = best();
-	if (!e || !st.limited[e.id] || by_hand(e.id) || !b || st.reloading || st.reload_pending || st.reload_error)
+	let e = server(st.active);
+	let busy = () => st.reloading || st.reload_pending || st.reload_error || st.testing;
+	if (!e || !st.limited[e.id] || by_hand(e.id) || !best() || busy() || leave_limited_pending)
 		return false;
-	let why = `"${e.name}" is limited: ${URL2} fails through it`;
-	// measured at an old address (cli.uc update): choose again at the new ones
-	if (access(STALE_FILE))
-		choose_best(why);
-	else
-		switch_to(b.id, why);
+	let gen = st.gen;
+	leave_limited_pending = true;
+	uloop.timer(LEAVE_RECHECK * 1000, () => probe(e.test_port, (ms, code) => {
+		leave_limited_pending = false;
+		let b = best();
+		if (!valid(gen) || st.active != e.id || !st.limited[e.id] || by_hand(e.id) || !b || busy() || code < 0 || code == 7)
+			return;
+		if (ms >= 0) {
+			delete st.limited[e.id];
+			log(`"${e.name}" is no longer limited: ${URL2} opens through it again`);
+			return;
+		}
+		let why = `"${e.name}" is limited: ${URL2} fails through it`;
+		// measured at an old address (cli.uc update): choose again at the new ones
+		if (access(STALE_FILE))
+			choose_best(why);
+		else
+			switch_to(b.id, why);
+	}, URL2));
 	return true;
 }
 
@@ -1055,10 +1101,12 @@ function status() {
 	// the index (ipv6 = tunnel without IPv6 on the router)
 	let fw_error = readfile(FW_ERROR_FILE), gen_error = readfile(GENERATE_ERROR_FILE);
 	let error = fw_error ?? st.reload_error ?? (gen_error ? trim(gen_error) : null) ?? index.config_error;
+	// the active server is limited and there is nothing better: not kept in last_error, a check would clear it
+	let limited_error = (st.state == 'connected' && st.limited[st.active] && !best()) ? only_limited() : null;
 	return {
 		state: error ? 'error' : st.state, active: st.active, since: st.since, fails: st.fails,
 		testing: st.testing, tests: st.tests, updating: st.updating || !!update_running(), passthrough: st.passthrough,
-		last_error: error ?? st.last_error, last_switch: st.last_switch, last_test: st.last_test,
+		last_error: error ?? st.last_error ?? limited_error, last_switch: st.last_switch, last_test: st.last_test,
 		xray_restarts: st.xray.restarts ?? 0, url2: URL2, servers,
 	};
 }
