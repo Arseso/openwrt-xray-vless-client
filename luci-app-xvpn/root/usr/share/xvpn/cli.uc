@@ -9,7 +9,7 @@ import * as ubus from 'ubus';
 import * as uloop from 'uloop';
 import {
 	load_config, read_json, write_json, write_file, mkdir_p, log, run, shq, is_updater, kill_tree, fnv1a,
-	ACTIVE_FILE, CONFIG_FILE, INDEX_FILE, VAR_DIR, RUN_DIR, UPDATE_LOCK,
+	ACTIVE_FILE, MANUAL_FILE, CONFIG_FILE, INDEX_FILE, VAR_DIR, RUN_DIR, UPDATE_LOCK,
 	FW_WANT_FILE, FW_MODE_FILE, FW_ERROR_FILE, FW_WARN_FILE, FW_LOCK_FILE, GENERATE_ERROR_FILE, STALE_FILE
 } from 'xvpn.util';
 import { all_servers, update, prune, list_change } from 'xvpn.subscription';
@@ -256,8 +256,11 @@ case 'generate': {
 		if (stale != null && readfile(STALE_FILE) === stale)
 			unlink(STALE_FILE);
 		// build_index found the chosen server under another id by its hash: keep the choice
-		if (idx.moved_from)
+		if (idx.moved_from) {
 			write_file(ACTIVE_FILE, idx.active);
+			if (trim(readfile(MANUAL_FILE) ?? '') == idx.moved_from)
+				write_file(MANUAL_FILE, idx.active);
+		}
 		if (code == 4)
 			log(`xray does not work, check: ${cfg.main.xray_bin} run -test -c ${CONFIG_FILE}`);
 		else

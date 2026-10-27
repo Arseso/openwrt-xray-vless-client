@@ -123,11 +123,12 @@ SH
 direct || { echo "FAIL: test network: client cannot reach wan without xvpn"; exit 1; }
 echo "OK: test network, client goes direct without xvpn"
 
-remote() { # port
+remote() { # port [freedom settings]
+	_fr=${2:-}; [ -n "$_fr" ] || _fr='{}'
 	cat > /tmp/remote-$1.json <<JSON
 { "inbounds": [ { "listen": "127.0.0.1", "port": $1, "protocol": "vless",
     "settings": { "clients": [ { "id": "$UUID" } ], "decryption": "none" } } ],
-  "outbounds": [ { "protocol": "freedom" } ] }
+  "outbounds": [ { "protocol": "freedom", "settings": $_fr } ] }
 JSON
 	xray run -c /tmp/remote-$1.json >/dev/null 2>&1 &
 	echo $! > /tmp/remote-$1.pid
@@ -565,6 +566,142 @@ wait_for @.state connected 60
 echo "OK: failover to the other server"
 logread | grep xvpn | grep -E 'switching|state' | tail -5
 
+# servers left out of auto selection (#60). "third" is the fastest: the remotes of the
+# others pass requests on in 20-byte pieces 30 ms apart (freedom fragment), ~0.1 s each.
+# auto_best with small rank_interval, hysteresis and quarantine for these steps
+id_of() { status "@.servers[@.name='$1'].id"; }
+auto_of() { status "@.servers[@.name='$1'].auto"; }
+set_auto() { # id true|false
+	r=$(ubus call luci.xvpn set_auto "{\"id\":\"$1\",\"auto\":$2}")
+	[ "$(echo "$r" | jsonfilter -e @.ok)" = true ] || { echo "FAIL: set_auto $1 $2: $r"; exit 1; }
+}
+select_ok() { [ "$(ubus call xvpn select "{\"id\":\"$1\"}" | jsonfilter -e @.ok)" = true ]; }
+# one call: the state and its reason (a dead active one goes through failover again and again)
+no_candidates() { s=$(ubus call xvpn status); [ "$(echo "$s" | jsonfilter -e @.state)" = no_servers ] && echo "$s" | jsonfilter -e @.last_error | grep -q 'excluded'; }
+not_third() { ! active_is third; }
+port_of() { [ "$1" = first ] && echo 18443 || echo 18444; }
+slow() { # port
+	kill $(cat /tmp/remote-$1.pid) 2>/dev/null || true
+	remote $1 '{ "fragment": { "packets": "1-1", "length": "20-20", "interval": "30-30" } }'
+}
+slow 18443; slow 18444; remote 18449
+dp=$(xvpnd_pid)
+uci batch <<UCI
+add_list xvpn.manual.link='$(link 18449 third)'
+set xvpn.health.auto_best=1
+set xvpn.health.rank_interval=5
+set xvpn.health.hysteresis=40
+set xvpn.health.quarantine=5
+commit xvpn
+UCI
+rm -f /var/run/xvpn/state.json	# quarantines left by earlier failovers
+reload_config
+wait_cmd 30 xvpnd_restarted "$dp"
+wait_cmd 30 count_is 3
+# auto_best: the daemon goes to the fastest by itself
+wait_cmd 30 active_is third
+wait_for @.state connected 30
+[ "$(latency first)" -ge 60 ] && [ "$(latency second)" -ge 60 ] && [ "$(latency third)" -lt 40 ] && [ ! -e /etc/xvpn/active_manual ] \
+	|| { echo "FAIL: slow remotes, third is not the fastest"; ubus call xvpn status; exit 1; }
+id3=$(id_of third)
+# the main case: the daemon chose it, the user leaves it out: another one at once, the
+# daemon is not restarted for it
+dp=$(xvpnd_pid)
+set_auto "$id3" false
+[ "$(uci -q get xvpn.health.no_auto)" = "$id3" ] && [ "$(auto_of third)" = false ] && [ "$(auto_of first)" = true ] \
+	|| { echo "FAIL: set_auto: $(uci -q get xvpn.health.no_auto)"; ubus call xvpn status; exit 1; }
+wait_cmd 30 not_third
+wait_for @.state connected 30
+[ "$(xvpnd_pid)" = "$dp" ] || { echo "FAIL: set_auto restarted xvpnd"; exit 1; }
+echo "OK: left out while active: another server at once, xvpnd not restarted"
+# failover with the faster third alive: the slower server in auto selection
+a=$(active_name); o=first; [ "$a" = first ] && o=second
+kill $(cat /tmp/remote-$(port_of $a).pid)
+wait_cmd 30 active_is $o
+wait_for @.state connected 30
+echo "OK: failover goes to the slower server in auto selection, not to the faster one left out"
+# the only live server is left out: no_servers with the reason, it is not chosen...
+kill $(cat /tmp/remote-$(port_of $o).pid)
+wait_cmd 30 no_candidates
+not_third && [ "$(cat /etc/xvpn/active)" != "$id3" ] || { echo "FAIL: failover chose a server left out"; ubus call xvpn status; exit 1; }
+echo "OK: failover does not choose a live server left out of auto selection"
+# ...nor at start; the one in auto selection once it is back
+/etc/init.d/xvpn stop
+rm /etc/xvpn/active
+/etc/init.d/xvpn start
+wait_cmd 30 no_candidates
+sleep 4
+[ "$(status @.state)" != connected ] && not_third && [ ! -e /etc/xvpn/active ] \
+	|| { echo "FAIL: chosen at start while left out"; ubus call xvpn status; exit 1; }
+slow 18443
+wait_cmd 30 active_is first
+wait_for @.state connected 30
+echo "OK: start does not choose a server left out of auto selection"
+# chosen by hand and left out: auto_best does not leave it for second, fast again; reload_config
+# (apply in LuCI, /etc/config/xvpn changed by set_auto) restarts neither xray nor xvpnd;
+# back in auto selection it is left. A daemon restart keeps the choice: see "back in the list"
+second_fast() { l=$(latency second); [ -n "$l" ] && [ "$l" -ge 0 ] && [ "$l" -lt 40 ]; }
+id1=$(id_of first)
+wait_cmd 15 select_ok "$id1"	# the active one: the config stays, xray goes on
+wait_for @.state connected 30
+xp=$(xray_pid); dp=$(xvpnd_pid)
+set_auto "$id1" false
+reload_config
+remote 18444
+wait_cmd 20 second_fast	# measured by a rank...
+wait_for @.testing false 10	# ...and its decision taken
+[ "$(xray_pid)" = "$xp" ] && [ "$(xvpnd_pid)" = "$dp" ] || { echo "FAIL: set_auto or reload_config restarted xray ($xp -> $(xray_pid)) or xvpnd ($dp -> $(xvpnd_pid))"; diag; exit 1; }
+active_is first && [ "$(status @.state)" = connected ] && [ "$(cat /etc/xvpn/active_manual)" = "$id1" ] \
+	|| { echo "FAIL: auto_best left a server chosen by hand"; ubus call xvpn status; exit 1; }
+echo "OK: chosen by hand out of auto selection it stays: auto_best, reload_config"
+set_auto "$id1" true
+wait_cmd 20 active_is second
+echo "OK: auto_best leaves a server in auto selection for a faster one"
+# chosen by hand, gone from the list for a while (here: the link, reload_config restarts the
+# daemon), back: the daemon returns to it and stays on it out of auto selection; it keeps
+# its flag meanwhile (prune waits)
+wait_cmd 15 select_ok "$id3"
+wait_for @.state connected 30
+uci del_list xvpn.manual.link="$(link 18449 third)"; uci commit xvpn
+reload_config
+wait_cmd 30 count_is 2
+wait_cmd 30 active_is second
+[ "$(cat /etc/xvpn/active_manual)" = "$id3" ] && [ "$(uci -q get xvpn.health.no_auto)" = "$id3" ] \
+	|| { echo "FAIL: the choice by hand or the flag was forgotten"; exit 1; }
+uci add_list xvpn.manual.link="$(link 18449 third)"; uci commit xvpn
+reload_config
+wait_cmd 30 count_is 3
+wait_cmd 30 active_is third
+wait_for @.state connected 30
+sleep 4
+active_is third || { echo "FAIL: the server chosen by hand was left after the daemon restarted"; ubus call xvpn status; exit 1; }
+echo "OK: back to the server chosen by hand once it is back in the list"
+# it fails: the failover goes to a server in auto selection
+kill $(cat /tmp/remote-18449.pid)
+wait_cmd 30 active_is second
+wait_for @.state connected 30
+[ ! -e /etc/xvpn/active_manual ] || { echo "FAIL: the failover kept the manual mark"; exit 1; }
+echo "OK: failover from a server left out of auto selection"
+# back as before: first dead, second live and active, two servers, no test settings
+set_auto "$id3" true
+[ -z "$(uci -q get xvpn.health.no_auto)" ] && [ "$(auto_of third)" = true ] || { echo "FAIL: set_auto back"; ubus call xvpn status; exit 1; }
+[ "$(ubus call luci.xvpn set_auto "{\"id\":\"nope\",\"auto\":false}" | jsonfilter -e @.error)" = 'unknown server' ] \
+	|| { echo "FAIL: set_auto of an unknown id"; exit 1; }
+kill $(cat /tmp/remote-18443.pid)
+uci batch <<UCI
+del_list xvpn.manual.link='$(link 18449 third)'
+delete xvpn.health.auto_best
+delete xvpn.health.rank_interval
+delete xvpn.health.hysteresis
+delete xvpn.health.quarantine
+commit xvpn
+UCI
+reload_config
+wait_cmd 30 count_is 2
+wait_for @.state connected 30
+active_is second || { echo "FAIL: not back on second"; ubus call xvpn status; exit 1; }
+echo "OK: back in auto selection"
+
 # subscription over http (curl reports file:// as HTTP 0), busybox has no base64
 # LuCI: a new subscription; its servers go before the manual links, so every test
 # port shifts (20000 was "second", now it is a dead server)
@@ -771,7 +908,6 @@ echo "OK: connected again once xray_bin is fixed"
 tested() { ubus call xvpn status | jsonfilter -e "@.servers[@.id='$1'].tested"; }
 tested_after() { [ "$(tested $1)" -gt "$2" ]; }
 killed() { logread | grep -c 'and was killed'; }
-select_ok() { [ "$(ubus call xvpn select "{\"id\":\"$1\"}" | jsonfilter -e @.ok)" = true ]; }
 hung_reload() { # what
 	[ "$(ubus call xvpn select "{\"id\":\"$id\"}" | jsonfilter -e @.error)" = busy ] || { echo "FAIL: no busy while reloading ($1)"; exit 1; }
 	[ "$(status @.state)" = connected ] || { echo "FAIL: state while the reload waits ($1)"; ubus call xvpn status; exit 1; }

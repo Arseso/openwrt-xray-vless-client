@@ -14,6 +14,7 @@ const STATS_EVERY = 10;
 const callStatus = rpc.declare({ object: 'luci.xvpn', method: 'status' });
 const callTest = rpc.declare({ object: 'luci.xvpn', method: 'test' });
 const callSelect = rpc.declare({ object: 'luci.xvpn', method: 'select', params: [ 'id' ] });
+const callSetAuto = rpc.declare({ object: 'luci.xvpn', method: 'set_auto', params: [ 'id', 'auto' ] });
 const callServers = rpc.declare({ object: 'luci.xvpn', method: 'servers' });
 const callSubscriptions = rpc.declare({ object: 'luci.xvpn', method: 'subscriptions', params: [ 'updating' ] });
 const callStats = rpc.declare({ object: 'luci.xvpn', method: 'stats' });
@@ -61,6 +62,7 @@ function errorText(err) {
 		'not running': _('The daemon is not running'),
 		'timeout': _('The daemon did not answer in time, the request may still be carried out'),
 		'unknown server': _('The server is no longer in the list, reload the page'),
+		'xvpn has uncommitted changes': _('/etc/config/xvpn has uncommitted changes (uci set without uci commit)'),
 	}[err] ?? err ?? _('unknown error');
 }
 
@@ -182,6 +184,11 @@ return view.extend({
 		this.busy[key] = true;
 		btn.classList.add('spinning');
 		btn.disabled = true;
+		return this.call(key, fn, done);
+	},
+
+	// the call of a button or a checkbox: its errors are shown, the page is redrawn after it
+	call(key, fn, done) {
 		return Promise.resolve().then(fn).then((res) => {
 			if (typeof(res) == 'number' && res != 0)
 				notify(_('Request failed: %s').format(rpc.getStatusText(res)), 'error');
@@ -193,6 +200,23 @@ return view.extend({
 			delete this.busy[key];
 			return this.refresh();
 		});
+	},
+
+	// kept across redraws like the buttons; while its call runs it shows what was clicked
+	checkbox(key, checked, disabled, title, fn) {
+		const busy = !!this.busy[key];
+		this.used[key] = true;
+		const box = this.buttons[key] ??= E('input', { 'type': 'checkbox', 'change': () => {
+			this.busy[key] = true;
+			box.disabled = true;
+			return this.call(key, () => box.xvpnAction(box.checked));
+		} });
+		if (!busy)
+			box.checked = !!checked;
+		box.disabled = !!(disabled || busy);
+		box.title = title;
+		box.xvpnAction = fn;
+		return box;
 	},
 
 	// the page is redrawn on every poll: buttons are kept, so a click in progress is not lost
@@ -400,7 +424,7 @@ return view.extend({
 			table(subTitles, subRows, _('No subscriptions. Add one on the "Subscriptions" tab.')),
 		]);
 
-		const srvTitles = [ _('Name'), _('Protocol'), _('Address'), _('Subscription'), _('Latency'), _('Traffic'), '' ];
+		const srvTitles = [ _('Name'), _('Protocol'), _('Address'), _('Subscription'), _('Latency'), _('Traffic'), _('Auto'), '' ];
 		const srvRows = list.map((s) => {
 			const isActive = (s.id == activeId);
 			const t = traffic[s.id];
@@ -422,6 +446,10 @@ return view.extend({
 				s.sub_name ? txt(s.sub_name) : E('em', {}, _('manual')),
 				ping,
 				t ? txt('↓ ' + bytes(t.down) + ' ↑ ' + bytes(t.up)) : '—',
+				// health.no_auto: the daemon does not choose it by itself, "Use" still does
+				this.checkbox('auto:' + s.id, s.auto !== false, !up,
+					_('Takes part in auto selection: at start, on failover and when switching to a faster server'),
+					(on) => callSetAuto(s.id, on)),
 				isActive ? '' : this.button('select:' + s.id, 'cbi-button-apply', _('Use'), !up,
 					() => callSelect(s.id), _('Switching to %s…').format(s.name)),
 			]);

@@ -6,7 +6,7 @@
 import { readfile, popen } from 'fs';
 import { cursor } from 'uci';
 import { connect } from 'ubus';
-import { load_config, read_json, run, shq, update_running, INDEX_FILE, ACTIVE_FILE } from 'xvpn.util';
+import { load_config, read_json, run, shq, update_running, no_auto_ids, INDEX_FILE, ACTIVE_FILE } from 'xvpn.util';
 import { all_servers, load_cache, load_status, due_in } from 'xvpn.subscription';
 import { parse_link } from 'xvpn.links';
 
@@ -71,12 +71,26 @@ const methods = {
 		}
 	},
 
+	// takes part in auto selection or not (health.no_auto): the daemon writes UCI and
+	// restarts nothing
+	set_auto: {
+		args: { id: 'id', auto: true },
+		call: function(req) {
+			if (!req.args?.id || type(req.args?.auto) != 'bool')
+				return { ok: false, error: 'invalid arguments' };
+			let r = daemon('set_auto', { id: req.args.id, auto: req.args.auto });
+			return r ?? { ok: false, error: daemon_error };
+		}
+	},
+
 	servers: {
 		call: function() {
-			let cfg = load_config();
+			let cfg = load_config(), off = {};
+			for (let id in no_auto_ids())
+				off[id] = true;
 			let list = map(all_servers(cfg), (s) => ({
 				id: s.id, name: s.name, proto: s.proto, address: s.address, port: s.port,
-				sub: s.sub, sub_name: s.sub_name,
+				sub: s.sub, sub_name: s.sub_name, auto: !off[s.id],
 			}));
 			return { servers: list, active: trim(readfile(ACTIVE_FILE) ?? '') || null };
 		}

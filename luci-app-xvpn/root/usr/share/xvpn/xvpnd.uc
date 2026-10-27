@@ -11,7 +11,7 @@ import { cursor } from 'uci';
 import { readfile, unlink, access, stat } from 'fs';
 import {
 	load_config, read_json, write_json, write_file, mkdir_p, shq, update_running, procs, tree, kill_tree,
-	ETC_DIR, RUN_DIR, CONFIG_FILE, INDEX_FILE, ACTIVE_FILE, STATE_FILE, FW_ERROR_FILE, GENERATE_ERROR_FILE, STALE_FILE
+	no_auto_ids, set_no_auto, fastest, MANUAL_FILE, ETC_DIR, RUN_DIR, CONFIG_FILE, INDEX_FILE, ACTIVE_FILE, STATE_FILE, FW_ERROR_FILE, GENERATE_ERROR_FILE, STALE_FILE
 } from 'xvpn.util';
 import { due_in } from 'xvpn.subscription';
 
@@ -59,11 +59,13 @@ let st = {
 	xray_choose_code: null,	// 7: the test aborted with xray_choose saw a refused test port
 	time_wait: null,	// waiting for NTP until then (monotonic), see time_ok()
 	time_choose: null,	// choose_best() decision put off until the clock is set
+	choose_at: null,	// last choose_best() test (monotonic), see check()
 	subs_force: false,	// the first update at start, see auto_update()
 };
 let test_waiters = [], testq = null, test_resume = null, test_abort = null;
 let timers = {}, settling = false, reload = null;
 let probe_seq = 0;
+let no_auto_sig = null, no_auto_set = {};
 let conn;
 // ucode does not hoist functions: these call each other in a cycle, defined below
 let reload_service, reindex, choose_best, check;
@@ -406,16 +408,47 @@ function quarantined(id) {
 	return (st.quarantine[id] ?? 0) > time();
 }
 
-function best(ignore_quarantine) {
-	let b = null;
-	for (let e in index.servers) {
-		let l = st.latency[e.id];
-		if (!l || l.ms < 0 || (!ignore_quarantine && quarantined(e.id)))
-			continue;
-		if (!b || l.ms < st.latency[b.id].ms)
-			b = e;
+// health.no_auto as { id: true }: read again whenever /etc/config/xvpn changes
+// (set_auto, prune in generate, uci by hand); the daemon is not restarted for it (init.d)
+function no_auto() {
+	let s = stat('/etc/config/xvpn'), sig = s ? `${s.inode}:${s.mtime}:${s.size}` : '';
+	if (sig != no_auto_sig) {
+		no_auto_sig = sig;
+		no_auto_set = {};
+		for (let id in no_auto_ids())
+			no_auto_set[id] = true;
 	}
-	return b;
+	return no_auto_set;
+}
+
+// The server the daemon or the user chose last (switch_to); generate falls back to the first
+// one in the list when there is none or it is gone
+function chosen() {
+	return trim(readfile(ACTIVE_FILE) ?? '');
+}
+
+// The user chose it (select): it stays while it answers, also left out of auto selection.
+// One the daemon chose is left as soon as it is left out (set_auto, check()).
+function manual_id() {
+	return trim(readfile(MANUAL_FILE) ?? '');
+}
+
+function by_hand(id) {
+	return chosen() == id && manual_id() == id;
+}
+
+// Only the servers in auto selection: the fastest out of quarantine, else out of all of them.
+function best(ignore_quarantine) {
+	let off = no_auto();
+	return fastest(index.servers, st.latency, (e) => off[e.id] || (!ignore_quarantine && quarantined(e.id)));
+}
+
+// Why best() found nothing, for last_error.
+function no_candidates() {
+	let off = no_auto(), n = length(filter(index.servers, (e) => off[e.id]));
+	if (n == length(index.servers))
+		return 'all servers are excluded from auto selection';
+	return n ? `no live servers in auto selection (${n} excluded)` : 'no live servers';
 }
 
 function test_all(cb) {
@@ -728,7 +761,7 @@ reindex = function(notified) {
 	settle();
 };
 
-function switch_to(id, reason) {
+function switch_to(id, reason, manual) {
 	let e = server(id);
 	if (!e)
 		return false;
@@ -741,6 +774,12 @@ function switch_to(id, reason) {
 	delete st.quarantine[id];
 	mkdir_p(ETC_DIR);
 	write_file(ACTIVE_FILE, id);
+	if (manual)
+		write_file(MANUAL_FILE, id);
+	// the choice by hand gives way to the daemon's, unless it is gone from the list for now:
+	// once it is back, check() returns to it
+	else if (server(manual_id()))
+		unlink(MANUAL_FILE);
 	save();
 	set_state('connected', null);
 	reload_service();
@@ -754,6 +793,7 @@ choose_best = function(reason) {
 		return set_state('waiting_time', 'waiting for NTP to set the clock');
 	}
 	st.time_choose = null;
+	st.choose_at = now();
 	// an update moved servers xray does not use now (cli.uc update): measure them at their
 	// new addresses. A reload drops the connections, but the choice may switch anyway
 	if (access(STALE_FILE) && !st.reloading && !st.reload_error) {
@@ -779,13 +819,21 @@ choose_best = function(reason) {
 		xray_up();
 		let b = best() ?? best(true);
 		if (!b) {
-			set_state('no_servers', 'no live servers');
+			// a server left out of auto selection that the user chose stays while it answers
+			let e = server(st.active);
+			if (e && no_auto()[e.id] && by_hand(e.id) && !quarantined(e.id) && (st.latency[e.id]?.ms ?? -1) >= 0) {
+				st.fails = 0;
+				set_passthrough(false);
+				set_state('connected', `${no_candidates()}, staying on "${e.name}"`);
+				return;
+			}
+			set_state('no_servers', no_candidates());
 			if (!cfg.access.killswitch)
 				set_passthrough(true);
 			return;
 		}
 		set_passthrough(false);
-		if (b.id == st.active && trim(readfile(ACTIVE_FILE) ?? '') == b.id) {
+		if (b.id == st.active && chosen() == b.id) {
 			st.fails = 0;
 			set_state('connected', null);
 			return;
@@ -822,7 +870,6 @@ check = function() {
 	}
 	if (!e)
 		return failover('no active server');
-
 	let gen = st.gen;
 	if (st.xray_choose) {
 		// a decision put off while xray did not work
@@ -838,6 +885,20 @@ check = function() {
 			st.xray_choose = null;
 			choose_best(reason);
 		});
+		return;
+	}
+	// the server chosen by hand is back in the list (an update dropped it for a while, the
+	// daemon chose another meanwhile): back to it. Not after a failed reload (see below)
+	let m = manual_id();
+	if (m && m != e.id && server(m) && !st.reload_error && !st.reload_pending)
+		return switch_to(m, 'chosen by hand, back in the list', true);
+	// left out of auto selection and not chosen by hand (the daemon chose it before, or
+	// generate's fallback: nothing chosen yet, the chosen one gone): choose again; while
+	// there is nothing to choose as often as a dead server fails over. Not after a failed
+	// reload: the active one is then what xray runs, not what was chosen (reload_failed())
+	if (no_auto()[e.id] && !by_hand(e.id) && !st.reload_error && !st.reload_pending) {
+		if (st.state != 'no_servers' || now() - (st.choose_at ?? 0) >= H.interval * H.fail_threshold)
+			choose_best(`"${e.name}" is excluded from auto selection`);
 		return;
 	}
 	probe(e.test_port, (ms, code) => {
@@ -881,6 +942,9 @@ function rank() {
 	test_all((problem) => {
 		if (problem || !H.auto_best || st.reloading)
 			return;
+		// a server out of auto selection the user chose is not left for a faster one
+		if (no_auto()[st.active] && by_hand(st.active))
+			return;
 		let b = best(), cur = st.latency[st.active];
 		if (!b || b.id == st.active || !cur || cur.ms < 0 || st.latency[b.id].ms + H.hysteresis >= cur.ms)
 			return;
@@ -914,11 +978,12 @@ function update_subs(force, only) {
 
 function status() {
 	reindex(false);
+	let off = no_auto();
 	let servers = map(index.servers, (e) => ({
 		id: e.id, name: e.name, proto: e.proto, address: e.address, port: e.port,
 		sub: e.sub, sub_name: e.sub_name,
 		latency: st.latency[e.id]?.ms, tested: st.latency[e.id]?.at,
-		quarantined: quarantined(e.id),
+		quarantined: quarantined(e.id), auto: !off[e.id],
 	}));
 	// cli.uc could not apply the rules and blocked the clients (fail closed)
 	// and a reload that failed: what xray runs may be not what the daemon wants
@@ -1009,7 +1074,36 @@ conn.publish('xvpn', {
 		call: (req) => {
 			if (st.reloading)
 				return { ok: false, error: 'busy' };
-			return { ok: switch_to(req.args.id, 'manual selection') };
+			return { ok: switch_to(req.args.id, 'manual selection', true) };
+		},
+	},
+	// the server takes part in auto selection or not (health.no_auto): UCI only, xray and
+	// the daemon go on as they are (see no_auto())
+	set_auto: {
+		args: { id: '', auto: true },
+		call: (req) => {
+			let id = req.args.id, auto = req.args.auto, e = server(id);
+			if (type(auto) != 'bool')
+				return { ok: false, error: 'invalid arguments' };
+			if (!e)
+				return { ok: false, error: 'unknown server' };
+			let off = no_auto();
+			if (!off[id] == auto)
+				return { ok: true };
+			let ids = filter(keys(off), (x) => x != id);
+			if (!auto)
+				push(ids, id);
+			let err = set_no_auto(cursor(), sort(ids));
+			if (err)
+				return { ok: false, error: err };
+			log(`"${e.name}" ${auto ? 'takes part in' : 'is excluded from'} auto selection`);
+			// nothing to choose from until now: this one may be
+			if (auto && st.state == 'no_servers' && !st.testing && !st.reloading)
+				choose_best(`"${e.name}" is back in auto selection`);
+			// the daemon chose it: another one now, one chosen by hand stays (see check())
+			if (!auto && id == st.active && !by_hand(id) && !st.reload_error)
+				choose_best(`"${e.name}" is excluded from auto selection`);
+			return { ok: true };
 		},
 	},
 	update: {
