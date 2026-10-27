@@ -674,6 +674,7 @@ remote 18444
 # (slow first, second is fast now); one in auto selection is left as before
 dp=$(xvpnd_pid)
 uci set xvpn.health.auto_best=1; uci set xvpn.health.rank_interval=5; uci commit xvpn
+rm -f /var/run/xvpn/state.json	# earlier failovers left second in quarantine
 reload_config
 wait_cmd 30 xvpnd_restarted "$dp"
 wait_for @.state connected 30
