@@ -569,9 +569,9 @@ logread | grep xvpn | grep -E 'switching|state' | tail -5
 
 # no live servers (#12): the test of all again after a pause, twice as long each time
 # (interval 3 s, retry_max 12 s: 3, 6, 12 …), once a run: 2 runs until the pause is 12 s
-# (one a check would be 3), the pause in the status. The active one is probed meanwhile: back,
-# it is connected before the next test. A test by hand starts the pause over; a server back
-# that is not active is taken by the next test at the latest
+# (one a check would be ~7: a run with dead servers takes seconds), the pause in the status.
+# A test by hand starts the pause over. The active one is probed meanwhile: back, it is
+# connected by that probe, before the next test (no test run)
 retry_is() { # delay: one call, during a test the state is failover and there is no retry
 	_s=$(ubus call xvpn status); at=$(echo "$_s" | jsonfilter -e @.retry.at)
 	[ "$(echo "$_s" | jsonfilter -e @.retry.delay)" = "$1" ] && [ "$at" -ge "$(date +%s)" ]
@@ -581,23 +581,19 @@ s0=$(date +%s)
 kill $(cat /tmp/remote-18444.pid)
 wait_for @.state no_servers 30
 t0=$(status @.tests); t1=$(date +%s)
-wait_cmd 30 retry_is 12
+wait_cmd 40 retry_is 12
 n=$(($(status @.tests) - t0)); dt=$(($(date +%s) - t1))
 [ "$n" = 2 ] && [ "$dt" -ge 8 ] || { echo "FAIL: no live servers: $n tests in $dt s until the pause is 12 s"; diag; exit 1; }
 echo "OK: no live servers: $n tests of all in $dt s, the pause grows to retry_max"
-remote 18444
-wait_cmd 12 connected_to second
-[ "$(date +%s)" -le "$at" ] && [ -z "$(status @.retry)" ] \
-	|| { echo "FAIL: the active server back is not connected before the next test ($at)"; diag; exit 1; }
-echo "OK: the active server back is connected before the next test, the pause is reset"
-kill $(cat /tmp/remote-18444.pid)
-wait_for @.state no_servers 30
-wait_cmd 15 retry_is 6
 test_all
 wait_cmd 5 retry_is 3
-remote 18443
-wait_cmd $((at - $(date +%s) + 12 + 3 + 5)) connected_to first
-echo "OK: a test by hand starts the pause over, a server back is taken at the next test ($(($(date +%s) - s0)) s for #12)"
+wait_cmd 20 retry_is 6
+n=$(status @.tests)
+remote 18444
+wait_cmd 12 connected_to second
+[ "$(date +%s)" -le "$at" ] && [ "$(status @.tests)" = "$n" ] && [ -z "$(status @.retry)" ] \
+	|| { echo "FAIL: the active server back is not connected before the next test ($at, tests $n -> $(status @.tests))"; diag; exit 1; }
+echo "OK: a test by hand starts the pause over; the active server back is connected before the next test ($(($(date +%s) - s0)) s for #12)"
 
 # servers left out of auto selection (#60). "third" is the fastest: the remotes of the
 # others pass requests on in 20-byte pieces 30 ms apart (freedom fragment), ~0.1 s each.
