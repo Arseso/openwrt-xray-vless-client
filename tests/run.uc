@@ -135,7 +135,7 @@ let taken = { tcp: { '20000': true, '20002': true }, udp: { '20001': true } };
 let pidx = build_index(cfg, servers, null, { ipv6: true, busy: taken });
 eq('busy test ports skipped', map(slice(pidx.servers, 0, 3), (e) => e.test_port), [ 20001, 20003, 20004 ]);
 eq('ports stay unique', length(uniq(map(pidx.servers, (e) => e.test_port))), length(servers));
-eq('index keeps the main ports for the rules', pidx.ports, { tproxy: 12345, dns: 10853 });
+eq('index keeps the main ports for the rules', pidx.ports, { tproxy: 12345, dns: 10853, api: 10085 });
 eq('generate uses the index ports', map(filter(generate(cfg, servers, pidx).inbounds, (i) => i.tag == 'test-0'), (i) => i.port), [ 20001 ]);
 let low = { ...cfg, main: { ...cfg.main, test_port_base: 10084 } };
 eq('main ports skipped', map(slice(build_index(low, servers, null, null).servers, 0, 3), (e) => e.test_port), [ 10084, 10086, 10087 ]);

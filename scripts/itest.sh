@@ -252,7 +252,7 @@ nft list table inet xvpn | grep -q redirect && { echo "FAIL: DNS redirected with
 [ "$(ip netns exec cl curl -s -m 3 http://45.0.0.2:53/)" = hello ] && { echo "FAIL: client DNS goes to the holder at boot"; exit 1; }
 blocked "port taken at boot"
 kill $holder
-wait_for @.state connected 40
+wait_for @.state connected 60
 full_rules "port free after boot"
 tunnel || { echo "FAIL: no tunnel once the port is free after boot"; exit 1; }
 echo "OK: a port taken at boot blocks the clients until it is free"

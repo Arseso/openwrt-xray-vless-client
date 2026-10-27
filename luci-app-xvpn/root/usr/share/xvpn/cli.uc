@@ -85,8 +85,9 @@ function fw(want) {
 		rc = { ...cfg, main: { ...cfg.main, tproxy_port: idx.ports.tproxy, dns_port: idx.ports.dns } };
 	let res = { ...resolve(rc, ubus.connect()), ipv6: idx?.ipv6 };
 	let errs = [], mode = want;
-	// no config at all (boot with a port taken): no xray to send the clients and their DNS to
-	if (!idx && want == 'full')
+	// no config at all (boot with a port taken) or no servers: no xray to send the clients
+	// and their DNS to (its ports may be another program's, generate checks them with servers only)
+	if (!length(idx?.servers) && want == 'full')
 		mode = cfg.access.killswitch ? 'block' : 'passthrough';
 	if (length(res.errors)) {
 		push(errs, `access points not found: ${join('; ', res.errors)}`);

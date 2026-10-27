@@ -315,7 +315,7 @@ function xray_check(code, cb) {
 		return cb('xray is not running', inst);
 	if (match(readfile(`/proc/${inst.pid}/stat`) ?? '', /\) T /))
 		return cb('xray is stopped', inst);
-	spawn('/usr/bin/curl', [ '-s', '-o', '/dev/null', '--max-time', '3', `http://127.0.0.1:${cfg.main.api_port}/` ], (c) => {
+	spawn('/usr/bin/curl', [ '-s', '-o', '/dev/null', '--max-time', '3', `http://127.0.0.1:${index.ports?.api ?? cfg.main.api_port}/` ], (c) => {
 		if (c < 0)
 			cb(XRAY_UNKNOWN);
 		else if (c == 7 || c == 28)
@@ -652,6 +652,8 @@ reindex = function(notified) {
 	// tried again every RELOAD_RETRY like ours
 	if (gen_error && !st.reload_error)
 		return reload_failed(trim(gen_error));
+	if (gen_error)
+		st.reload_error = trim(gen_error);	// the latest reason, the retry is on already
 	if (notified && st.reload_error && !gen_error) {
 		st.reload_error = null;	// whoever ran it, the config is applied
 		timers.retry?.cancel();

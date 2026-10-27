@@ -180,7 +180,7 @@ const methods = {
 	stats: {
 		call: function() {
 			let cfg = load_config(), idx = read_json(INDEX_FILE) ?? {};
-			let r = run(sprintf('%s api statsquery --server=127.0.0.1:%d 2>/dev/null', shq(cfg.main.xray_bin), cfg.main.api_port));
+			let r = run(sprintf('%s api statsquery --server=127.0.0.1:%d 2>/dev/null', shq(cfg.main.xray_bin), idx.ports?.api ?? cfg.main.api_port));
 			let traffic = {};
 			try {
 				for (let s in (json(r.out)?.stat ?? [])) {
