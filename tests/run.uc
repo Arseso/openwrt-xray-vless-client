@@ -8,7 +8,7 @@ import { parse_link, parse_subscription } from 'xvpn.links';
 import { parse_userinfo, assign_ids, list_change, known_ids, prune_no_auto, NO_AUTO_GRACE } from 'xvpn.subscription';
 import { load_config, fastest, no_auto_ids, set_no_auto, mkdir_p, read_json, SUBS_DIR } from 'xvpn.util';
 import { build_index, generate, ports_error } from 'xvpn.xrayconf';
-import { render, resolve, fix_ifnames, ifnames_applied } from 'xvpn.firewall';
+import { render, resolve, fix_ifnames, ifnames_applied, rule_count, stale_routes } from 'xvpn.firewall';
 import { ipv6_up, busy_ports } from 'xvpn.host';
 import { cursor } from 'uci';
 
@@ -264,6 +264,24 @@ cfg.access.killswitch = false;
 writefile(`${OUT}/tunnel.nft`, render(cfg, { nets: [], ports: [] }));
 writefile(`${OUT}/passthrough.nft`, render(cfg, res, { passthrough: true }));
 ok('passthrough has no tproxy', index(render(cfg, res, { passthrough: true }), 'tproxy ip') < 0);
+
+// ip rules: busybox prints them all, the mark without leading zeros; only exact pairs count
+let rules = '0:\tfrom all lookup local\n32763:\tfrom all fwmark 0x2000000/0x2000000 lookup 1000\n' +
+	'32764:\tfrom all fwmark 0x2000000/0x2000000 lookup 200\n32765:\tfrom all fwmark 0x2000000/0x2000000 lookup 100\n' +
+	'32766:\tfrom all fwmark 0x2000000/0x2000000 lookup 100\n32767:\tfrom all fwmark 0x2000000 lookup 100\n' +
+	'32768:\tfrom all fwmark 0x12000000/0x12000000 lookup 100\n';
+eq('rule_count: duplicates', rule_count(rules, 0x02000000, 100), 2);
+eq('rule_count: table 1000 is not 100', rule_count(rules, 0x02000000, 200), 1);
+eq('rule_count: none', [ rule_count(rules, 0x04000000, 100), rule_count('', 0x02000000, 100), rule_count(null, 1, 1) ], [ 0, 0, 0 ]);
+let c100 = { mark: 0x02000000, table: 100 }, c200 = { mark: 0x02000000, table: 200 }, m4 = { mark: 0x04000000, table: 100 };
+eq('stale: nothing applied', [ stale_routes(null, c100, true), stale_routes([ c100 ], c100, true) ], [ [], [] ]);
+eq('stale: table changed', stale_routes([ c100 ], c200, true), [ { ...c100, route: true } ]);
+eq('stale: mark changed, the table stays in use', stale_routes([ c100 ], m4, true), [ { ...c100, route: false } ]);
+eq('stale: interrupted run, both', stale_routes([ c200, c100, m4 ], c200, true), [ { ...c100, route: true }, { ...m4, route: true } ]);
+eq('stale: remove takes cur and the applied', stale_routes([ c200 ], c100, false), [ { ...c200, route: true }, { ...c100, route: true } ]);
+eq('stale: remove without the file, duplicates once', [ stale_routes(null, c100, false), stale_routes([ c100 ], c100, false) ],
+	[ [ { ...c100, route: true } ], [ { ...c100, route: true } ] ]);
+eq('stale: a broken file is ignored', [ stale_routes({ mark: 1 }, c100, true), stale_routes([ { mark: '1', table: 2 }, 5 ], c100, true) ], [ [], [] ]);
 
 // fail-closed table: blocks even with kill switch off, needs no tproxy/fib/nat
 let blk = render(cfg, res, { block: true });

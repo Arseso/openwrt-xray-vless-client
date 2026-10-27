@@ -4,7 +4,8 @@
 'use strict';
 
 import { cursor } from 'uci';
-import { NFT_FILE, VAR_DIR, mkdir_p, write_file, run, log } from 'xvpn.util';
+import { unlink } from 'fs';
+import { NFT_FILE, VAR_DIR, RUN_DIR, FW_ROUTE_FILE, mkdir_p, write_file, write_json, read_json, run, log } from 'xvpn.util';
 import { ipv6_up } from 'xvpn.host';
 
 const BYPASS4 = [
@@ -291,28 +292,69 @@ export function render(cfg, res, opts) {
 	return join('\n', r);
 };
 
-// v6: false skips adding the IPv6 rule and route (IPv6 is off, ip -6 would fail)
-function routing(cfg, add, v6) {
-	let m = cfg.main, tm = hex32(m.tproxy_mark), t = m.route_table;
-	// ip prints the mark without leading zeros; busybox ip has no selectors in `rule list`
-	let mk = sprintf('0x%x', m.tproxy_mark), re = regexp(`fwmark ${mk}/${mk} lookup ${t}( |$)`);
-	for (let fam in [ '-4', '-6' ]) {
-		if (add && fam == '-6' && v6 === false)
+// How many lines of `ip rule list` send the mark to the table: ip prints the mark without
+// leading zeros; busybox ip has no selectors in `rule list`, so the full output is parsed.
+export function rule_count(out, mark, table) {
+	let mk = sprintf('0x%x', mark), re = regexp(`fwmark ${mk}/${mk} lookup ${table}( |$)`);
+	return length(filter(split(out ?? '', '\n'), (l) => match(l, re)));
+};
+
+// The mark/table pairs to take down: the applied ones (FW_ROUTE_FILE) other than cur, and cur
+// itself unless it is being added. Only exact pairs are ours, someone's rules stay.
+// route: our `local default` route in the table goes too (nothing that stays uses the table).
+export function stale_routes(applied, cur, add) {
+	let r = [];
+	for (let p in [ ...(type(applied) == 'array' ? applied : []), ...(add ? [] : [ cur ]) ]) {
+		if (type(p?.mark) != 'int' || type(p?.table) != 'int')
 			continue;
-		let n = length(filter(split(run(`ip ${fam} rule list 2>/dev/null`).out, '\n'), (l) => match(l, re)));
-		// the rule is added before duplicates left from an unclean stop are dropped:
-		// no moment without it
-		if (add && !n) {
-			run(`ip ${fam} rule add fwmark ${tm}/${tm} table ${t}`);
-			n = 1;
-		}
-		for (; n > (add ? 1 : 0); n--)
-			run(`ip ${fam} rule del fwmark ${tm}/${tm} table ${t} 2>/dev/null`);
-		if (add)
-			run(`ip ${fam} route replace local default dev lo table ${t}`);
-		else
-			run(`ip ${fam} route flush table ${t} 2>/dev/null`);
+		if (add && p.mark == cur.mark && p.table == cur.table)
+			continue;
+		if (length(filter(r, (q) => q.mark == p.mark && q.table == p.table)))
+			continue;
+		push(r, { mark: p.mark, table: p.table, route: !(add && p.table == cur.table) });
 	}
+	return r;
+};
+
+// v6: false skips adding the IPv6 rule and route (IPv6 is off, ip -6 would fail).
+// After a change of main.tproxy_mark or main.route_table the rule and route with the previous
+// values are taken down too: FW_ROUTE_FILE lists what may be in place. It is written before
+// the rules are added, so an interrupted run leaves nothing it does not know of; it is in
+// tmpfs, as are the rules: without it (boot, an upgrade from before it) only cur is ours.
+function routing(cfg, add, v6) {
+	let m = cfg.main, cur = { mark: m.tproxy_mark, table: m.route_table };
+	let applied = read_json(FW_ROUTE_FILE), stale = stale_routes(applied, cur, add);
+	if (add) {
+		mkdir_p(RUN_DIR);
+		write_json(FW_ROUTE_FILE, [ cur, ...map(stale, (p) => ({ mark: p.mark, table: p.table })) ]);
+	}
+	for (let fam in [ '-4', '-6' ]) {
+		let out = run(`ip ${fam} rule list 2>/dev/null`).out;
+		// the rule is added before duplicates left from an unclean stop and the stale rules
+		// are dropped: no moment without it
+		if (add && !(fam == '-6' && v6 === false)) {
+			let tm = hex32(cur.mark), n = rule_count(out, cur.mark, cur.table);
+			if (!n) {
+				run(`ip ${fam} rule add fwmark ${tm}/${tm} table ${cur.table}`);
+				n = 1;
+			}
+			for (; n > 1; n--)
+				run(`ip ${fam} rule del fwmark ${tm}/${tm} table ${cur.table} 2>/dev/null`);
+			run(`ip ${fam} route replace local default dev lo table ${cur.table}`);
+		}
+		for (let p in stale) {
+			let tm = hex32(p.mark);
+			for (let n = rule_count(out, p.mark, p.table); n > 0; n--)
+				run(`ip ${fam} rule del fwmark ${tm}/${tm} table ${p.table} 2>/dev/null`);
+			// only our route: the table may have someone's (it was freed for mwan3, pbr)
+			if (p.route)
+				run(`ip ${fam} route del local default dev lo table ${p.table} 2>/dev/null`);
+		}
+	}
+	if (add)
+		write_json(FW_ROUTE_FILE, [ cur ]);
+	else
+		unlink(FW_ROUTE_FILE);
 }
 
 // Returns null on success, nft's error otherwise (the previous rules stay: nft -f is atomic).

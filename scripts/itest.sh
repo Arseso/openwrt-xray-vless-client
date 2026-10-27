@@ -972,12 +972,32 @@ kill -9 $g
 echo "OK: a killed generate leaves the running config"
 uci set xvpn.main.xray_bin=/usr/bin/xray
 uci del_list xvpn.manual.link="vless://$UUID@127.0.0.9:18449?type=tcp&security=none#bad"
+# another table and mark (#56): the rules and routes with the previous ones go, IPv4 and IPv6;
+# someone's rule and route with the same mark or table stay
+ip rule add fwmark 0x2000000/0x2000000 table 300
+ip route add 10.77.0.0/16 dev lo table 100
+uci set xvpn.main.route_table=200
+uci set xvpn.main.tproxy_mark=0x04000000
 uci commit xvpn
 /etc/init.d/xvpn reload
 wait_for @.state connected 40
+for f in -4 -6; do
+	r=$(ip $f rule | grep fwmark | grep -v 'lookup 300')
+	[ "$(echo "$r" | grep -cE 'fwmark 0x4000000/0x4000000 lookup 200( |$)')" = 1 ] && [ "$(echo "$r" | wc -l)" = 1 ] \
+		&& ip $f route show table 200 | grep -q '^local default' && ! ip $f route show table 100 | grep -q '^local' \
+		|| { echo "FAIL: ip $f rules after a change of route_table and tproxy_mark:"; ip $f rule; ip $f route show table all | grep table; exit 1; }
+done
+tunnel || { echo "FAIL: no tunnel with route_table 200 and tproxy_mark 0x04000000"; exit 1; }
+echo "OK: a new route_table and tproxy_mark: the previous rules and routes are gone, the tunnel works"
 
 /etc/init.d/xvpn stop
 no_tproxy "stop with the service enabled"
+[ -z "$( (ip rule; ip -6 rule) | grep fwmark | grep -v 'lookup 300')" ] && [ -z "$(ip route show table 200; ip -6 route show table 200)" ] \
+	|| { echo "FAIL: ip rules or routes left after stop"; ip rule; ip -6 rule; exit 1; }
+ip rule | grep -q 'fwmark 0x2000000/0x2000000 lookup 300' && ip route show table 100 | grep -q 10.77.0.0 \
+	|| { echo "FAIL: someone's rule or route removed"; ip rule; ip route show table 100; exit 1; }
+ip rule del fwmark 0x2000000/0x2000000 table 300; ip route flush table 100
+echo "OK: no ip rules or routes after stop, someone's stay"
 in_set inet nets xvpn-ap1 && in_set bridge ports myvpn0 || { echo "FAIL: guard without the SSIDs"; exit 1; }
 blocked "stopped, service enabled"
 

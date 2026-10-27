@@ -25,6 +25,8 @@ export const FW_ERROR_FILE = '/var/run/xvpn/fw_error';
 // VPN SSID names could not be fixed (uncommitted changes to wireless)
 export const FW_WARN_FILE = '/var/run/xvpn/fw_warn';
 export const FW_LOCK_FILE = '/var/lock/xvpn-fw';
+// mark/table pairs whose ip rule and route may be in place (firewall.uc routing())
+export const FW_ROUTE_FILE = '/var/run/xvpn/fw_route';
 // generate ran out of time and kept the running config: the daemon counts the reload failed
 export const GENERATE_ERROR_FILE = '/var/run/xvpn/generate_error';
 // an update changed servers xray does not use now: the next reload (generate) applies them

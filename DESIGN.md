@@ -104,6 +104,7 @@ scripts/{test,itest,build,luci,ci}.sh          тесты, сборка ipk, LuC
 | `/var/run/xvpn/fw_mode` | применённый режим: запрошенный или fallback `block` / `minimal` | `cli.uc fw-*` |
 | `/var/run/xvpn/fw_error` | ошибка nft или ненайденного SSID; есть, пока запрошенный режим не применился; статус — `error` | `cli.uc fw-*` |
 | `/var/run/xvpn/fw_warn` | предупреждение: имена VPN-SSID не зафиксированы из-за чужих незакоммиченных правок `wireless` | `cli.uc ifnames`, удаляет `fw-remove` |
+| `/var/run/xvpn/fw_route` | пары `tproxy_mark`/`route_table`, чьи `ip rule` и `local default dev lo` могут стоять (IPv4 и IPv6); после смены метки или таблицы правила с прежними снимаются, `fw-remove` и режимы без TPROXY снимают все; без файла (после загрузки) своим считается только точное совпадение с текущей парой | `cli.uc fw-*`, удаляет `fw-remove` |
 | `/var/lock/xvpn-fw` | блокировка: `fw-*` выполняются по одному | `cli.uc fw-*` |
 | `/var/run/xvpn/updating` | симлинк на pid идущего `cli.uc update` — единственный флаг «идёт обновление» | `cli.uc update` |
 | `/var/run/xvpn/stale` | обновление подписок изменило только неиспользуемые серверы; применит следующий `reload` (§6) | ставит `cli.uc update` (каждый раз с новым содержимым), снимает `cli.uc generate`, записав конфиг, — если маркер не поменялся с начала generate |
