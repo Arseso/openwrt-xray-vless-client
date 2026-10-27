@@ -5,7 +5,7 @@
 
 import { readfile, writefile, mkdir } from 'fs';
 import { parse_link, parse_subscription } from 'xvpn.links';
-import { parse_userinfo } from 'xvpn.subscription';
+import { parse_userinfo, assign_ids, list_change } from 'xvpn.subscription';
 import { load_config } from 'xvpn.util';
 import { build_index, generate, ports_error } from 'xvpn.xrayconf';
 import { render, resolve, fix_ifnames, ifnames_applied } from 'xvpn.firewall';
@@ -54,8 +54,8 @@ ok('hysteria2 unsupported', p[9].error);
 ok('h2 unsupported', p[10].error);
 ok('vless encryption unsupported', p[11].error);
 ok('ss 2022 bad key', p[12].error);
-ok('ids unique', length(uniq(map(filter(p, (s) => !s.error), (s) => s.id))) == 9);
-eq('id stable', parse_link(lines[0]).id, p[0].id);
+ok('hashes unique', length(uniq(map(filter(p, (s) => !s.error), (s) => s.hash))) == 9);
+eq('hash stable', parse_link(lines[0]).hash, p[0].hash);
 
 // subscriptions
 let b = parse_subscription(readfile(`${FIX}/sub-base64.txt`));
@@ -70,15 +70,75 @@ ok('html rejected', match(parse_subscription('<html></html>').errors[0], /HTML/)
 eq('userinfo', parse_userinfo('upload=1; download=2; total=10737418240; expire=1798761600'),
 	{ upload: 1, download: 2, total: 10737418240, expire: 1798761600 });
 
+// stable ids (#49): the subscription hands out another host of some servers on every download
+function vless(uuid, host, port, name) {
+	return `vless://${uuid}@${host}:${port}?type=tcp&security=tls&sni=sni.example.com&fp=chrome#${name}`;
+}
+const U1 = '11111111-2222-3333-4444-555555555555', U2 = '66666666-7777-8888-9999-000000000000';
+let v1 = assign_ids(parse_subscription(join('\n', [
+	vless(U1, 'ee24.example.com', 443, '⚡ Estonia'),
+	vless(U1, 'nl.example.com', 443, 'Netherlands'),
+	vless(U1, 'de1.example.com', 443, 'Germany'),
+	vless(U1, 'de2.example.com', 443, 'Germany'),
+])).servers, 's1');
+let v2 = assign_ids(parse_subscription(join('\n', [
+	vless(U1, 'ee23.example.com', 8443, '⚡ Estonia'),
+	vless(U1, 'nl.example.com', 443, 'Netherlands'),
+	vless(U1, 'de1.example.com', 443, 'Germany'),
+	vless(U1, 'de2.example.com', 443, 'Germany'),
+])).servers, 's1');
+eq('ids survive rotated hosts', map(v2, (s) => s.id), map(v1, (s) => s.id));
+ok('rotated host changes the hash', v1[0].hash != v2[0].hash);
+eq('rotated host reaches the outbound', v2[0].outbound.settings.vnext[0].address, 'ee23.example.com');
+ok('same name and uuid: told apart by order', v1[2].id != v1[3].id);
+ok('ids unique', length(uniq(map(v1, (s) => s.id))) == 4);
+ok('id depends on the source', assign_ids([ v1[0] ], 's2')[0].id != v1[0].id);
+eq('assign_ids keeps the hash of a cache from before #49', assign_ids([ { ...v1[1], hash: null, id: 'abcd0123' } ], 's1')[0].hash, 'abcd0123');
+eq('nothing changed', list_change(v1, v1, [ v1[1].id ]), null);
+eq('rotated host of the active server known by its hash (before #49): reload', list_change(v1, v2, [ v1[0].hash, null ]), 'reload');
+let legacy = map(v1, (x) => ({ id: x.hash, name: x.name, proto: x.proto, address: x.address, port: x.port, outbound: x.outbound }));
+eq('cache from before #49 (key order, id = hash): same entries', assign_ids(legacy, 's1'), v1);
+let anon = assign_ids(parse_subscription(join('\n', [
+	`vless://${U1}@a1.example.com:443?type=tcp&security=tls`, `vless://${U1}@a2.example.com:443?type=tcp&security=tls`,
+])).servers, 's1');
+let anon2 = assign_ids(parse_subscription(join('\n', [
+	`vless://${U1}@b1.example.com:443?type=tcp&security=tls`, `vless://${U1}@b2.example.com:443?type=tcp&security=tls`,
+])).servers, 's1');
+eq('links without a name: named by address, ids by order', [ anon[0].name, map(anon2, (x) => x.id) ], [ 'a1.example.com:443', map(anon, (x) => x.id) ]);
+eq('rotated host of an idle server: no reload', list_change(v1, v2, [ v1[1].id, '' ]), 'stale');
+eq('rotated host of the active server: reload', list_change(v1, v2, [ v1[1].id, v1[0].id ]), 'reload');
+eq('rotated host, xray runs another server than chosen: reload', list_change(v1, v2, [ v1[0].id, v1[1].id ]), 'reload');
+let v3 = assign_ids(parse_subscription(join('\n', [
+	vless(U1, 'ee23.example.com', 8443, '⚡ Estonia'),
+	vless(U2, 'nl.example.com', 443, 'Netherlands'),
+	vless(U1, 'de1.example.com', 443, 'Germany'),
+	vless(U1, 'de2.example.com', 443, 'Germany'),
+])).servers, 's1');
+ok('new uuid: new id', v3[1].id != v2[1].id);
+eq('new uuid: reload', list_change(v2, v3, [ v2[0].id ]), 'reload');
+eq('new server: reload', list_change(v2, [ ...v2, ...assign_ids([ p[5] ], 's2') ], [ v2[0].id ]), 'reload');
+eq('server gone: reload', list_change(v2, slice(v2, 0, 3), [ v2[0].id ]), 'reload');
+eq('new order: no reload', list_change(v2, [ v2[1], v2[0], v2[2], v2[3] ], [ v2[0].id ]), 'stale');
+
 // config generation
 let cfg = {
 	main: { tproxy_port: 12345, dns_port: 10853, api_port: 10085, test_port_base: 20000, loglevel: 'warning', sniffing: false,
 		client_mark: 0x01000000, tproxy_mark: 0x02000000, route_table: 100 },
 	access: { dns_server: '1.1.1.1', killswitch: true, ipv6: 'block', dns_hijack: true },
 };
-let servers = [ ...b.servers, ...xj.servers ];
-let idx = build_index(cfg, servers, p[2].id);
-eq('index active', idx.active, p[2].id);
+let servers = [ ...assign_ids(b.servers, 's1'), ...assign_ids(xj.servers, 's2') ];
+let idx = build_index(cfg, servers, servers[2].id);
+eq('index active', idx.active, servers[2].id);
+let mv = build_index(cfg, servers, servers[3].hash);
+eq('index active by the hash (id before #49)', [ mv.active, mv.moved_from ], [ servers[3].id, servers[3].hash ]);
+eq('index active found by id: not moved', build_index(cfg, servers, servers[3].id, idx).moved_from, null);
+// renamed (or its subscription added again): another id, the hash from the running index
+let renamed = [ ...servers ];
+renamed[2] = { ...servers[2], id: 'feedf00d', name: 'renamed' };
+let ri = build_index(cfg, renamed, servers[2].id, idx);
+eq('index active renamed: found by the hash of the running index', [ ri.active, ri.moved_from ], [ 'feedf00d', servers[2].id ]);
+eq('index active gone: first server, not moved', [ build_index(cfg, slice(servers, 3), servers[2].id, idx).active, build_index(cfg, slice(servers, 3), servers[2].id, idx).moved_from ], [ servers[3].id, null ]);
+eq('index entries carry the hash', idx.servers[2].hash, servers[2].hash);
 eq('index ports', [ idx.servers[0].test_port, idx.servers[9].test_port ], [ 20000, 20009 ]);
 eq('index fallback active', build_index(cfg, servers, 'nope').active, servers[0].id);
 let conf = generate(cfg, servers, idx);
@@ -87,6 +147,11 @@ eq('tproxy route', conf.routing.rules[-1] ?? conf.routing.rules[length(conf.rout
 	{ type: 'field', inboundTag: [ 'tproxy', 'dns-in' ], outboundTag: 'srv-2' });
 eq('inbounds', length(conf.inbounds), 3 + length(servers));
 ok('no dns module for an IP', conf.dns == null);
+// stats come from the metrics section over loopback HTTP, there is no gRPC API (#7)
+eq('metrics', [ conf.metrics, conf.api ], [ { tag: 'metrics' }, null ]);
+eq('metrics inbound', filter(conf.inbounds, (i) => i.tag == 'metrics')[0],
+	{ tag: 'metrics', listen: '127.0.0.1', port: 10085, protocol: 'dokodemo-door', settings: { address: '127.0.0.1' } });
+eq('metrics route', conf.routing.rules[0], { type: 'field', inboundTag: [ 'metrics' ], outboundTag: 'metrics' });
 writefile(`${OUT}/config.json`, sprintf('%J', conf));
 
 // dns_server as a URL: queries go through the xray DNS module by domain
@@ -107,7 +172,7 @@ ok('doh without servers: no dns-module rule', length(filter(nosrv.routing.rules,
 cfg.access.dns_server = '1.1.1.1';
 
 // IPv6 off on the router: the inbounds listen on 0.0.0.0 (a kernel without IPv6 refuses ::)
-let v4idx = build_index(cfg, servers, p[2].id, { ipv6: false, busy: { tcp: {}, udp: {} } });
+let v4idx = build_index(cfg, servers, p[2].id, null, { ipv6: false, busy: { tcp: {}, udp: {} } });
 let v4 = generate(cfg, servers, v4idx);
 eq('no ipv6: tproxy and dns-in on 0.0.0.0', map(filter(v4.inbounds, (i) => i.tag in [ 'tproxy', 'dns-in' ]), (i) => i.listen),
 	[ '0.0.0.0', '0.0.0.0' ]);
@@ -115,8 +180,8 @@ ok('no ipv6: nothing on ::', length(filter(v4.inbounds, (i) => index(i.listen, '
 eq('ipv6 on: tproxy on ::', conf.inbounds[0].listen, '::');
 ok('no ipv6, ipv6 block: no config error', v4idx.config_error == null);
 cfg.access.ipv6 = 'tunnel';
-ok('no ipv6, ipv6 tunnel: config error', match(build_index(cfg, servers, null, { ipv6: false }).config_error ?? '', /IPv6 is off/));
-ok('ipv6 on, tunnel: no config error', build_index(cfg, servers, null, { ipv6: true }).config_error == null);
+ok('no ipv6, ipv6 tunnel: config error', match(build_index(cfg, servers, null, null, { ipv6: false }).config_error ?? '', /IPv6 is off/));
+ok('ipv6 on, tunnel: no config error', build_index(cfg, servers, null, null, { ipv6: true }).config_error == null);
 cfg.access.dns_server = 'https://cloudflare-dns.com/dns-query';
 eq('no ipv6: doh UseIPv4 even with tunnel', generate(cfg, servers, v4idx).dns.queryStrategy, 'UseIPv4');
 cfg.access.dns_server = '1.1.1.1';
@@ -132,7 +197,7 @@ writefile(`${OUT}/config-noipv6.json`, sprintf('%J', v4));
 
 // ports taken by other programs: test ports are skipped, the index keeps the real ones
 let taken = { tcp: { '20000': true, '20002': true }, udp: { '20001': true } };
-let pidx = build_index(cfg, servers, null, { ipv6: true, busy: taken });
+let pidx = build_index(cfg, servers, null, null, { ipv6: true, busy: taken });
 eq('busy test ports skipped', map(slice(pidx.servers, 0, 3), (e) => e.test_port), [ 20001, 20003, 20004 ]);
 eq('ports stay unique', length(uniq(map(pidx.servers, (e) => e.test_port))), length(servers));
 eq('index keeps the main ports for the rules', pidx.ports, { tproxy: 12345, dns: 10853, api: 10085 });

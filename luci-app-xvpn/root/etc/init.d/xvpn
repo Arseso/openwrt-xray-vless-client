@@ -10,9 +10,22 @@ CONF=/var/etc/xvpn/config.json
 
 start_service() {
 	config_load xvpn
-	local enabled xray_bin
+	local enabled xray_bin gomemlimit gogc
 	config_get_bool enabled main enabled 0
 	config_get xray_bin main xray_bin /usr/bin/xray
+	# Go GC of xray on a 256 MB router (DESIGN.md 6.4); not in the default config
+	config_get gomemlimit main gomemlimit 80MiB
+	config_get gogc main gogc 50
+	# Go stops the binary on a value it cannot parse ("80MB"): xray would not start at all
+	local n=${gomemlimit%B}; n=${n%[KMGT]i}
+	case "$gomemlimit:$n" in
+	off:*) ;;
+	*:|*:*[!0-9]*) logger -t xvpn "main.gomemlimit '$gomemlimit' is not like 80MiB or off, using 80MiB"; gomemlimit=80MiB ;;
+	esac
+	case "$gogc" in
+	off) ;;
+	''|*[!0-9]*) logger -t xvpn "main.gogc '$gogc' is not a number or off, using 50"; gogc=50 ;;
+	esac
 
 	# VPN SSIDs get fixed names (xvpn-apN), deselected ones get theirs back; also when turned off,
 	# after fw-remove, which clears the warnings of the rules
@@ -26,7 +39,8 @@ start_service() {
 	# generate drops servers that xray rejects; 3: no servers, 4: xray does not work,
 	# 5: out of time or a port taken, xray goes on with the config it runs
 	local have_servers=1 rc=0
-	$CLI generate >/dev/null || rc=$?
+	# its `xray run -test` with the same GC as xray
+	GOMEMLIMIT="$gomemlimit" GOGC="$gogc" $CLI generate >/dev/null || rc=$?
 	[ "$rc" = 0 ] || { [ "$rc" = 5 ] && [ -s "$CONF" ]; } || have_servers=0
 
 	# rules stay in place without servers: with kill switch on, clients stay offline instead of leaking;
@@ -36,6 +50,7 @@ start_service() {
 	if [ "$have_servers" = 1 ]; then
 		procd_open_instance xray
 		procd_set_param command "$xray_bin" run -c "$CONF"
+		procd_set_param env GOMEMLIMIT="$gomemlimit" GOGC="$gogc"
 		procd_set_param file "$CONF"
 		procd_set_param limits nofile="65535 65535"
 		procd_set_param stdout 1
@@ -46,6 +61,8 @@ start_service() {
 
 	procd_open_instance xvpnd
 	procd_set_param command /usr/bin/ucode /usr/share/xvpn/xvpnd.uc
+	# for its own `xray run -test`
+	procd_set_param env GOMEMLIMIT="$gomemlimit" GOGC="$gogc"
 	procd_set_param file /etc/config/xvpn
 	procd_set_param stdout 1
 	procd_set_param stderr 1

@@ -25,6 +25,8 @@ export const FW_WARN_FILE = '/var/run/xvpn/fw_warn';
 export const FW_LOCK_FILE = '/var/lock/xvpn-fw';
 // generate ran out of time and kept the running config: the daemon counts the reload failed
 export const GENERATE_ERROR_FILE = '/var/run/xvpn/generate_error';
+// an update changed servers xray does not use now: the next reload (generate) applies them
+export const STALE_FILE = '/var/run/xvpn/stale';
 
 export function read_json(path) {
 	let s = readfile(path);
@@ -216,11 +218,13 @@ export function load_config(confdir) {
 			auto_best: bool(h.auto_best, false),
 			hysteresis: num(h.hysteresis, 150),
 			quarantine: num(h.quarantine, 300),
-			concurrency: num(h.concurrency, 8),
+			// parallel curl in a test, each with its connection in xray: 1..8 on 256 MB (#7)
+			concurrency: min(max(num(h.concurrency, 4), 1), 8),
 			// not in the default config, for tests (see DESIGN.md 6.3)
 			reload_idle: num(h.reload_idle, 60),
 			reload_retry: num(h.reload_retry, 30),
 			generate_budget: num(h.generate_budget, 240),
+			time_wait: num(h.time_wait, 120),
 		},
 		subscriptions: [],
 		manual: list(man.link),

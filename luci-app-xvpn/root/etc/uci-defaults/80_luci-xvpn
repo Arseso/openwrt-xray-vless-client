@@ -24,4 +24,7 @@ done
 # SSID names are fixed in /etc/config/wireless now, the cache of the old versions is not used
 rm -f /etc/xvpn/ifnames.json
 rm -rf /tmp/luci-indexcache* /tmp/luci-modulecache
+# installed on a running router (uptime > 5 min, not the first boot): NTP has set the clock
+# before hotplug.d/ntp/50-xvpn was there, xvpnd need not wait for it
+[ "$(cut -d. -f1 /proc/uptime)" -lt 300 ] || { mkdir -p /var/run/xvpn && touch /var/run/xvpn/time_synced; }
 exit 0

@@ -165,7 +165,9 @@ export function stream_settings(p, address) {
 
 function server(proto, name, address, port, outbound, key) {
 	return {
-		id: fnv1a(join('|', [ proto, address, port, key, sprintf('%J', outbound.streamSettings ?? {}) ])),
+		// the connection itself: dedupes servers listed twice; the stable id comes from
+		// subscription.uc assign_ids()
+		hash: fnv1a(join('|', [ proto, address, port, key, sprintf('%J', outbound.streamSettings ?? {}) ])),
 		name: name || `${address}:${port}`,
 		proto, address, port, outbound,
 	};

@@ -4,27 +4,39 @@
 
 'use strict';
 
+// prev: the index of the running config. The chosen server keeps the choice when its id
+// changes but the connection (hash) does not: renamed, its subscription removed and added
+// again, or the subscription disabled while another lists the same server. active_id
+// itself may be a hash too: ids from before #49 were the hash. moved_from: the id the
+// choice was found for that way (cli.uc generate and the daemon move the choice over).
 // env (host.uc host_env(); null: IPv6 on, all ports free): { ipv6, busy }.
 // Test ports taken by other programs (or by our main ports) are skipped: each server keeps
-// the port it got in the index. ipv6: false makes the inbounds listen on 0.0.0.0, a bind
-// on :: would fail; with ipv6 = tunnel that is a config error the status shows.
-export function build_index(cfg, servers, active_id, env) {
+// the port it got in the index. ipv6: false makes the inbounds listen on 0.0.0.0 (a kernel
+// without IPv6 refuses ::); with ipv6 = tunnel that is a config error the status shows.
+export function build_index(cfg, servers, active_id, prev, env) {
 	let m = cfg.main, busy = env?.busy?.tcp ?? {}, port = m.test_port_base, index = [];
 	let main = { [m.tproxy_port]: true, [m.dns_port]: true, [m.api_port]: true };
 	for (let i, s in servers) {
 		while (busy[port] || main[port])
 			port++;
 		push(index, {
-			id: s.id, name: s.name, proto: s.proto, address: s.address, port: s.port,
+			id: s.id, hash: s.hash, name: s.name, proto: s.proto, address: s.address, port: s.port,
 			sub: s.sub, sub_name: s.sub_name,
 			tag: `srv-${i}`, test_port: port++,
 		});
 	}
 
-	let active = filter(index, (e) => e.id == active_id)[0] ?? index[0];
+	let active = filter(index, (e) => e.id == active_id)[0], moved_from = null;
+	if (!active && active_id) {
+		let hash = filter(prev?.servers ?? [], (e) => e.id == active_id)[0]?.hash ?? active_id;
+		active = filter(index, (e) => e.hash == hash)[0];
+		if (active)
+			moved_from = active_id;
+	}
+	active ??= index[0];
 	// the rules (fw-apply), the daemon and rpcd go by the ports and IPv6 of the config xray runs
 	let r = {
-		active: active?.id, servers: index, ipv6: env?.ipv6 ?? true,
+		active: active?.id, moved_from, servers: index, ipv6: env?.ipv6 ?? true,
 		ports: { tproxy: m.tproxy_port, dns: m.dns_port, api: m.api_port },
 	};
 	if (!r.ipv6 && cfg.access.ipv6 == 'tunnel')
@@ -73,14 +85,16 @@ export function generate(cfg, servers, idx) {
 			// with the DNS module the address is a placeholder: dns-out answers A/AAAA itself
 			settings: { address: doh ? '1.1.1.1' : cfg.access.dns_server, port: 53, network: 'tcp,udp' },
 		},
+		// HTTP of the metrics section (/debug/vars: traffic counters), read by rpcd stats without
+		// starting xray; xray 25.1.30 has no metrics.listen, the inbound is the only way
 		{
-			tag: 'api', listen: '127.0.0.1', port: m.api_port, protocol: 'dokodemo-door',
+			tag: 'metrics', listen: '127.0.0.1', port: m.api_port, protocol: 'dokodemo-door',
 			settings: { address: '127.0.0.1' },
 		},
 	];
 
 	let outbounds = [];
-	let rules = [ { type: 'field', inboundTag: [ 'api' ], outboundTag: 'api' } ];
+	let rules = [ { type: 'field', inboundTag: [ 'metrics' ], outboundTag: 'metrics' } ];
 
 	for (let i, e in idx.servers) {
 		push(inbounds, {
@@ -109,7 +123,7 @@ export function generate(cfg, servers, idx) {
 
 	let conf = {
 		log: { loglevel: m.loglevel, access: 'none' },
-		api: { tag: 'api', services: [ 'StatsService' ] },
+		metrics: { tag: 'metrics' },
 		stats: {},
 		policy: { system: { statsOutboundUplink: true, statsOutboundDownlink: true } },
 		inbounds,

@@ -7,8 +7,9 @@
 'require ui';
 'require dom';
 
-// luci.xvpn stats starts the xray binary for every query: once in this many seconds
-const STATS_EVERY = 30;
+// luci.xvpn stats reads xray's metrics over loopback HTTP (no xray process); a hung xray
+// holds rpcd for the 1 s timeout until the daemon sees xray_down: once in this many seconds
+const STATS_EVERY = 10;
 
 const callStatus = rpc.declare({ object: 'luci.xvpn', method: 'status' });
 const callTest = rpc.declare({ object: 'luci.xvpn', method: 'test' });
@@ -33,6 +34,7 @@ function fwErrorText(mode) {
 function stateInfo(state, fwMode) {
 	return {
 		starting: [ 'notice', _('Starting') ],
+		waiting_time: [ 'notice', _('Waiting for NTP time sync') ],
 		connected: [ 'success', _('Connected') ],
 		degraded: [ 'warning', _('Unstable: health checks fail') ],
 		failover: [ 'warning', _('Switching to another server') ],
@@ -137,8 +139,7 @@ return view.extend({
 		// running: false when the daemon is not on ubus; enabled and the router time come with it
 		return L.resolveDefault(callStatus(), {}).then((status) => {
 			const up = (status.running === true);
-			// counted from the last attempt: a hung xray must not be queried on every poll;
-			// with xray down the query would wait for its timeout and stall rpcd
+			// with xray down the query would wait for its timeout and hold rpcd
 			const due = up && status.enabled && status.state != 'xray_down' && !(status.time - this.statsAt < STATS_EVERY);
 			if (due)
 				this.statsAt = status.time;

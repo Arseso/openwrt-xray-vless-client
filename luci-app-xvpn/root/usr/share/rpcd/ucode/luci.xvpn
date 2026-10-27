@@ -25,6 +25,9 @@ function bg(cmd) {
 // Without an answer daemon_error says why: 'timeout' — xvpnd is on ubus but busy, the call
 // may still be done; 'not running' — there is no xvpnd object.
 const UBUS_STATUS_TIMEOUT = 7;
+
+// the log tab: lines of the system log looked through and sent
+const LOG_SCAN = 2000, LOG_LINES = 300;
 let daemon_error = null;
 
 function daemon(method, args) {
@@ -136,7 +139,7 @@ const methods = {
 			return { links: map(slice(links, 0, 200), (l) => {
 				let s = (type(l) == 'string') ? parse_link(l) : { error: 'not a link' };
 				return s.error ? { error: s.error }
-					: { id: s.id, name: s.name, proto: s.proto, address: s.address, port: s.port };
+					: { id: s.hash, name: s.name, proto: s.proto, address: s.address, port: s.port };
 			}) };
 		}
 	},
@@ -166,6 +169,8 @@ const methods = {
 				push(wifi, {
 					section: s['.name'], ssid: s.ssid, radio: s.device, band: dev.band,
 					network: s.network, disabled: (s.disabled == '1' || dev.disabled == '1'),
+					// the fixed name of a VPN SSID (DESIGN.md 7.2) or one set by the user
+					ifname: s.ifname,
 				});
 			});
 
@@ -180,18 +185,16 @@ const methods = {
 	stats: {
 		call: function() {
 			let cfg = load_config(), idx = read_json(INDEX_FILE) ?? {};
-			let r = run(sprintf('%s api statsquery --server=127.0.0.1:%d 2>/dev/null', shq(cfg.main.xray_bin), idx.ports?.api ?? cfg.main.api_port));
+			// expvar of the xray metrics section over loopback HTTP, no xray process is started;
+			// a hung xray must not stall rpcd; the port of the running config (index)
+			let r = run(sprintf('curl -s -m 1 http://127.0.0.1:%d/debug/vars 2>/dev/null', idx.ports?.api ?? cfg.main.api_port));
 			let traffic = {};
 			try {
-				for (let s in (json(r.out)?.stat ?? [])) {
-					let m = match(s.name, /^outbound>>>(srv-[0-9]+)>>>traffic>>>(uplink|downlink)$/);
-					if (!m)
-						continue;
-					let e = filter(idx.servers ?? [], (x) => x.tag == m[1])[0];
-					if (!e)
-						continue;
-					traffic[e.id] ??= { up: 0, down: 0 };
-					traffic[e.id][(m[2] == 'uplink') ? 'up' : 'down'] = int(s.value ?? 0);
+				let out = json(r.out)?.stats?.outbound ?? {};
+				for (let e in (idx.servers ?? [])) {
+					let s = out[e.tag];
+					if (s)
+						traffic[e.id] = { up: int(s.uplink ?? 0), down: int(s.downlink ?? 0) };
 				}
 			}
 			catch (e) { }
@@ -202,7 +205,16 @@ const methods = {
 
 	log: {
 		call: function() {
-			let r = run("logread -e 'xvpn|xray' 2>/dev/null | tail -n 300");
+			// by the tag only: other lines may mention xvpn too (LuCI URLs in the log of uhttpd);
+			// procd tags the output of an instance with the name of its binary: xray and
+			// ucode (stdout and stderr of xvpnd, e.g. its stack traces); logread -e takes a
+			// basic regex. rpcd waits for this call and serves nothing else meanwhile: logread
+			// waits for logd, a stuck one is killed after 3 s (busybox has no timeout), and
+			// it reads only the last LOG_SCAN lines
+			let xray = replace(load_config().main.xray_bin, /.*\//, '');
+			let re = sprintf(' (xvpn|ucode|%s)(\\[[0-9]+\\])?: ', replace(xray, /[^A-Za-z0-9_-]/g, '.') || 'xray');
+			let r = run(sprintf('{ /sbin/logread -l %d 2>/dev/null & p=$!; (sleep 3; kill -9 $p) >/dev/null 2>&1 & w=$!; wait $p; kill $w; } 2>/dev/null | grep -E %s | tail -n %d',
+				LOG_SCAN, shq(re), LOG_LINES));
 			return { log: r.out };
 		}
 	},

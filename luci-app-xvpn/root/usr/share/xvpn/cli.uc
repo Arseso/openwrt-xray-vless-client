@@ -4,15 +4,15 @@
 
 'use strict';
 
-import { readfile, unlink, access, open, symlink, readlink, rename } from 'fs';
+import { readfile, unlink, access, open, symlink, readlink, rename, stat } from 'fs';
 import * as ubus from 'ubus';
 import * as uloop from 'uloop';
 import {
-	load_config, read_json, write_json, write_file, mkdir_p, log, run, shq, is_updater, kill_tree,
+	load_config, read_json, write_json, write_file, mkdir_p, log, run, shq, is_updater, kill_tree, fnv1a,
 	ACTIVE_FILE, CONFIG_FILE, INDEX_FILE, VAR_DIR, RUN_DIR, UPDATE_LOCK,
-	FW_WANT_FILE, FW_MODE_FILE, FW_ERROR_FILE, FW_WARN_FILE, FW_LOCK_FILE, GENERATE_ERROR_FILE
+	FW_WANT_FILE, FW_MODE_FILE, FW_ERROR_FILE, FW_WARN_FILE, FW_LOCK_FILE, GENERATE_ERROR_FILE, STALE_FILE
 } from 'xvpn.util';
-import { all_servers, update, prune } from 'xvpn.subscription';
+import { all_servers, update, prune, list_change } from 'xvpn.subscription';
 import { build_index, generate, ports_error } from 'xvpn.xrayconf';
 import { host_env } from 'xvpn.host';
 import { resolve, apply, remove, fix_ifnames, ifnames_applied } from 'xvpn.firewall';
@@ -25,10 +25,49 @@ const cfg = load_config();
 const TEST_FULL = 40, TEST_ONE = 15, GENERATE_BUDGET = cfg.health.generate_budget;
 const STARTED = clock(true)[0];
 
+// xray's verdicts are kept (#7): `run -test` is a second xray beside the running one, with
+// hundreds of outbounds it takes as much memory. A reload that only selects a server or
+// follows a wifi change tests nothing; a changed server list is tested once (one test of the
+// whole config while xray accepts it; one by one only the servers it has not judged yet).
+// { bin: bin_sig(), frame: <main and access settings>, full: <the server set whose whole
+// config passed>, ok: { <outbound key>: bool } }; another binary or other settings start
+// anew. In /var: after a boot everything is tested once again
+const TESTED_FILE = `${VAR_DIR}/tested.json`;
+
+// another binary (an upgrade, xray_bin changed or fixed in place) may judge otherwise
+function bin_sig() {
+	let s = stat(cfg.main.xray_bin);
+	return s ? `${s.inode}:${s.size}:${s.mtime}` : null;
+}
+
+function conf_key(o) {
+	let j = sprintf('%J', o);
+	return `${fnv1a(j)}-${length(j)}`;
+}
+
+// init.d passes xray's GC settings (GOMEMLIMIT, GOGC) to the tests too
+const XRAY_ENV = { PATH: '/usr/sbin:/usr/bin:/sbin:/bin' };
+for (let k in [ 'GOMEMLIMIT', 'GOGC' ])
+	if (getenv(k))
+		XRAY_ENV[k] = getenv(k);
+
+// the last xray_ok was xray's own verdict on the config, so it may be kept: accepted, or
+// exit code 23 (config error); not hung, not killed (OOM), not a Go runtime error (2)
+let definite = false;
+
+// write_json that checks the file is whole: on a full tmpfs xray would reject a truncated
+// config with the same 23
+function put(path, obj) {
+	let text = sprintf('%J\n', obj);
+	write_file(path, text);
+	return readfile(path) === text;
+}
+
 // true: xray accepts the config; false: rejects it, hung or was killed (OOM); null: out of
 // time, reserve seconds of the budget kept for later. uloop.process reports a killed
 // process as exit code 0: sh writes xray's own code.
 function xray_ok(path, limit, reserve) {
+	definite = false;
 	let left = GENERATE_BUDGET - (clock(true)[0] - STARTED) - (reserve ?? 0);
 	if (left <= 0)
 		return null;
@@ -36,7 +75,7 @@ function xray_ok(path, limit, reserve) {
 	unlink(out);
 	uloop.init();
 	let p = uloop.process('/bin/sh', [ '-c', `${shq(cfg.main.xray_bin)} run -test -c ${shq(path)} >/dev/null 2>&1; echo $? > ${shq(out)}` ],
-		{ PATH: '/usr/sbin:/usr/bin:/sbin:/bin' }, () => uloop.end());
+		XRAY_ENV, () => uloop.end());
 	if (!p)
 		return false;
 	t = uloop.timer(wait * 1000, () => {
@@ -51,6 +90,7 @@ function xray_ok(path, limit, reserve) {
 		return null;
 	if (hung)
 		log(`${cfg.main.xray_bin} run -test hung for ${limit} s, killed`);
+	definite = !hung && code != null && int(code) in [ 0, 23 ];
 	return !hung && code != null && int(code) == 0;
 }
 
@@ -124,6 +164,14 @@ function active_port() {
 	return filter(idx?.servers ?? [], (e) => e.id == idx.active)[0]?.test_port;
 }
 
+// the server xray runs (its id and hash) and the one chosen (they differ until a reload
+// applies a switch); ids from before #49 are hashes, list_change() matches both
+function active_ids() {
+	let idx = read_json(INDEX_FILE);
+	let e = filter(idx?.servers ?? [], (e) => e.id == idx.active)[0];
+	return [ idx?.active, e?.hash, trim(readfile(ACTIVE_FILE) ?? '') ];
+}
+
 const SELF = readlink('/proc/self');
 
 // symlink() is atomic: of two concurrent updates only one gets the lock
@@ -149,12 +197,27 @@ function unlock_update() {
 
 switch (ARGV[0]) {
 case 'generate': {
+	// read before the caches: the marker goes once the config is written, unless an update
+	// set it again meanwhile
+	let stale = readfile(STALE_FILE);
 	prune(cfg);
-	let servers = all_servers(cfg);
-	let active = trim(readfile(ACTIVE_FILE) ?? '');
+	let all = all_servers(cfg), servers = all;
+	let active = trim(readfile(ACTIVE_FILE) ?? ''), prev = read_json(INDEX_FILE);
 	// IPv6 and the ports held by others (not by our running xray), once for every index below
 	let env = host_env();
-	let idx = build_index(cfg, servers, active, env);
+	// everything but the servers that goes into the config (ports, DNS, sniffing, listen…)
+	let sig = bin_sig(), frame = conf_key([ cfg.main, cfg.access, env.ipv6 ]), tested = read_json(TESTED_FILE);
+	if (type(tested?.ok) != 'object' || tested.bin != sig || tested.frame != frame)
+		tested = { bin: sig, frame, full: null, ok: {} };
+	let verdict = (s) => tested.ok[s.key ??= conf_key(s.outbound)];
+	let set_key = (list) => conf_key(sort(map(list, (s) => s.key ?? conf_key(s.outbound))));
+	// rejected before: dropped without a test
+	let skipped = map(filter(servers, (s) => verdict(s) === false), (s) => s.name);
+	if (length(skipped)) {
+		log(`xray rejected ${length(skipped)} server(s) earlier: ${join(', ', skipped)}`);
+		servers = filter(servers, (s) => verdict(s) !== false);
+	}
+	let idx = build_index(cfg, servers, active, prev, env);
 	// xray would not start: rather the config it runs, like out of time
 	let taken = length(servers) ? ports_error(cfg, env) : null;
 	if (taken) {
@@ -169,12 +232,32 @@ case 'generate': {
 	mkdir_p(VAR_DIR);
 	write_json(next, generate(cfg, servers, idx));
 
+	// the verdicts got so far are kept whatever the end: they are xray's own
+	function keep(passed) {
+		if (passed) {
+			tested.full = set_key(servers);
+			for (let s in servers)
+				tested.ok[s.key] = true;
+		}
+		// the servers gone from the subscriptions go from the file too
+		let ok = {};
+		for (let s in all)
+			if (verdict(s) != null)
+				ok[s.key] = verdict(s);
+		tested.ok = ok;
+		write_json(TESTED_FILE, tested);
+	}
 	function commit(code) {
 		unlink(tmp);
 		unlink(GENERATE_ERROR_FILE);
 		if (!rename(next, CONFIG_FILE))
 			die(`cannot write ${CONFIG_FILE}`);
 		write_json(INDEX_FILE, idx);
+		if (stale != null && readfile(STALE_FILE) === stale)
+			unlink(STALE_FILE);
+		// build_index found the chosen server under another id by its hash: keep the choice
+		if (idx.moved_from)
+			write_file(ACTIVE_FILE, idx.active);
 		if (code == 4)
 			log(`xray does not work, check: ${cfg.main.xray_bin} run -test -c ${CONFIG_FILE}`);
 		else
@@ -182,6 +265,7 @@ case 'generate': {
 		exit(code ?? (length(servers) ? 0 : 3));
 	}
 	function out_of_time() {
+		keep(false);
 		unlink(tmp);
 		unlink(next);
 		let err = `generate ran out of time (${GENERATE_BUDGET} s), xray goes on with the previous config`;
@@ -198,23 +282,34 @@ case 'generate': {
 	}
 
 	// one malformed server must not take the whole VPN down: drop the ones xray rejects
-	if (length(servers) && access(cfg.main.xray_bin, 'x') && !check(next, TEST_FULL)) {
+	// the same servers with the same settings were accepted by this binary before: no test
+	let known = (tested.full == set_key(servers));
+	let testing = length(servers) && !known && access(cfg.main.xray_bin, 'x');
+	if (testing && !check(next, TEST_FULL)) {
 		let good = [], bad = [];
 		// xray that rejects a config without servers is broken itself: keep the servers,
 		// the daemon reports xray_down rather than "no servers"
-		write_json(tmp, generate(cfg, [], build_index(cfg, [], null, env)));
+		write_json(tmp, generate(cfg, [], build_index(cfg, [], null, null, env)));
 		if (!check(tmp, TEST_ONE))
 			commit(4);
 		// out of time (a slow router, a big subscription): the servers not tested yet are
 		// dropped, a test of the whole config stays in the budget
 		let untested = 0;
 		for (let s in servers) {
+			if (verdict(s) === true) {
+				push(good, s);
+				continue;
+			}
 			if (untested) {
 				untested++;
 				continue;
 			}
-			write_json(tmp, generate(cfg, [ s ], build_index(cfg, [ s ], s.id, env)));
-			let ok = xray_ok(tmp, TEST_ONE, TEST_FULL);
+			let ok = false;
+			definite = false;
+			if (put(tmp, generate(cfg, [ s ], build_index(cfg, [ s ], s.id, null, env))))
+				ok = xray_ok(tmp, TEST_ONE, TEST_FULL);
+			if (definite)
+				tested.ok[s.key] = ok;
 			if (ok == null)
 				untested++;
 			else if (ok)
@@ -228,13 +323,16 @@ case 'generate': {
 		if (untested)
 			log(`generate ran out of time (${GENERATE_BUDGET} s): ${untested} server(s) not tested, dropped`);
 		servers = good;
-		idx = build_index(cfg, servers, active, env);
+		idx = build_index(cfg, servers, active, prev, env);
 		write_json(next, generate(cfg, servers, idx));
 		if (length(servers) && !check(next, TEST_FULL)) {
 			log(`xray rejects the generated config`);
+			keep(false);
 			commit(4);
 		}
 	}
+	if (testing)
+		keep(true);
 	commit(null);
 }
 
@@ -286,24 +384,32 @@ case 'fw-remove': {
 }
 
 case 'update': {
-	let sids = slice(ARGV, 1), port = active_port(), out = {}, changed = false;
+	let sids = slice(ARGV, 1), port = active_port(), out = {};
 	let all = !length(sids) || ('all' in sids);
 	if (!lock_update()) {
 		warn('another subscription update is running\n');
 		exit(5);
 	}
+	let before = all_servers(cfg);
 	for (let sub in cfg.subscriptions) {
 		if (!sub.enabled || !(all || (sub.id in sids)))
 			continue;
 		let r = update(sub, port);
 		out[sub.id] = r;
-		changed ||= r.changed;
 		log(r.error ? `subscription "${sub.name}": ${r.error}`
 			: `subscription "${sub.name}": ${r.count} servers${r.skipped ? `, ${r.skipped} skipped` : ''}${r.changed ? ' (changed)' : ''}`);
 	}
+	// only addresses of servers xray does not use now changed (hosts rotated, #49): no
+	// reload that would drop the clients' connections, the next one applies them
+	let need = list_change(before, all_servers(cfg), active_ids());
+	if (need == 'stale') {
+		mkdir_p(RUN_DIR);
+		write_file(STALE_FILE, `${time()} ${SELF}\n`);	// another content each time, see generate
+		log('subscriptions changed servers not in use, the next reload applies them');
+	}
 	unlock_update();
 	printf('%J\n', out);
-	exit(changed ? 0 : 2);
+	exit((need == 'reload') ? 0 : 2);
 }
 
 default:
