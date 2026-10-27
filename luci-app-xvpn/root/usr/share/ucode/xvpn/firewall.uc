@@ -257,7 +257,7 @@ export function render(cfg, res, opts) {
 		push(r, '\t\tmeta nfproto ipv6 reject with icmpx type admin-prohibited');
 	// block must not fail on a bad port in the config: it is the fallback for a failed full,
 	// and minimal leaves single ports and SSIDs open
-	let lports = filter([ m.tproxy_port, m.dns_port ], (p) => !block || (type(p) == 'int' && p > 0 && p < 65536));
+	let lports = uniq(filter([ m.tproxy_port, m.dns_port ], (p) => !block || (type(p) == 'int' && p > 0 && p < 65536)));
 	push(r, '\t}', '',
 		'\tchain guard_input {',
 		'\t\ttype filter hook input priority filter - 5; policy accept;');
@@ -310,15 +310,20 @@ function routing(cfg, add) {
 export function apply(cfg, res, opts) {
 	mkdir_p(VAR_DIR);
 	write_file(NFT_FILE, render(cfg, res, opts));
+	// only tproxy needs the route; at boot (fw-guard, block) lo is still down and ip
+	// would fail with "Nexthop device is not up". For full it goes first: no moment
+	// with tproxy marks but no route (a route without marks is harmless)
+	let tproxy = !opts?.passthrough && !opts?.block && !opts?.minimal;
+	if (tproxy)
+		routing(cfg, true);
 	let r = run(`nft -f ${NFT_FILE} 2>&1`);
 	if (r.code != 0) {
 		let err = trim(r.out) || `nft exited with ${r.code}`;
 		log(`nft failed: ${err}`);
 		return err;
 	}
-	// only tproxy needs the route; at boot (fw-guard, block) lo is still down and ip
-	// would fail with "Nexthop device is not up"
-	routing(cfg, !opts?.passthrough && !opts?.block && !opts?.minimal);
+	if (!tproxy)
+		routing(cfg, false);
 	return null;
 };
 

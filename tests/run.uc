@@ -3,9 +3,10 @@
 
 'use strict';
 
-import { readfile, writefile } from 'fs';
+import { readfile, writefile, mkdir } from 'fs';
 import { parse_link, parse_subscription } from 'xvpn.links';
 import { parse_userinfo } from 'xvpn.subscription';
+import { load_config } from 'xvpn.util';
 import { build_index, generate } from 'xvpn.xrayconf';
 import { render, resolve, fix_ifnames, ifnames_applied } from 'xvpn.firewall';
 import { cursor } from 'uci';
@@ -96,7 +97,25 @@ eq('doh route', dconf.routing.rules[length(dconf.routing.rules) - 1],
 	{ type: 'field', inboundTag: [ 'tproxy', 'dns-module' ], outboundTag: 'srv-2' });
 eq('default outbound with doh', dconf.outbounds[0].tag, 'srv-2');
 writefile(`${OUT}/config-doh.json`, sprintf('%J', dconf));
+cfg.access.ipv6 = 'tunnel';
+eq('doh UseIP with ipv6 tunnel', generate(cfg, servers, idx).dns.queryStrategy, 'UseIP');
+cfg.access.ipv6 = 'block';
+let nosrv = generate(cfg, [], build_index(cfg, [], null));
+eq('doh without servers: blackhole by default', nosrv.outbounds[0].tag, 'block');
+ok('doh without servers: no dns-module rule', length(filter(nosrv.routing.rules, (r) => r.inboundTag[0] == 'tproxy')) == 0);
 cfg.access.dns_server = '1.1.1.1';
+
+// dns_server schemes that would query from the router directly are replaced
+function dns_of(v) {
+	mkdir(`${OUT}/dnscfg`);
+	writefile(`${OUT}/dnscfg/xvpn`, `config access 'access'\n\toption dns_server '${v}'\n`);
+	return load_config(`${OUT}/dnscfg`).access.dns_server;
+}
+eq('dns_server https kept', dns_of('https://dns.google/dns-query'), 'https://dns.google/dns-query');
+eq('dns_server tcp kept', dns_of('tcp://1.1.1.1'), 'tcp://1.1.1.1');
+eq('dns_server IP kept', dns_of('9.9.9.9'), '9.9.9.9');
+eq('dns_server +local replaced', dns_of('https+local://dns.google/dns-query'), 'https://cloudflare-dns.com/dns-query');
+eq('dns_server quic+local replaced', dns_of('quic+local://dns.adguard.com'), 'https://cloudflare-dns.com/dns-query');
 
 // firewall
 // SSIDs come with a wildcard (WDS, dynamic VLAN) and may overlap an exact name: nft -c checks it
@@ -126,6 +145,9 @@ let blkbad = render(bad, res, { block: true });
 ok('block skips a bad port', index(blkbad, '99999') < 0 && index(blkbad, 'th dport { 10853 }') >= 0);
 ok('full keeps the bad port', index(render(bad, res), '99999') >= 0);
 writefile(`${OUT}/block-badport.nft`, blkbad);
+let dup = render({ ...cfg, main: { ...cfg.main, tproxy_port: 10853 } }, res, { block: true });
+ok('block dedups ports', index(dup, 'th dport { 10853 }') >= 0);
+writefile(`${OUT}/block-dupport.nft`, dup);
 writefile(`${OUT}/block.nft`, blk);
 let min = render(cfg, res, { minimal: true });
 ok('minimal rejects nets', index(min, 'iifname @nets reject with icmpx type admin-prohibited') >= 0);

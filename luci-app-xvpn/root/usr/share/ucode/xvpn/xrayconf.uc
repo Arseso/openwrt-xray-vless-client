@@ -17,15 +17,16 @@ export function build_index(cfg, servers, active_id) {
 	return { active: active?.id, servers: index };
 };
 
-// a URL (https://…) is resolved by the xray DNS module: its queries reach the
-// server by domain, so they pass servers that refuse IP destinations
+// a URL (https://, tcp://; load_config drops the others) is resolved by the xray DNS
+// module: its queries reach the server by domain, so they pass servers that refuse
+// IP destinations
 export function dns_via_module(cfg) {
 	return index(cfg.access.dns_server, '://') > 0;
 };
 
-export function generate(cfg, servers, index) {
+export function generate(cfg, servers, idx) {
 	let m = cfg.main;
-	let active = filter(index.servers, (e) => e.id == index.active)[0];
+	let active = filter(idx.servers, (e) => e.id == idx.active)[0];
 	let doh = dns_via_module(cfg);
 
 	let inbounds = [
@@ -51,7 +52,7 @@ export function generate(cfg, servers, index) {
 	let outbounds = [];
 	let rules = [ { type: 'field', inboundTag: [ 'api' ], outboundTag: 'api' } ];
 
-	for (let i, e in index.servers) {
+	for (let i, e in idx.servers) {
 		push(inbounds, {
 			tag: `test-${i}`, listen: '127.0.0.1', port: e.test_port, protocol: 'socks',
 			settings: { auth: 'noauth', udp: false },
@@ -63,7 +64,8 @@ export function generate(cfg, servers, index) {
 	// unmatched traffic never leaves directly
 	push(outbounds, { tag: 'block', protocol: 'blackhole' });
 	if (doh) {
-		// other query types (TXT, HTTPS…) would go to an IP: drop them
+		// other query types (TXT, HTTPS…) would go to an IP: drop them; never 'skip' —
+		// dns-out would send them to the placeholder address itself, around the tunnel
 		push(outbounds, { tag: 'dns-out', protocol: 'dns', settings: { nonIPQuery: 'drop' } });
 		push(rules, { type: 'field', inboundTag: [ 'dns-in' ], outboundTag: 'dns-out' });
 	}

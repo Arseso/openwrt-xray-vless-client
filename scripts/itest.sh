@@ -312,6 +312,8 @@ ucode /usr/share/xvpn/cli.uc fw-apply passthrough && { echo "FAIL: passthrough i
 want_mode passthrough passthrough
 fw @.error | grep -q '"ownap"' || { echo "FAIL: no error in passthrough: $(fw @.error)"; exit 1; }
 direct || { echo "FAIL: passthrough with an unresolved SSID blocks the clients"; exit 1; }
+# only tproxy needs the policy route: dropped outside full, back with full
+ip rule | grep -q 'lookup 100' && { echo "FAIL: ip rule left in passthrough"; exit 1; }
 echo "OK: passthrough with an unresolved SSID: clients direct, error shown"
 # disabled, it has no clients: no error
 uci set wireless.ownap.disabled=1; uci commit wireless
@@ -398,6 +400,7 @@ sleep 1
 wait_for @.state connected 40
 want_mode full full
 [ -z "$(fw @.error)" ] || { echo "FAIL: error left after a successful fw-apply"; exit 1; }
+ip rule | grep -q 'lookup 100' || { echo "FAIL: no ip rule after returning to full"; exit 1; }
 echo "OK: error cleared after a successful fw-apply"
 
 # failover: kill the active remote, start the other one
