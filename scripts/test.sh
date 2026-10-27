@@ -16,8 +16,12 @@ set --
 
 $DOCKER run --rm --cap-add NET_ADMIN -v "$PWD:/src:ro" -e XRAY_REJECT="${XRAY_REJECT:-}" "$@" "$IMAGE" sh -ec '
 	mkdir -p /var/lock /tmp/out
-	opkg update >/dev/null
-	opkg install ucode-mod-uloop xray-core kmod-nft-tproxy >/dev/null 2>&1 || opkg install ucode-mod-uloop xray-core >/dev/null
+	# downloads.openwrt.org now and then fails with "wget returned 4": try again
+	for i in 1 2 3 4 5; do opkg update >/dev/null && break; sleep 5; done
+	for i in 1 2 3 4 5; do
+		opkg install ucode-mod-uloop xray-core kmod-nft-tproxy >/dev/null 2>&1 || opkg install ucode-mod-uloop xray-core >/dev/null && break
+		sleep 5
+	done
 	ucode -L "/src/luci-app-xvpn/root/usr/share/ucode/*.uc" /src/tests/run.uc /src/tests/fixtures /tmp/out
 	for f in /src/luci-app-xvpn/root/usr/share/xvpn/*.uc; do
 		ucode -L "/src/luci-app-xvpn/root/usr/share/ucode/*.uc" -c -o /dev/null "$f" || { echo "compile failed: $f"; exit 1; }
