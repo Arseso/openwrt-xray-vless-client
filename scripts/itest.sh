@@ -678,9 +678,9 @@ reload_config
 wait_cmd 30 xvpnd_restarted "$dp"
 wait_for @.state connected 30
 id1=$(id_of first)
-set_auto "$id1" false
 wait_cmd 15 select_ok "$id1"
 wait_for @.state connected 30
+set_auto "$id1" false
 sleep 15	# three ranks
 active_is first && [ "$(latency second)" -ge 0 ] && [ "$(latency second)" -lt "$(latency first)" ] \
 	|| { echo "FAIL: auto_best left a server chosen by hand"; ubus call xvpn status; exit 1; }
