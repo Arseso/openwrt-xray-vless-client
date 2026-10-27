@@ -283,15 +283,20 @@ export function render(cfg, res, opts) {
 
 function routing(cfg, add) {
 	let m = cfg.main, tm = hex32(m.tproxy_mark), t = m.route_table;
+	// ip prints the mark without leading zeros; busybox ip has no selectors in `rule list`
+	let mk = sprintf('0x%x', m.tproxy_mark), re = regexp(`fwmark ${mk}/${mk} lookup ${t}( |$)`);
 	for (let fam in [ '-4', '-6' ]) {
-		// drop duplicates left from an unclean stop
-		for (let i = 0; i < 4; i++)
-			if (run(`ip ${fam} rule del fwmark ${tm}/${tm} table ${t} 2>/dev/null`).code != 0)
-				break;
-		if (add) {
+		let n = length(filter(split(run(`ip ${fam} rule list 2>/dev/null`).out, '\n'), (l) => match(l, re)));
+		// the rule is added before duplicates left from an unclean stop are dropped:
+		// no moment without it
+		if (add && !n) {
 			run(`ip ${fam} rule add fwmark ${tm}/${tm} table ${t}`);
-			run(`ip ${fam} route replace local default dev lo table ${t}`);
+			n = 1;
 		}
+		for (; n > (add ? 1 : 0); n--)
+			run(`ip ${fam} rule del fwmark ${tm}/${tm} table ${t} 2>/dev/null`);
+		if (add)
+			run(`ip ${fam} route replace local default dev lo table ${t}`);
 		else
 			run(`ip ${fam} route flush table ${t} 2>/dev/null`);
 	}

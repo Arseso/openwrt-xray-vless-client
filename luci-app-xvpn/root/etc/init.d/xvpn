@@ -14,17 +14,20 @@ start_service() {
 	config_get_bool enabled main enabled 0
 	config_get xray_bin main xray_bin /usr/bin/xray
 
-	# VPN SSIDs get fixed names (xvpn-apN), deselected ones get theirs back; also when turned off
-	$CLI ifnames
-
+	# VPN SSIDs get fixed names (xvpn-apN), deselected ones get theirs back; also when turned off,
+	# after fw-remove, which clears the warnings of the rules
 	if [ "$enabled" != 1 ]; then
 		$CLI fw-remove
+		$CLI ifnames
 		return 0
 	fi
+	$CLI ifnames
 
-	# generate drops servers that xray rejects; non-zero: no servers or invalid config
-	local have_servers=1
-	$CLI generate >/dev/null || have_servers=0
+	# generate drops servers that xray rejects; 3: no servers, 4: xray does not work,
+	# 5: out of time, xray goes on with the config it runs
+	local have_servers=1 rc=0
+	$CLI generate >/dev/null || rc=$?
+	[ "$rc" = 0 ] || { [ "$rc" = 5 ] && [ -s "$CONF" ]; } || have_servers=0
 
 	# rules stay in place without servers: with kill switch on, clients stay offline instead of leaking;
 	# if nft rejects them, cli.uc blocks the clients and the status shows "error"
