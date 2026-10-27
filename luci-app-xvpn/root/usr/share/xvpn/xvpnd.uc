@@ -7,6 +7,7 @@
 
 import * as uloop from 'uloop';
 import * as ubus from 'ubus';
+import { cursor } from 'uci';
 import { readfile, unlink, access, stat } from 'fs';
 import {
 	load_config, read_json, write_json, write_file, mkdir_p, shq, update_running, procs, tree, kill_tree,
@@ -28,6 +29,8 @@ const RELOAD_MAX = H.generate_budget + 120;	// s at most for a reload from takin
 const RELOAD_RETRY = H.reload_retry;	// s between a failed reload and the next try
 const RELOAD_TICK = min(10, max(1, int(RELOAD_IDLE / 4))) * 1000;
 const STALL = 3 * H.interval + RELOAD_MAX + 30;	// s without health checks: see watchdog()
+const TIME_FLAG = `${RUN_DIR}/time_synced`;	// hotplug.d/ntp/50-xvpn: sysntpd has set the clock
+const TIME_UNTIL = `${RUN_DIR}/time_wait`;	// end of the wait (monotonic): restarts do not wait again
 
 let index = { servers: [] }, index_raw = null;
 let prev = read_json(STATE_FILE) ?? {};
@@ -39,6 +42,7 @@ let st = {
 	fails: 0,
 	gen: 0,			// index generation, see load_index()
 	testing: false,
+	tests: 0,		// test runs finished, see the ubus method test
 	updating: false,
 	reloading: false,	// a reload is running or xray is settling after one
 	reload_pending: false,
@@ -53,6 +57,9 @@ let st = {
 	xray: {},	// see xray_down()
 	xray_choose: null,	// choose_best() decision put off while xray does not work
 	xray_choose_code: null,	// 7: the test aborted with xray_choose saw a refused test port
+	time_wait: null,	// waiting for NTP until then (monotonic), see time_ok()
+	time_choose: null,	// choose_best() decision put off until the clock is set
+	subs_force: false,	// the first update at start, see auto_update()
 };
 let test_waiters = [], testq = null, test_resume = null, test_abort = null;
 let timers = {}, settling = false, reload = null;
@@ -369,6 +376,30 @@ function xray_down(problem, inst, reason) {
 		restart_xray(inst);
 }
 
+// sysntpd runs: on with servers configured or taken from DHCP
+function ntp_on() {
+	let c = cursor(), n, off = (v) => v in [ '0', 'false', 'no', 'off', 'disabled' ];
+	c.load('system');
+	n = c.get_all('system', 'ntp');
+	return n?.['.type'] == 'timeserver' && !off(n.enabled) && (length(n.server ?? []) || !off(n.use_dhcp))
+		&& system([ '/etc/init.d/sysntpd', 'enabled' ]) == 0;
+}
+
+// No RTC: until NTP sets the clock VMess, Shadowsocks 2022, REALITY and TLS fail on
+// every server, so none is blamed. Waits at most time_wait s from the first start after boot.
+function time_ok() {
+	if (st.time_wait == null)
+		return true;
+	let synced = access(TIME_FLAG);
+	if (!synced && now() < st.time_wait)
+		return false;
+	log(synced ? 'the clock is set by NTP' : `no NTP sync in ${H.time_wait} s, going on with the clock as it is`);
+	st.time_wait = null;
+	timers.time?.cancel();
+	timers.subs?.set(1000);	// the updates put off meanwhile
+	return true;
+}
+
 function quarantined(id) {
 	return (st.quarantine[id] ?? 0) > time();
 }
@@ -403,6 +434,7 @@ function test_all(cb) {
 
 	function done(problem, inst, refused) {
 		st.testing = false;
+		st.tests++;
 		testq = test_resume = test_abort = null;
 		st.last_test = time();
 		save();
@@ -488,6 +520,29 @@ function set_passthrough(on) {
 		: 'server is alive again: clients go through VPN');
 	if (!spawn('/usr/bin/ucode', on ? [ CLI, 'fw-apply', 'passthrough' ] : [ CLI, 'fw-apply' ]))
 		st.passthrough = !on;	// the next check tries again
+}
+
+// Meanwhile the active server is probed: connected while it answers; without the kill
+// switch the clients go direct while it does not (or there is none). Nothing goes to
+// quarantine, xray is not checked.
+function wait_time(e) {
+	let gen = st.gen;
+	function dead() {
+		set_state('waiting_time', 'waiting for NTP to set the clock');
+		if (!cfg.access.killswitch)
+			set_passthrough(true);
+	}
+	if (!e)
+		return dead();
+	probe(e.test_port, (ms, code) => {
+		if (!valid(gen) || st.active != e.id || code < 0 || st.time_wait == null)
+			return;
+		if (ms < 0)
+			return dead();
+		st.latency[e.id] = { ms, at: time() };
+		set_passthrough(false);
+		set_state('connected', null);
+	});
 }
 
 // Syncs the daemon with the config xray runs now.
@@ -685,6 +740,11 @@ function switch_to(id, reason) {
 
 choose_best = function(reason) {
 	st.xray_choose = null;
+	if (!time_ok()) {
+		st.time_choose = reason;	// check() takes it once the clock is set
+		return set_state('waiting_time', 'waiting for NTP to set the clock');
+	}
+	st.time_choose = null;
 	// an update moved servers xray does not use now (cli.uc update): measure them at their
 	// new addresses. A reload drops the connections, but the choice may switch anyway
 	if (access(STALE_FILE) && !st.reloading && !st.reload_error) {
@@ -737,12 +797,20 @@ check = function() {
 	if (st.testing || st.reloading)
 		return;
 	alive();
+	let timed = time_ok();	// also without servers: it runs the updates put off
 	if (!length(index.servers)) {
 		set_state('no_servers', 'no servers in subscriptions');
 		return;
 	}
 
 	let e = server(st.active);
+	if (!timed)
+		return wait_time(e);
+	if (st.time_choose) {
+		let reason = st.time_choose;
+		st.time_choose = null;
+		return choose_best(reason);
+	}
 	if (!e)
 		return failover('no active server');
 
@@ -799,7 +867,7 @@ check = function() {
 };
 
 function rank() {
-	if (st.testing || st.reloading || st.reload_error || st.state != 'connected')
+	if (st.testing || st.reloading || st.reload_error || st.state != 'connected' || st.time_wait != null)
 		return;
 	test_all((problem) => {
 		if (problem || !H.auto_best || st.reloading)
@@ -848,7 +916,7 @@ function status() {
 	let fw_error = readfile(FW_ERROR_FILE), error = fw_error ?? st.reload_error;
 	return {
 		state: error ? 'error' : st.state, active: st.active, since: st.since, fails: st.fails,
-		testing: st.testing, updating: st.updating || !!update_running(), passthrough: st.passthrough,
+		testing: st.testing, tests: st.tests, updating: st.updating || !!update_running(), passthrough: st.passthrough,
 		last_error: error ?? st.last_error, last_switch: st.last_switch, last_test: st.last_test,
 		xray_restarts: st.xray.restarts ?? 0, servers,
 	};
@@ -907,11 +975,15 @@ conn.publish('xvpn', {
 	},
 	test: {
 		call: () => {
-			// after a failed reload the test ports may not match what xray runs
-			if (st.reload_error)
+			// after a failed reload the test ports may not match what xray runs;
+			// before NTP sets the clock every server may look dead
+			if (st.reload_error || st.time_wait != null)
 				return { ok: false, error: 'busy' };
+			// starts a run or joins the running one: either way that run is over
+			// once status shows tests >= run (with no servers it is over at once)
+			let run = st.tests + 1;
 			test_all(null);
-			return { ok: true };
+			return { ok: true, run };
 		},
 	},
 	check: {
@@ -943,12 +1015,35 @@ conn.publish('xvpn', {
 	},
 });
 
+// automatic updates wait for the clock too (TLS fails with it behind), time_ok() runs them
+function auto_update() {
+	if (st.time_wait != null)
+		return;
+	let force = st.subs_force;
+	st.subs_force = false;
+	update_subs(force);
+}
+
 every('check', H.interval, check);
 every('rank', H.rank_interval, rank);
-every('subs', SUB_CHECK, () => update_subs(false));
+every('subs', SUB_CHECK, auto_update);
 every('watchdog', 30, watchdog);
-if (!length(index.servers))
-	update_subs(true);
+if (H.time_wait > 0 && !access(TIME_FLAG) && ntp_on()) {
+	let until = int(readfile(TIME_UNTIL) ?? 0);
+	if (!until) {
+		until = now() + H.time_wait;
+		write_file(TIME_UNTIL, `${until}`);
+	}
+	if (now() < until) {
+		st.time_wait = until;
+		timers.time = uloop.timer((until - now()) * 1000, check);
+		set_state('waiting_time', 'waiting for NTP to set the clock');
+	}
+}
+if (!length(index.servers)) {
+	st.subs_force = true;
+	auto_update();
+}
 else if (!readfile(ACTIVE_FILE))
 	// first start: pick the fastest server
 	timers.once = uloop.timer(3000, () => choose_best('startup'));

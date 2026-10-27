@@ -7,12 +7,13 @@
 # subscription update from LuCI through the daemon and by a reload past it; a hung xray
 # and a broken xray_bin are xray_down, not dead servers; a hung reload (sleep in init.d,
 # procd lock held) does not stop the health checks, a slow generate is not killed and a
-# killed one leaves the running config.
+# killed one leaves the running config; before NTP sets the clock no server goes to quarantine.
 set -e
 cd "$(dirname "$0")/.."
 DOCKER="${DOCKER:-docker}"
 IMAGE="${IMAGE:-openwrt/rootfs:x86-64-24.10.4}"
-NAME=${NAME:-xvpn-itest}
+# unique per checkout: parallel runs from other worktrees must not remove this container
+NAME=${NAME:-xvpn-itest-$(printf %s "$PWD" | cksum | cut -d' ' -f1)}
 
 $DOCKER rm -f $NAME >/dev/null 2>&1 || true
 # without S11sysctl: in a privileged container it would write the host's kernel.* sysctls
@@ -147,6 +148,14 @@ wait_cmd() { # timeout cmd...
 	while [ $(date +%s) -lt $_end ]; do "$@" >/dev/null 2>&1 && return 0; sleep 1; done
 	echo "TIMEOUT waiting for: $*"; diag; exit 1
 }
+# a test of all servers; waits for this very run to finish, testing=false may still be
+# the moment before it starts or the end of another run
+tests_done() { [ "$(status @.tests)" -ge "$1" ]; }
+test_all() {
+	_run=$(ubus call xvpn test | jsonfilter -e @.run)
+	[ -n "$_run" ] || { echo "FAIL: ubus call xvpn test started no test"; diag; exit 1; }
+	wait_cmd 30 tests_done "$_run"
+}
 
 
 remote 18443
@@ -155,6 +164,7 @@ set xvpn.main.enabled=1
 add_list xvpn.access.network=lan
 add_list xvpn.access.port=vc0
 set xvpn.health.interval=3
+set xvpn.health.url=http://45.0.0.2/
 set xvpn.health.timeout=4
 set xvpn.health.fail_threshold=2
 set xvpn.health.reload_idle=15
@@ -403,6 +413,71 @@ want_mode full full
 ip rule | grep -q 'lookup 100' || { echo "FAIL: no ip rule after returning to full"; exit 1; }
 echo "OK: error cleared after a successful fw-apply"
 
+# boot with the clock not set (no RTC, NTP pending): the servers look dead, none goes to
+# quarantine until sysntpd sets the clock (hotplug ntp), then the VPN comes up. The clock of
+# the container cannot be changed: a stopped remote stands for a server that rejects the
+# time. sysntpd is stopped meanwhile (with system.ntp in place the daemon waits), the hotplug
+# event is sent by hand.
+not_quarantined() { # what
+	ubus call xvpn status | grep -q '"quarantined": true' && { echo "FAIL: quarantine while waiting for the time ($1)"; ubus call xvpn status; exit 1; }
+	return 0
+}
+# /etc/config/system is put back byte for byte: reload_config below would reload log and sysntpd
+cp /etc/config/system /tmp/system.orig
+ntpd_was=$(pidof ntpd || true)
+/etc/init.d/sysntpd stop
+uci batch <<UCI
+set system.ntp=timeserver
+add_list system.ntp.server=127.0.0.1
+commit system
+set xvpn.health.time_wait=20
+commit xvpn
+UCI
+kill $(cat /tmp/remote-18443.pid)
+rm -f /var/run/xvpn/time_synced /var/run/xvpn/time_wait	# a boot
+/etc/init.d/xvpn restart
+wait_for @.state waiting_time 15
+env -i ACTION=stratum stratum=16 /sbin/hotplug-call ntp
+sleep 9	# 3 checks
+[ "$(status @.state)" = waiting_time ] && [ "$(status @.passthrough)" = false ] || { echo "FAIL: waiting for the time"; ubus call xvpn status; exit 1; }
+not_quarantined "kill switch"
+[ "$(ubus call xvpn test | jsonfilter -e @.error)" = busy ] || { echo "FAIL: test while waiting for the time"; exit 1; }
+blocked "waiting for the time, kill switch on"
+remote 18443
+env -i ACTION=stratum stratum=2 /sbin/hotplug-call ntp
+[ -f /var/run/xvpn/time_synced ] || { echo "FAIL: hotplug ntp set no flag"; exit 1; }
+wait_for @.state connected 10
+logread | grep -q 'the clock is set by NTP' && active_is first || { echo "FAIL: after NTP sync"; ubus call xvpn status; exit 1; }
+tunnel || { echo "FAIL: no tunnel after NTP sync"; exit 1; }
+echo "OK: no quarantine before NTP sync, connected right after it"
+
+# kill switch off: clients go direct while the active server does not answer; no sync in
+# time_wait s: the daemon goes on with the clock as it is
+uci set xvpn.access.killswitch=0; uci commit xvpn
+kill $(cat /tmp/remote-18443.pid)
+rm -f /var/run/xvpn/time_synced /var/run/xvpn/time_wait	# a boot
+/etc/init.d/xvpn restart
+wait_for @.state waiting_time 15
+t0=$(date +%s)
+wait_for @.passthrough true 15
+direct || { echo "FAIL: no passthrough while waiting for the time, kill switch off"; exit 1; }
+not_quarantined "kill switch off"
+/etc/init.d/xvpn restart	# a restart (uci commit, respawn) does not start the wait over
+wait_for @.state waiting_time 15
+remote 18443
+wait_cmd 30 sh -c "logread | grep -q 'no NTP sync in 20 s'"
+[ $(($(date +%s) - t0)) -le 30 ] || { echo "FAIL: the restart started the wait over"; exit 1; }
+wait_for @.state connected 15
+wait_for @.passthrough false 10
+active_is first && tunnel || { echo "FAIL: after the time wait ran out"; ubus call xvpn status; exit 1; }
+echo "OK: passthrough while waiting for the time, going on after time_wait"
+uci set xvpn.access.killswitch=1; uci delete xvpn.health.time_wait; uci commit xvpn
+cp /tmp/system.orig /etc/config/system
+touch /var/run/xvpn/time_synced	# the clock is right: no wait from here on
+[ -z "$ntpd_was" ] || /etc/init.d/sysntpd start
+/etc/init.d/xvpn restart
+wait_for @.state connected 40
+
 # failover: kill the active remote, start the other one
 kill $(cat /tmp/remote-18443.pid); remote 18444
 sleep 8
@@ -437,11 +512,10 @@ wait_for @.state connected 30
 [ "$(active_name)" = second ] || { echo "FAIL: after update expected second, got $(active_name)"; exit 1; }
 echo "OK: update from LuCI went through the daemon, 4 servers, still on second"
 
-ubus call xvpn test >/dev/null
-sleep 1; wait_for @.testing false 30
+test_all
 [ "$(latency sub-dead)" = -1 ] && [ "$(latency first)" = -1 ] \
 	&& [ "$(latency sub-live)" -ge 0 ] && [ "$(latency second)" -ge 0 ] \
-	|| { echo "FAIL: latencies are attributed to wrong servers"; ubus call xvpn status; exit 1; }
+	|| { echo "FAIL: latencies are attributed to wrong servers"; ubus call xvpn status; logread | grep xvpn; exit 1; }
 echo "OK: measurements match the new server list"
 
 kill $(cat /tmp/remote-18444.pid)
@@ -545,9 +619,8 @@ wait_for @.state xray_down 30
 no_quarantine "xray stopped"
 echo "OK: stopped xray is xray_down, no quarantine"
 # a test with xray down does not mark the servers dead
-ubus call xvpn test >/dev/null
-sleep 1; wait_for @.testing false 30
-[ "$(latency "$a")" -ge 0 ] || { echo "FAIL: test with xray down wrote -1"; ubus call xvpn status; exit 1; }
+test_all
+[ "$(latency "$a")" -ge 0 ] || { echo "FAIL: test with xray down wrote -1"; ubus call xvpn status; logread | grep xvpn; exit 1; }
 echo "OK: measurements kept while xray is down"
 wait_cmd 40 xray_restarted "$x"
 wait_for @.state connected 40

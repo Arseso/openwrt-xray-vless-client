@@ -223,6 +223,7 @@ export function load_config(confdir) {
 			reload_idle: num(h.reload_idle, 60),
 			reload_retry: num(h.reload_retry, 30),
 			generate_budget: num(h.generate_budget, 240),
+			time_wait: num(h.time_wait, 120),
 		},
 		subscriptions: [],
 		manual: list(man.link),

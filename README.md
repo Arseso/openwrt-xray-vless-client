@@ -20,8 +20,8 @@ VPN-клиент для OpenWrt 24.10 на [xray-core](https://github.com/XTLS/X
 Пакет архитектуры `all` и должен работать на любом роутере с OpenWrt 24.10, где хватает памяти.
 
 Статус: версия 0.1.0, **до релиза**. Проверено в контейнере OpenWrt (тесты и интеграционный тест),
-на реальном роутере — ещё нет ([#25](https://github.com/Arseso/openwrt-xray-vless-client/issues/25)). Из интерфейса готова только вкладка «Status», остальное
-настраивается через `uci` (см. [Ограничения](#ограничения-и-известные-проблемы)).
+на реальном роутере — ещё нет ([#25](https://github.com/Arseso/openwrt-xray-vless-client/issues/25)). Всё настраивается в LuCI, `uci` — как альтернатива
+(см. [Настройка](#настройка)).
 
 Устройство и решения подробно описаны в [DESIGN.md](DESIGN.md).
 
@@ -88,17 +88,106 @@ echo /etc/xvpn/ >> /etc/sysupgrade.conf
 
 ## Настройка
 
-Раздел в LuCI: **Services → XVPN**. Интерфейс пока на английском (переводов нет, [#22](https://github.com/Arseso/openwrt-xray-vless-client/issues/22)). Готова
-только вкладка **Status**: состояние, активный сервер, подписки, таблица серверов с пингом и
-кнопкой «Use», кнопки «Test all», «Update subscriptions», «Restart» и «Enable»/«Disable».
+Всё настраивается в LuCI: **Services → XVPN**. Интерфейс пока на английском (переводов нет,
+[#22](https://github.com/Arseso/openwrt-xray-vless-client/issues/22)). Вкладки:
 
-В меню уже есть вкладки Subscriptions, Access points, Settings и Log, но страниц для них ещё нет —
-при открытии LuCI покажет ошибку. «Subscriptions» — [#20](https://github.com/Arseso/openwrt-xray-vless-client/issues/20) (PR [#45](https://github.com/Arseso/openwrt-xray-vless-client/pull/45) в работе), остальные — [#21](https://github.com/Arseso/openwrt-xray-vless-client/issues/21). Пока
-подписки, ручные ссылки и точки доступа задаются через `uci` по SSH. Полная схема конфига — в
-[DESIGN.md §4](DESIGN.md#4-uci-схема-etcconfigxvpn).
+| Вкладка | Что там |
+|---------|---------|
+| **Status** | состояние, активный сервер, подписки, таблица серверов с пингом и кнопкой «Use»; «Test all», «Update subscriptions», «Restart», «Enable»/«Disable» |
+| **Subscriptions** | подписки (URL, интервал, User-Agent, фильтры по имени, через туннель), их статус, трафик и срок; ручные ссылки с проверкой разбора |
+| **Access points** | какие сети, LAN-порты и SSID идут в VPN; kill switch, DNS, IPv6 |
+| **Settings** | проверка серверов и выбор лучшего, путь к xray, лог-уровень, sniffing, порты, метки, таблица маршрутизации |
+| **Log** | последние строки системного журнала от xvpn, его демона и xray, с фильтром и автообновлением |
 
-Простой `uci commit` по SSH сервис **не** перезагружает: триггеры procd срабатывают на
-`reload_config` (его вызывает и LuCI). Поэтому после правок ниже выполните одно из:
+Изменения на вкладках с формой применяются кнопкой «Save & Apply». Настройка через `uci` по SSH —
+[ниже](#через-uci); полная схема конфига — в [DESIGN.md §4](DESIGN.md#4-uci-схема-etcconfigxvpn).
+
+### 1. Подписка или ссылки
+
+Вкладка **Subscriptions**: «Add subscription» — имя и URL подписки. Необязательные параметры (в окне
+правки):
+
+| Параметр (опция UCI) | По умолчанию | Значение |
+|-------|--------------|----------|
+| User-Agent (`user_agent`) | `v2rayN/7.0` | по нему панели Marzban/Remnawave/3x-ui выбирают формат ответа |
+| Interval (`update_interval`) | `0` | часы; `0` — из заголовка `profile-update-interval`, иначе 12 |
+| Include, Exclude (`include`, `exclude`) | — | регулярки по имени сервера, без учёта регистра |
+| Through the tunnel (`via_tunnel`) | `1` | качать через активный сервер, при неудаче — напрямую; `0` — сразу напрямую |
+
+Отдельные ссылки без подписки — в поле **Manual links** той же вкладки, по одной на строку; каждую
+строку сразу проверяет парсер роутера.
+
+### 2. Точки доступа
+
+Вкладка **Access points**, можно сочетать:
+
+- **Networks** — целые сети OpenWrt со всеми их портами и SSID (WAN не показываются);
+- **LAN ports** — отдельные порты моста (DSA), например `lan2`;
+- **Wi-Fi (SSID)** — отдельные SSID.
+
+Выбранным SSID xvpn прописывает в `/etc/config/wireless` фиксированное имя интерфейса
+`option ifname 'xvpn-apN'` (и пометку `xvpn_ifname`), чтобы правила знали его ещё до подъёма
+Wi-Fi; при снятии выбора имя убирается. Своё `ifname`, заданное вами, не меняется. То же получают
+SSID выбранной Wi-Fi-only сети. При выборе или снятии SSID выполняется `ubus call network reload` —
+клиенты Wi-Fi могут переподключиться. Подробности —
+[DESIGN.md §7.2](DESIGN.md#72-фиксированные-имена-ssid-в-etcconfigwireless).
+
+Если в firewall включён flow offloading (программный или аппаратный), вкладка предупреждает:
+трафик клиентов VPN не офлоадится, но соединения, открытые до включения VPN, идут мимо него до
+своего завершения.
+
+### 3. Kill switch, DNS, IPv6
+
+Там же, в разделе **Protection**:
+
+| Параметр (опция UCI) | По умолчанию | Значение |
+|-------|--------------|----------|
+| Kill switch (`xvpn.access.killswitch`) | `1` | `0` — когда живых серверов нет, клиенты VPN идут напрямую; ICMP и всё, кроме TCP/UDP, идёт мимо туннеля всегда |
+| Intercept DNS (`xvpn.access.dns_hijack`) | `1` | DNS клиентов VPN перехватывается и уходит через туннель |
+| DNS server (`xvpn.access.dns_server`) | `https://cloudflare-dns.com/dns-query` | DNS клиентов: URL — DoH через DNS-модуль xray (запрос идёт к серверу по домену; типы, кроме A/AAAA, отбрасываются), IP или имя хоста — пересылка на `<адрес>:53` через туннель; схемы, кроме `https://` и `tcp://` (в нижнем регистре), LuCI не принимает, а бэкенд заменяет значением по умолчанию (`+local` ходили бы мимо туннеля). После обновления с версии, где было `sniffing '0'` и `dns_server '1.1.1.1'`, эти значения остаются в конфиге — поменяйте вручную |
+| IPv6 (`xvpn.access.ipv6`) | `block` | `block` — IPv6 клиентов VPN блокируется; `tunnel` — IPv6 TCP/UDP тоже идёт в туннель |
+
+С kill switch в интернет из VPN-точек проходит только TCP/UDP через xray, остальное (в том числе
+ICMP) отклоняется.
+
+### 4. Включить
+
+Кнопка «Enable» на вкладке **Status**. Запуск сервиса зависит только от `main.enabled`, но
+автозапуск (`/etc/init.d/xvpn enable`) тоже нужен: без него сервис не стартует при загрузке,
+клиентов не блокирует `xvpn-guard`, а `stop`/`restart` снимают правила — до старта xray клиенты идут
+напрямую. Кнопка «Enable» ставит и то, и другое.
+
+Если серверов ещё нет, демон сам скачивает подписки при старте. Принудительно обновить их позже —
+кнопкой «Update subscriptions» на вкладке Status или «Update» / «Update all» на вкладке Subscriptions.
+
+### Дополнительные настройки
+
+Вкладка **Settings**; пустое поле — значение по умолчанию. Служебные опции для тестов
+(`health.reload_idle`, `reload_retry`, `generate_budget`) в интерфейсе не показываются.
+
+| Параметр (опция UCI) | По умолчанию | Значение |
+|-------|--------------|----------|
+| Check URL (`health.url`) | `https://www.gstatic.com/generate_204` | HTTP-проверка через сервер; время до первого байта — пинг |
+| Check interval (`health.interval`) | `30` | с, проверка активного сервера (5–3600, больше таймаута) |
+| Timeout (`health.timeout`) | `5` | с, таймаут одной проверки (1–60) |
+| Failures before switching (`health.fail_threshold`) | `3` | неудач подряд до переключения |
+| Test all servers every (`health.rank_interval`) | `600` | с, фоновый тест всех серверов (60–86400) |
+| Quarantine (`health.quarantine`) | `300` | с, упавший сервер не выбирается |
+| Parallel tests (`health.concurrency`) | `8` | серверов тестируется одновременно (1–64) |
+| Switch to a faster server (`health.auto_best`) | `0` | переходить на сервер, который быстрее на гистерезис |
+| Hysteresis (`health.hysteresis`) | `150` | мс |
+| Path to xray (`main.xray_bin`) | `/usr/bin/xray` | абсолютный путь |
+| Log level of xray (`main.loglevel`) | `warning` | `debug`, `info`, `warning`, `error`, `none` |
+| Sniffing (`main.sniffing`) | `1` | подменять IP на домен из HTTP/TLS/QUIC: многие серверы не пускают к IP |
+| TPROXY, DNS, API port (`main.tproxy_port`, `dns_port`, `api_port`) | `12345`, `10853`, `10085` | разные и вне диапазона тестовых портов |
+| First test port (`main.test_port_base`) | `20000` | SOCKS-порт для проверки каждого сервера: этот и следующие, по одному на сервер |
+| Client mark, TPROXY mark (`main.client_mark`, `tproxy_mark`) | `0x01000000`, `0x02000000` | метки firewall в hex, ненулевые, без общих битов; не пересекаться с mwan3 (`0x3f00`) и pbr (`0x00ff0000`) |
+| Routing table (`main.route_table`) | `100` | таблица для TPROXY-метки; не 253–255 |
+
+### Через uci
+
+Всё то же можно задать по SSH. Простой `uci commit` сервис **не** перезагружает: триггеры procd
+срабатывают на `reload_config` (его вызывает и LuCI). Поэтому после правок выполните одно из:
 
 ```bash
 reload_config
@@ -108,35 +197,18 @@ reload_config
 /etc/init.d/xvpn reload
 ```
 
-### 1. Подписка или ссылки
+Подписка и ручная ссылка:
 
 ```bash
 uci add xvpn subscription
 uci set xvpn.@subscription[-1].name='Мой VPN'
 uci set xvpn.@subscription[-1].enabled='1'
 uci set xvpn.@subscription[-1].url='https://example.com/sub/xxxx'
-uci commit xvpn
-```
-
-Необязательные параметры подписки:
-
-| Опция | По умолчанию | Значение |
-|-------|--------------|----------|
-| `user_agent` | `v2rayN/7.0` | по нему панели Marzban/Remnawave/3x-ui выбирают формат ответа |
-| `update_interval` | `0` | часы; `0` — из заголовка `profile-update-interval`, иначе 12 |
-| `include`, `exclude` | — | регулярки по имени сервера, без учёта регистра |
-| `via_tunnel` | `1` | качать через активный сервер, при неудаче — напрямую; `0` — сразу напрямую |
-
-Отдельные ссылки без подписки:
-
-```bash
 uci add_list xvpn.manual.link='vless://…#Мой сервер'
 uci commit xvpn
 ```
 
-### 2. Точки доступа
-
-Что пускать в VPN — секция `xvpn.access`, можно сочетать:
+Точки доступа:
 
 ```bash
 uci add_list xvpn.access.network='guest'    # вся сеть OpenWrt (имя из `uci show network`)
@@ -145,27 +217,7 @@ uci add_list xvpn.access.wifi='wifinet2'    # отдельный SSID: имя с
 uci commit xvpn
 ```
 
-Выбранным SSID xvpn прописывает в `/etc/config/wireless` фиксированное имя интерфейса
-`option ifname 'xvpn-apN'` (и пометку `xvpn_ifname`), чтобы правила знали его ещё до подъёма
-Wi-Fi; при снятии выбора имя убирается. Своё `ifname`, заданное вами, не меняется. При выборе или
-снятии SSID выполняется `ubus call network reload` — клиенты Wi-Fi могут переподключиться.
-Подробности — [DESIGN.md §7.2](DESIGN.md#72-фиксированные-имена-ssid-в-etcconfigwireless).
-
-### 3. Kill switch, DNS, IPv6
-
-| Опция | По умолчанию | Значение |
-|-------|--------------|----------|
-| `xvpn.access.killswitch` | `1` | `0` — когда живых серверов нет, клиенты VPN идут напрямую; ICMP и всё, кроме TCP/UDP, идёт мимо туннеля всегда |
-| `xvpn.access.dns_hijack` | `1` | DNS клиентов VPN перехватывается и уходит через туннель |
-| `xvpn.access.dns_server` | `https://cloudflare-dns.com/dns-query` | DNS клиентов: URL — DoH через DNS-модуль xray (запрос идёт к серверу по домену; типы, кроме A/AAAA, отбрасываются), IP — пересылка на `<IP>:53` через туннель; схемы, кроме `https://` и `tcp://`, заменяются значением по умолчанию (`+local` ходили бы мимо туннеля). После обновления с версии, где было `sniffing '0'` и `dns_server '1.1.1.1'`, эти значения остаются в конфиге — поменяйте вручную |
-| `xvpn.access.ipv6` | `block` | `block` — IPv6 клиентов VPN блокируется; `tunnel` — IPv6 TCP/UDP тоже идёт в туннель |
-
-С `killswitch=1` в интернет из VPN-точек проходит только TCP/UDP через xray, остальное (в том числе
-ICMP) отклоняется.
-
-### 4. Включить
-
-В LuCI — кнопка «Enable» на вкладке Status. Или:
+Включить:
 
 ```bash
 uci set xvpn.main.enabled='1'
@@ -174,12 +226,7 @@ uci commit xvpn
 /etc/init.d/xvpn restart
 ```
 
-Запуск сервиса зависит только от `main.enabled`, но автозапуск (`/etc/init.d/xvpn enable`) тоже
-нужен: без него сервис не стартует при загрузке, клиентов не блокирует `xvpn-guard`, а `stop`/`restart` снимают
-правила — до старта xray клиенты идут напрямую. Кнопка «Enable» ставит и то, и другое.
-
-Если серверов ещё нет, демон сам скачивает подписки при старте. Принудительно обновить их позже —
-кнопкой «Update subscriptions» или:
+Обновить подписки:
 
 ```bash
 ubus call xvpn update
@@ -220,11 +267,13 @@ xray перезапускается (а соединения клиентов р
 - **Только полный туннель.** Раздельной маршрутизации (домены, «Россия напрямую») нет ([#30](https://github.com/Arseso/openwrt-xray-vless-client/issues/30)).
 - **Трафик самого роутера идёт напрямую**, в том числе NTP, `opkg` и загрузка подписок с
   `via_tunnel=0` или после неудачи через туннель ([#35](https://github.com/Arseso/openwrt-xray-vless-client/issues/35)).
-- **До синхронизации времени ряд протоколов не работает** ([#5](https://github.com/Arseso/openwrt-xray-vless-client/issues/5)). У AX3000T нет RTC; VMess (AEAD),
-  Shadowsocks 2022, Reality и TLS чувствительны к расхождению часов. После загрузки все серверы
-  могут не отвечать, и демон уходит в `no_servers`; VPN поднимается после синхронизации времени на
-  следующем цикле проверки. Пока живых серверов нет, демон повторно тестирует все серверы каждые
-  30–90 с ([#12](https://github.com/Arseso/openwrt-xray-vless-client/issues/12)).
+- **До синхронизации времени ряд протоколов не работает.** У AX3000T нет RTC; VMess (AEAD),
+  Shadowsocks 2022, Reality и TLS чувствительны к расхождению часов. Поэтому после загрузки демон
+  ждёт, пока sysntpd выставит часы (состояние `waiting_time`, до 2 минут), и до этого не отправляет
+  серверы в карантин и не переключает их. С kill switch клиенты VPN в это время идут только через
+  активный сервер (если он не отвечает — без интернета), без kill switch — напрямую, пока он не
+  отвечает. Если NTP выключен (`system.ntp`), демон не ждёт; если время так и не синхронизировалось,
+  через 2 минуты работает с часами как есть. NTP-запросы самого роутера идут напрямую, мимо VPN.
 - **Память** ([#7](https://github.com/Arseso/openwrt-xray-vless-client/issues/7)). На 256 МБ при генерации конфига дополнительно запускается `xray run -test`,
   вкладка Status раз в 30 с запускает `xray api`, тест серверов — до 8 `curl` одновременно.
   OOM-killer может выбрать xray — обрыв у всех клиентов.
@@ -264,6 +313,7 @@ ubus call xvpn status
 | Состояние | Значение |
 |-----------|----------|
 | `starting` | демон только запущен, проверки ещё не было |
+| `waiting_time` | ждём, пока NTP выставит часы (до 2 минут после загрузки), активный сервер не отвечает: серверы не уходят в карантин, подписки не обновляются |
 | `connected` | активный сервер отвечает |
 | `degraded` | были неудачные проверки, порог для переключения не достигнут |
 | `failover` | активный в карантине, идёт тест всех и переход |
@@ -276,10 +326,13 @@ ubus call xvpn status
 перезапускает.
 
 ```bash
-logread -e 'xvpn|xray'
+logread | grep -E ' (xvpn|ucode|xray)(\[[0-9]+\])?: '
 ```
 
-Журнал демона и скриптов (тег `xvpn`) и вывод xray (procd пишет его под именем бинаря).
+Журнал демона и скриптов (тег `xvpn`), вывод самого демона, например трассы ошибок (procd пишет
+его под тегом `ucode`), и вывод xray (под именем бинаря); то же — на вкладке **Log** в LuCI. Фильтр
+по тегу: по подстроке попадают и чужие строки (URL LuCI в журнале uhttpd). `logread -e` принимает
+базовый regex, поэтому `logread -e 'xvpn|xray'` не находит ничего.
 
 Ещё полезно:
 
