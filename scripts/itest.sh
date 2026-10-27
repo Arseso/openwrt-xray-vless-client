@@ -493,10 +493,10 @@ kill $(cat /tmp/remote-18446.pid)
 tunnel || { echo "FAIL: no tunnel through the new address of sub-live"; exit 1; }
 echo "OK: rotated host of the active server: reload, still on sub-live at its new address"
 # the provider renames the active server: another id, the same connection keeps the choice
-xp=$(xray_pid)
+# (a reload, but the xray config has no names: procd keeps xray running)
 sub 18452:sub-x 18448:sub-y 18451:sub-renamed
 update_s1
-wait_cmd 30 xray_restarted "$xp"
+wait_cmd 30 active_is sub-renamed
 wait_for @.state connected 30
 [ "$(active_name)" = sub-renamed ] && [ "$(status @.last_switch.at)" = "$switch" ] && [ "$(cat /etc/xvpn/active)" = "$(status @.active)" ] \
 	|| { echo "FAIL: renamed active server"; ubus call xvpn status; cat /etc/xvpn/active; exit 1; }
