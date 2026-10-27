@@ -498,8 +498,8 @@ function adopt_index() {
 		set_state('no_servers', 'no servers in subscriptions');
 		return;
 	}
-	// generate found the chosen server under a new id (cli.uc generate): the same server
-	if (index.active != st.active && !server(st.active) && trim(readfile(ACTIVE_FILE) ?? '') == index.active)
+	// generate found the chosen server under a new id by its hash (build_index): the same server
+	if (index.moved_from && index.moved_from == st.active)
 		st.active = index.active;
 	if (index.active != st.active) {
 		// active server disappeared from the list
@@ -550,6 +550,8 @@ function reload_failed(why) {
 	log(`${why}, next try in ${RELOAD_RETRY} s`);
 	st.reload_error = why;
 	st.reloading = st.reload_pending = false;
+	let pending = st.choose_pending;	// put off until the reload settles: it will not
+	st.choose_pending = null;
 	load_index();
 	st.gen++;
 	// clients go through the server of the config xray runs: a switch (select, failover)
@@ -565,6 +567,9 @@ function reload_failed(why) {
 		log('trying the reload again');
 		reload_service();
 	});
+	// e.g. failover at stale addresses (choose_best): choose with the config xray runs
+	if (pending)
+		choose_best(pending);
 }
 
 // What a working reload changes: its processes and their CPU time, and those of another
@@ -800,8 +805,12 @@ function rank() {
 		if (problem || !H.auto_best || st.reloading)
 			return;
 		let b = best(), cur = st.latency[st.active];
-		if (b && b.id != st.active && cur && cur.ms >= 0 && st.latency[b.id].ms + H.hysteresis < cur.ms)
-			switch_to(b.id, `faster server: ${st.latency[b.id].ms} ms vs ${cur.ms} ms`);
+		if (!b || b.id == st.active || !cur || cur.ms < 0 || st.latency[b.id].ms + H.hysteresis >= cur.ms)
+			return;
+		// measured at an old address (cli.uc update): choose again at the new ones
+		if (access(STALE_FILE))
+			return choose_best(`faster server: ${st.latency[b.id].ms} ms vs ${cur.ms} ms at old addresses`);
+		switch_to(b.id, `faster server: ${st.latency[b.id].ms} ms vs ${cur.ms} ms`);
 	});
 }
 

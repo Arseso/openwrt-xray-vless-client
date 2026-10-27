@@ -114,9 +114,12 @@ function active_port() {
 	return filter(idx?.servers ?? [], (e) => e.id == idx.active)[0]?.test_port;
 }
 
-// the server xray runs and the one chosen (they differ until a reload applies a switch)
+// the server xray runs (its id and hash) and the one chosen (they differ until a reload
+// applies a switch); ids from before #49 are hashes, list_change() matches both
 function active_ids() {
-	return [ read_json(INDEX_FILE)?.active, trim(readfile(ACTIVE_FILE) ?? '') ];
+	let idx = read_json(INDEX_FILE);
+	let e = filter(idx?.servers ?? [], (e) => e.id == idx.active)[0];
+	return [ idx?.active, e?.hash, trim(readfile(ACTIVE_FILE) ?? '') ];
 }
 
 const SELF = readlink('/proc/self');
@@ -144,12 +147,13 @@ function unlock_update() {
 
 switch (ARGV[0]) {
 case 'generate': {
-	// before the caches are read: an update that writes one meanwhile marks it again
-	unlink(STALE_FILE);
+	// read before the caches: the marker goes once the config is written, unless an update
+	// set it again meanwhile
+	let stale = readfile(STALE_FILE);
 	prune(cfg);
 	let servers = all_servers(cfg);
-	let active = trim(readfile(ACTIVE_FILE) ?? '');
-	let idx = build_index(cfg, servers, active);
+	let active = trim(readfile(ACTIVE_FILE) ?? ''), prev = read_json(INDEX_FILE);
+	let idx = build_index(cfg, servers, active, prev);
 	// xray and the daemon keep the running config until the end: a generate killed
 	// midway changes nothing
 	let next = `${VAR_DIR}/config.new.json`, tmp = `${VAR_DIR}/check.json`;	// xray goes by the extension
@@ -162,10 +166,10 @@ case 'generate': {
 		if (!rename(next, CONFIG_FILE))
 			die(`cannot write ${CONFIG_FILE}`);
 		write_json(INDEX_FILE, idx);
-		// build_index found the chosen server by its content hash (an id from before #49):
-		// keep the choice under the new id
-		if (active && idx.active && idx.active != active
-			&& length(filter(servers, (s) => s.id == idx.active && s.hash == active)))
+		if (stale != null && readfile(STALE_FILE) === stale)
+			unlink(STALE_FILE);
+		// build_index found the chosen server under another id by its hash: keep the choice
+		if (idx.moved_from)
 			write_file(ACTIVE_FILE, idx.active);
 		if (code == 4)
 			log(`xray does not work, check: ${cfg.main.xray_bin} run -test -c ${CONFIG_FILE}`);
@@ -220,7 +224,7 @@ case 'generate': {
 		if (untested)
 			log(`generate ran out of time (${GENERATE_BUDGET} s): ${untested} server(s) not tested, dropped`);
 		servers = good;
-		idx = build_index(cfg, servers, active);
+		idx = build_index(cfg, servers, active, prev);
 		write_json(next, generate(cfg, servers, idx));
 		if (length(servers) && !check(next, TEST_FULL)) {
 			log(`xray rejects the generated config`);
@@ -298,7 +302,7 @@ case 'update': {
 	let need = list_change(before, all_servers(cfg), active_ids());
 	if (need == 'stale') {
 		mkdir_p(RUN_DIR);
-		write_file(STALE_FILE, `${time()}\n`);
+		write_file(STALE_FILE, `${time()} ${SELF}\n`);	// another content each time, see generate
 		log('subscriptions changed servers not in use, the next reload applies them');
 	}
 	unlock_update();

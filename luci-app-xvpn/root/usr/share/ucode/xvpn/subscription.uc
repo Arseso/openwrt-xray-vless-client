@@ -186,25 +186,33 @@ function credentials(s) {
 export function assign_ids(servers, source) {
 	let seen = {};
 	return map(servers, (s) => {
-		let key = join('|', [ source, s.proto, s.name, credentials(s) ]);
+		// a link without a name is named address:port (links.uc): no name for the id
+		let name = (s.name == `${s.address}:${s.port}`) ? '' : s.name;
+		let key = join('|', [ source, s.proto, name, credentials(s) ]);
 		let n = seen[key] = (seen[key] ?? 0) + 1;
-		return { ...s, hash: s.hash ?? s.id, id: fnv1a((n > 1) ? `${key}|${n}` : key) };
+		// fixed key order: a cache from before #49 compares equal to a new one (list_change)
+		return {
+			id: fnv1a((n > 1) ? `${key}|${n}` : key), hash: s.hash ?? s.id,
+			name: s.name, proto: s.proto, address: s.address, port: s.port, outbound: s.outbound,
+		};
 	});
 };
 
 // What an update of the server list needs (cli.uc update): 'reload' when servers came
-// or went or one of active_ids changed, 'stale' when only the others changed (xray goes
-// on with their old addresses until the next reload), null when nothing changed.
+// or went or an active one changed, 'stale' when only the others changed (xray goes on
+// with their old addresses until the next reload), null when nothing changed.
+// active_ids: ids or hashes (the id before #49) of the servers in use.
 export function list_change(before, after, active_ids) {
 	let a = {}, b = {};
+	active_ids = filter(active_ids, (x) => x);
 	for (let s in before)
 		a[s.id] = sprintf('%J', s);
 	for (let s in after)
 		b[s.id] = sprintf('%J', s);
 	if (join('|', sort(keys(a))) != join('|', sort(keys(b))))
 		return 'reload';
-	for (let id in active_ids)
-		if (id && a[id] != b[id])
+	for (let s in before)
+		if (((s.id in active_ids) || (s.hash in active_ids)) && a[s.id] != b[s.id])
 			return 'reload';
 	return (sprintf('%J', before) != sprintf('%J', after)) ? 'stale' : null;
 };

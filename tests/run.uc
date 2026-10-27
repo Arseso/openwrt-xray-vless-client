@@ -94,6 +94,16 @@ ok('ids unique', length(uniq(map(v1, (s) => s.id))) == 4);
 ok('id depends on the source', assign_ids([ v1[0] ], 's2')[0].id != v1[0].id);
 eq('assign_ids keeps the hash of a cache from before #49', assign_ids([ { ...v1[1], hash: null, id: 'abcd0123' } ], 's1')[0].hash, 'abcd0123');
 eq('nothing changed', list_change(v1, v1, [ v1[1].id ]), null);
+eq('rotated host of the active server known by its hash (before #49): reload', list_change(v1, v2, [ v1[0].hash, null ]), 'reload');
+let legacy = map(v1, (x) => ({ id: x.hash, name: x.name, proto: x.proto, address: x.address, port: x.port, outbound: x.outbound }));
+eq('cache from before #49 (key order, id = hash): same entries', assign_ids(legacy, 's1'), v1);
+let anon = assign_ids(parse_subscription(join('\n', [
+	`vless://${U1}@a1.example.com:443?type=tcp&security=tls`, `vless://${U1}@a2.example.com:443?type=tcp&security=tls`,
+])).servers, 's1');
+let anon2 = assign_ids(parse_subscription(join('\n', [
+	`vless://${U1}@b1.example.com:443?type=tcp&security=tls`, `vless://${U1}@b2.example.com:443?type=tcp&security=tls`,
+])).servers, 's1');
+eq('links without a name: named by address, ids by order', [ anon[0].name, map(anon2, (x) => x.id) ], [ 'a1.example.com:443', map(anon, (x) => x.id) ]);
 eq('rotated host of an idle server: no reload', list_change(v1, v2, [ v1[1].id, '' ]), 'stale');
 eq('rotated host of the active server: reload', list_change(v1, v2, [ v1[1].id, v1[0].id ]), 'reload');
 eq('rotated host, xray runs another server than chosen: reload', list_change(v1, v2, [ v1[0].id, v1[1].id ]), 'reload');
@@ -118,7 +128,16 @@ let cfg = {
 let servers = [ ...assign_ids(b.servers, 's1'), ...assign_ids(xj.servers, 's2') ];
 let idx = build_index(cfg, servers, servers[2].id);
 eq('index active', idx.active, servers[2].id);
-eq('index active by the hash (id before #49)', build_index(cfg, servers, servers[3].hash).active, servers[3].id);
+let mv = build_index(cfg, servers, servers[3].hash);
+eq('index active by the hash (id before #49)', [ mv.active, mv.moved_from ], [ servers[3].id, servers[3].hash ]);
+eq('index active found by id: not moved', build_index(cfg, servers, servers[3].id, idx).moved_from, null);
+// renamed (or its subscription added again): another id, the hash from the running index
+let renamed = [ ...servers ];
+renamed[2] = { ...servers[2], id: 'feedf00d', name: 'renamed' };
+let ri = build_index(cfg, renamed, servers[2].id, idx);
+eq('index active renamed: found by the hash of the running index', [ ri.active, ri.moved_from ], [ 'feedf00d', servers[2].id ]);
+eq('index active gone: first server, not moved', [ build_index(cfg, slice(servers, 3), servers[2].id, idx).active, build_index(cfg, slice(servers, 3), servers[2].id, idx).moved_from ], [ servers[3].id, null ]);
+eq('index entries carry the hash', idx.servers[2].hash, servers[2].hash);
 eq('index ports', [ idx.servers[0].test_port, idx.servers[9].test_port ], [ 20000, 20009 ]);
 eq('index fallback active', build_index(cfg, servers, 'nope').active, servers[0].id);
 let conf = generate(cfg, servers, idx);
