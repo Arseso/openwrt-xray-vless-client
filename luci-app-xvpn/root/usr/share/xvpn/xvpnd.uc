@@ -39,6 +39,7 @@ let st = {
 	fails: 0,
 	gen: 0,			// index generation, see load_index()
 	testing: false,
+	tests: 0,		// test runs finished, see the ubus method test
 	updating: false,
 	reloading: false,	// a reload is running or xray is settling after one
 	reload_pending: false,
@@ -405,6 +406,7 @@ function test_all(cb) {
 
 	function done(problem, inst, refused) {
 		st.testing = false;
+		st.tests++;
 		testq = test_resume = test_abort = null;
 		st.last_test = time();
 		save();
@@ -830,7 +832,7 @@ function status() {
 	let fw_error = readfile(FW_ERROR_FILE), error = fw_error ?? st.reload_error;
 	return {
 		state: error ? 'error' : st.state, active: st.active, since: st.since, fails: st.fails,
-		testing: st.testing, updating: st.updating || !!update_running(), passthrough: st.passthrough,
+		testing: st.testing, tests: st.tests, updating: st.updating || !!update_running(), passthrough: st.passthrough,
 		last_error: error ?? st.last_error, last_switch: st.last_switch, last_test: st.last_test,
 		xray_restarts: st.xray.restarts ?? 0, servers,
 	};
@@ -892,8 +894,11 @@ conn.publish('xvpn', {
 			// after a failed reload the test ports may not match what xray runs
 			if (st.reload_error)
 				return { ok: false, error: 'busy' };
+			// starts a run or joins the running one: either way that run is over
+			// once status shows tests >= run (with no servers it is over at once)
+			let run = st.tests + 1;
 			test_all(null);
-			return { ok: true };
+			return { ok: true, run };
 		},
 	},
 	check: {
