@@ -25,6 +25,9 @@ function bg(cmd) {
 // Without an answer daemon_error says why: 'timeout' — xvpnd is on ubus but busy, the call
 // may still be done; 'not running' — there is no xvpnd object.
 const UBUS_STATUS_TIMEOUT = 7;
+
+// the log tab: lines of the system log looked through and sent
+const LOG_SCAN = 2000, LOG_LINES = 300;
 let daemon_error = null;
 
 function daemon(method, args) {
@@ -166,6 +169,8 @@ const methods = {
 				push(wifi, {
 					section: s['.name'], ssid: s.ssid, radio: s.device, band: dev.band,
 					network: s.network, disabled: (s.disabled == '1' || dev.disabled == '1'),
+					// the fixed name of a VPN SSID (DESIGN.md 7.2) or one set by the user
+					ifname: s.ifname,
 				});
 			});
 
@@ -202,7 +207,16 @@ const methods = {
 
 	log: {
 		call: function() {
-			let r = run("logread -e 'xvpn|xray' 2>/dev/null | tail -n 300");
+			// by the tag only: other lines may mention xvpn too (LuCI URLs in the log of uhttpd);
+			// procd tags the output of an instance with the name of its binary: xray and
+			// ucode (stdout and stderr of xvpnd, e.g. its stack traces); logread -e takes a
+			// basic regex. rpcd waits for this call and serves nothing else meanwhile: logread
+			// waits for logd, a stuck one is killed after 3 s (busybox has no timeout), and
+			// it reads only the last LOG_SCAN lines
+			let xray = replace(load_config().main.xray_bin, /.*\//, '');
+			let re = sprintf(' (xvpn|ucode|%s)(\\[[0-9]+\\])?: ', replace(xray, /[^A-Za-z0-9_-]/g, '.') || 'xray');
+			let r = run(sprintf('{ /sbin/logread -l %d 2>/dev/null & p=$!; (sleep 3; kill -9 $p) >/dev/null 2>&1 & w=$!; wait $p; kill $w; } 2>/dev/null | grep -E %s | tail -n %d',
+				LOG_SCAN, shq(re), LOG_LINES));
 			return { log: r.out };
 		}
 	},
