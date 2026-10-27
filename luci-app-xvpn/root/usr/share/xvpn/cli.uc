@@ -13,7 +13,8 @@ import {
 	FW_WANT_FILE, FW_MODE_FILE, FW_ERROR_FILE, FW_WARN_FILE, FW_LOCK_FILE, GENERATE_ERROR_FILE
 } from 'xvpn.util';
 import { all_servers, update, prune } from 'xvpn.subscription';
-import { build_index, generate } from 'xvpn.xrayconf';
+import { build_index, generate, ports_error } from 'xvpn.xrayconf';
+import { host_env } from 'xvpn.host';
 import { resolve, apply, remove, fix_ifnames, ifnames_applied } from 'xvpn.firewall';
 
 const cfg = load_config();
@@ -142,7 +143,17 @@ case 'generate': {
 	prune(cfg);
 	let servers = all_servers(cfg);
 	let active = trim(readfile(ACTIVE_FILE) ?? '');
-	let idx = build_index(cfg, servers, active);
+	// IPv6 and the ports held by others (not by our running xray), once for every index below
+	let env = host_env();
+	let idx = build_index(cfg, servers, active, env);
+	// xray would not start: rather the config it runs, like out of time
+	let taken = length(servers) ? ports_error(cfg, env) : null;
+	if (taken) {
+		log(`xray ports ${taken}`);
+		mkdir_p(RUN_DIR);
+		write_file(GENERATE_ERROR_FILE, `xray ports ${taken}`);
+		exit(5);
+	}
 	// xray and the daemon keep the running config until the end: a generate killed
 	// midway changes nothing
 	let next = `${VAR_DIR}/config.new.json`, tmp = `${VAR_DIR}/check.json`;	// xray goes by the extension
@@ -182,7 +193,7 @@ case 'generate': {
 		let good = [], bad = [];
 		// xray that rejects a config without servers is broken itself: keep the servers,
 		// the daemon reports xray_down rather than "no servers"
-		write_json(tmp, generate(cfg, [], build_index(cfg, [], null)));
+		write_json(tmp, generate(cfg, [], build_index(cfg, [], null, env)));
 		if (!check(tmp, TEST_ONE))
 			commit(4);
 		// out of time (a slow router, a big subscription): the servers not tested yet are
@@ -193,7 +204,7 @@ case 'generate': {
 				untested++;
 				continue;
 			}
-			write_json(tmp, generate(cfg, [ s ], build_index(cfg, [ s ], s.id)));
+			write_json(tmp, generate(cfg, [ s ], build_index(cfg, [ s ], s.id, env)));
 			let ok = xray_ok(tmp, TEST_ONE, TEST_FULL);
 			if (ok == null)
 				untested++;
@@ -208,7 +219,7 @@ case 'generate': {
 		if (untested)
 			log(`generate ran out of time (${GENERATE_BUDGET} s): ${untested} server(s) not tested, dropped`);
 		servers = good;
-		idx = build_index(cfg, servers, active);
+		idx = build_index(cfg, servers, active, env);
 		write_json(next, generate(cfg, servers, idx));
 		if (length(servers) && !check(next, TEST_FULL)) {
 			log(`xray rejects the generated config`);

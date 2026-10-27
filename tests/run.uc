@@ -7,8 +7,9 @@ import { readfile, writefile, mkdir } from 'fs';
 import { parse_link, parse_subscription } from 'xvpn.links';
 import { parse_userinfo } from 'xvpn.subscription';
 import { load_config } from 'xvpn.util';
-import { build_index, generate } from 'xvpn.xrayconf';
+import { build_index, generate, ports_error } from 'xvpn.xrayconf';
 import { render, resolve, fix_ifnames, ifnames_applied } from 'xvpn.firewall';
+import { ipv6_up, busy_ports } from 'xvpn.host';
 import { cursor } from 'uci';
 
 const FIX = ARGV[0] ?? 'tests/fixtures';
@@ -104,6 +105,72 @@ let nosrv = generate(cfg, [], build_index(cfg, [], null));
 eq('doh without servers: blackhole by default', nosrv.outbounds[0].tag, 'block');
 ok('doh without servers: no dns-module rule', length(filter(nosrv.routing.rules, (r) => r.inboundTag[0] == 'tproxy')) == 0);
 cfg.access.dns_server = '1.1.1.1';
+
+// IPv6 off on the router: the inbounds listen on 0.0.0.0, a bind on :: would fail
+let v4idx = build_index(cfg, servers, p[2].id, { ipv6: false, busy: { tcp: {}, udp: {} } });
+let v4 = generate(cfg, servers, v4idx);
+eq('no ipv6: tproxy and dns-in on 0.0.0.0', map(filter(v4.inbounds, (i) => i.tag in [ 'tproxy', 'dns-in' ]), (i) => i.listen),
+	[ '0.0.0.0', '0.0.0.0' ]);
+ok('no ipv6: nothing on ::', length(filter(v4.inbounds, (i) => index(i.listen, ':') >= 0)) == 0);
+eq('ipv6 on: tproxy on ::', conf.inbounds[0].listen, '::');
+ok('no ipv6, ipv6 block: no config error', v4idx.config_error == null);
+cfg.access.ipv6 = 'tunnel';
+ok('no ipv6, ipv6 tunnel: config error', match(build_index(cfg, servers, null, { ipv6: false }).config_error ?? '', /IPv6 is off/));
+ok('ipv6 on, tunnel: no config error', build_index(cfg, servers, null, { ipv6: true }).config_error == null);
+cfg.access.dns_server = 'https://cloudflare-dns.com/dns-query';
+eq('no ipv6: doh UseIPv4 even with tunnel', generate(cfg, servers, v4idx).dns.queryStrategy, 'UseIPv4');
+cfg.access.dns_server = '1.1.1.1';
+let nft6 = render(cfg, { nets: [ 'br-guest' ], ports: [], ipv6: false });
+ok('no ipv6, tunnel: no tproxy ip6', index(nft6, 'tproxy ip6') < 0);
+ok('ipv6 on, tunnel: tproxy ip6', index(render(cfg, { nets: [], ports: [], ipv6: true }), 'tproxy ip6') >= 0);
+writefile(`${OUT}/tunnel-noipv6.nft`, nft6);
+cfg.access.killswitch = false;
+ok('no ipv6, tunnel: ipv6 rejected like block', index(render(cfg, { nets: [], ports: [], ipv6: false }), 'meta nfproto ipv6 reject') >= 0);
+cfg.access.killswitch = true;
+cfg.access.ipv6 = 'block';
+writefile(`${OUT}/config-noipv6.json`, sprintf('%J', v4));
+
+// ports taken by other programs: test ports are skipped, the index keeps the real ones
+let taken = { tcp: { '20000': true, '20002': true }, udp: { '20001': true } };
+let pidx = build_index(cfg, servers, null, { ipv6: true, busy: taken });
+eq('busy test ports skipped', map(slice(pidx.servers, 0, 3), (e) => e.test_port), [ 20001, 20003, 20004 ]);
+eq('ports stay unique', length(uniq(map(pidx.servers, (e) => e.test_port))), length(servers));
+eq('generate uses the index ports', map(filter(generate(cfg, servers, pidx).inbounds, (i) => i.tag == 'test-0'), (i) => i.port), [ 20001 ]);
+let low = { ...cfg, main: { ...cfg.main, test_port_base: 10084 } };
+eq('main ports skipped', map(slice(build_index(low, servers, null, null).servers, 0, 3), (e) => e.test_port), [ 10084, 10086, 10087 ]);
+ok('main ports free', ports_error(cfg, { busy: taken }) == null);
+ok('tproxy port taken (udp)', match(ports_error(cfg, { busy: { tcp: {}, udp: { '12345': true } } }) ?? '', /tproxy_port 12345/));
+eq('api port: udp does not count', ports_error(cfg, { busy: { tcp: {}, udp: { '10085': true } } }), null);
+ok('api and dns taken', match(ports_error(cfg, { busy: { tcp: { '10085': true, '10853': true }, udp: {} } }) ?? '', /dns_port 10853, api_port 10085/));
+
+// /proc as host.uc reads it
+let proc = `${OUT}/proc`;
+system([ 'mkdir', '-p', `${proc}/net`, `${proc}/sys/net/ipv6/conf/all`, `${proc}/100/fd`, `${proc}/200/fd` ]);
+writefile(`${proc}/net/if_inet6`, '');
+writefile(`${proc}/sys/net/ipv6/conf/all/disable_ipv6`, '0\n');
+ok('no ipv6 address: off', !ipv6_up(proc));
+writefile(`${proc}/net/if_inet6`, '00000000000000000000000000000001 01 80 10 80       lo\n');
+ok('::1 on lo: on', ipv6_up(proc));
+writefile(`${proc}/sys/net/ipv6/conf/all/disable_ipv6`, '1\n');
+ok('disable_ipv6=1: off', !ipv6_up(proc));
+ok('no if_inet6 (no IPv6 in the kernel): off', !ipv6_up(`${OUT}/nonexistent`));
+let hdr = '  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n';
+writefile(`${proc}/net/tcp`, hdr +
+	'   0: 00000000:4E20 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 1001 1 0 100 0 0 10 0\n' +
+	'   1: 0100007F:4E21 0100007F:9C40 01 00000000:00000000 00:00000000 00000000     0        0 1002 1 0 20 4 30 10 -1\n' +
+	'   2: 00000000:3039 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 2001 1 0 100 0 0 10 0\n');
+writefile(`${proc}/net/tcp6`, hdr +
+	'   0: 00000000000000000000000000000000:4E22 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 1003 1 0 100 0 0 10 0\n');
+writefile(`${proc}/net/udp`, hdr +
+	'  10: 00000000:2A45 00000000:0000 07 00000000:00000000 00:00000000 00000000     0        0 2002 2 0 0\n');
+// pid 200 is our xray (procd's `xray run -c /var/etc/xvpn/config.json`), 100 someone else
+writefile(`${proc}/100/cmdline`, 'nc\0-l\0-p\x0020000\0');
+writefile(`${proc}/200/cmdline`, '/usr/bin/xray\0run\0-c\0/var/etc/xvpn/config.json\0');
+system([ 'ln', '-s', 'socket:[2001]', `${proc}/200/fd/3` ]);
+system([ 'ln', '-s', 'socket:[2002]', `${proc}/200/fd/4` ]);
+system([ 'ln', '-s', '/dev/null', `${proc}/200/fd/0` ]);
+system([ 'ln', '-s', 'socket:[1001]', `${proc}/100/fd/3` ]);
+eq('busy ports from /proc', busy_ports(proc), { tcp: { '20000': true, '20002': true }, udp: {} });
 
 // dns_server schemes that would query from the router directly are replaced
 function dns_of(v) {

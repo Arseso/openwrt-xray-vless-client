@@ -827,7 +827,10 @@ function status() {
 	}));
 	// cli.uc could not apply the rules and blocked the clients (fail closed)
 	// and a reload that failed: what xray runs may be not what the daemon wants
-	let fw_error = readfile(FW_ERROR_FILE), error = fw_error ?? st.reload_error;
+	// generate failed past the daemon (start, rpcd: a port taken) and a config error in
+	// the index (ipv6 = tunnel without IPv6 on the router)
+	let fw_error = readfile(FW_ERROR_FILE), gen_error = readfile(GENERATE_ERROR_FILE);
+	let error = fw_error ?? st.reload_error ?? (gen_error ? trim(gen_error) : null) ?? index.config_error;
 	return {
 		state: error ? 'error' : st.state, active: st.active, since: st.since, fails: st.fails,
 		testing: st.testing, tests: st.tests, updating: st.updating || !!update_running(), passthrough: st.passthrough,
@@ -932,6 +935,9 @@ every('check', H.interval, check);
 every('rank', H.rank_interval, rank);
 every('subs', SUB_CHECK, () => update_subs(false));
 every('watchdog', 30, watchdog);
+// generate failed at start (a port taken): tried again every RELOAD_RETRY
+if (readfile(GENERATE_ERROR_FILE))
+	reload_failed(trim(readfile(GENERATE_ERROR_FILE)));
 if (!length(index.servers))
 	update_subs(true);
 else if (!readfile(ACTIVE_FILE))

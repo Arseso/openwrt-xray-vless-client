@@ -158,7 +158,7 @@ Wi-Fi; при снятии выбора имя убирается. Своё `ifn
 | `xvpn.access.killswitch` | `1` | `0` — когда живых серверов нет, клиенты VPN идут напрямую; ICMP и всё, кроме TCP/UDP, идёт мимо туннеля всегда |
 | `xvpn.access.dns_hijack` | `1` | DNS клиентов VPN перехватывается и уходит через туннель |
 | `xvpn.access.dns_server` | `https://cloudflare-dns.com/dns-query` | DNS клиентов: URL — DoH через DNS-модуль xray (запрос идёт к серверу по домену; типы, кроме A/AAAA, отбрасываются), IP — пересылка на `<IP>:53` через туннель; схемы, кроме `https://` и `tcp://`, заменяются значением по умолчанию (`+local` ходили бы мимо туннеля). После обновления с версии, где было `sniffing '0'` и `dns_server '1.1.1.1'`, эти значения остаются в конфиге — поменяйте вручную |
-| `xvpn.access.ipv6` | `block` | `block` — IPv6 клиентов VPN блокируется; `tunnel` — IPv6 TCP/UDP тоже идёт в туннель |
+| `xvpn.access.ipv6` | `block` | `block` — IPv6 клиентов VPN блокируется; `tunnel` — IPv6 TCP/UDP тоже идёт в туннель. Если IPv6 на роутере выключен (`disable_ipv6=1` или нет ни одного IPv6-адреса), xray слушает только `0.0.0.0`, а `tunnel` — ошибка конфигурации: статус `error`, IPv4 при этом идёт в туннель |
 
 С `killswitch=1` в интернет из VPN-точек проходит только TCP/UDP через xray, остальное (в том числе
 ICMP) отклоняется.
@@ -200,6 +200,10 @@ ubus call xvpn update
   клиентов блокирует `xvpn-guard` ещё до fw4 и сети. Если nft не принял правила, они при любом
   значении `killswitch` откатываются на `block` (клиенты VPN без интернета), а если не принят и он —
   на `minimal` (закрыты только сети, отдельные порты и SSID — нет); статус — `error`.
+- **Порты.** Перед генерацией конфига занятые порты читаются из `/proc/net/{tcp,udp}{,6}` (порты
+  нашего работающего xray не считаются). Занятый тестовый порт пропускается — сервер получает
+  следующий свободный. Если занят `tproxy_port`, `dns_port` или `api_port`, xray остаётся на текущем
+  конфиге, статус — `error` с именем порта, демон повторяет reload каждые 30 с.
 - **Подписки** кэшируются в `/etc/xvpn/subs/`, поэтому VPN поднимается после перезагрузки без
   доступа к серверу подписки.
 
@@ -241,7 +245,6 @@ ubus call xvpn update
   - DNS клиентов зависит от UDP через сервер, а health-check этого не видит ([#10](https://github.com/Arseso/openwrt-xray-vless-client/issues/10));
   - адреса серверов резолвит системный DNS — подмена у провайдера ломает подключение ([#16](https://github.com/Arseso/openwrt-xray-vless-client/issues/16));
   - нет настройки policy xray под UDP-нагрузку, например торренты ([#15](https://github.com/Arseso/openwrt-xray-vless-client/issues/15));
-  - xray не стартует при выключенном IPv6 или занятом порту ([#9](https://github.com/Arseso/openwrt-xray-vless-client/issues/9));
   - большие подписки замедляют старт и раздувают конфиг ([#8](https://github.com/Arseso/openwrt-xray-vless-client/issues/8)).
 
 ## Диагностика
