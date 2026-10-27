@@ -22,7 +22,11 @@ export function build_index(cfg, servers, active_id, env) {
 	}
 
 	let active = filter(index, (e) => e.id == active_id)[0] ?? index[0];
-	let r = { active: active?.id, servers: index, ipv6: env?.ipv6 ?? true };
+	// the rules (fw-apply) go by the ports and IPv6 of the config xray runs
+	let r = {
+		active: active?.id, servers: index, ipv6: env?.ipv6 ?? true,
+		ports: { tproxy: m.tproxy_port, dns: m.dns_port },
+	};
 	if (!r.ipv6 && cfg.access.ipv6 == 'tunnel')
 		r.config_error = 'ipv6 is set to tunnel, but IPv6 is off on the router (disable_ipv6 or no IPv6 address): set ipv6 to block or turn IPv6 on';
 	return r;

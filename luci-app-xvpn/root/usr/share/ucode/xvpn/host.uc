@@ -7,8 +7,8 @@
 import { readfile, lsdir, readlink } from 'fs';
 import { CONFIG_FILE } from 'xvpn.util';
 
-// A bind on :: fails when IPv6 is off: disabled for all, or no address at all
-// (lo has ::1 while it is on; no file: a kernel without IPv6).
+// IPv6 is off: disabled for all, or no address at all (lo has ::1 while it is on; no file:
+// a kernel without IPv6 or booted with ipv6.disable=1, where a bind on :: fails).
 export function ipv6_up(proc) {
 	proc ??= '/proc';
 	return !!trim(readfile(`${proc}/net/if_inet6`) ?? '')

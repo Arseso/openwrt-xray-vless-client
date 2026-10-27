@@ -185,7 +185,8 @@ export function resolve(cfg, ubus_conn, uci) {
 	return { nets: filter(uniq(nets), valid), ports: filter(uniq(ports), valid), errors };
 };
 
-// res.ipv6: false when IPv6 is off on the router (apply() fills it in).
+// res.ipv6: false when IPv6 was off on the router at generate (from the index; apply()
+// checks it when there is no index).
 // opts.passthrough: keep marking but do not intercept (kill switch off and no live server).
 // opts.block: no interception, clients get neither internet nor DNS (service not started
 // yet or stopped, failed fw-apply); needs no tproxy, fib or nat support.
@@ -210,8 +211,8 @@ export function render(cfg, res, opts) {
 	let block = !!opts?.block;
 	let intercept = !opts?.passthrough && !block;
 	let hijack = intercept && a.dns_hijack;
-	// IPv6 off on the router: xray listens on 0.0.0.0 only, and the tproxy ip6 rule needs
-	// IPv6 in the kernel (nft rejects the whole file without it); tunnel is a config error then
+	// IPv6 off on the router: there is no IPv6 to tunnel and xray listens on 0.0.0.0 only,
+	// so no tproxy ip6 (nor its ip -6 route, which the kernel refuses); tunnel is a config error then
 	let v6 = (a.ipv6 == 'tunnel' && res.ipv6 !== false) ? 'tunnel' : 'block';
 	let r = [];
 

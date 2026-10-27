@@ -647,7 +647,12 @@ reindex = function(notified) {
 			timers.settle.set(3000);
 		return;	// our own reload: after_reload() takes over
 	}
-	if (notified && st.reload_error && !readfile(GENERATE_ERROR_FILE)) {
+	let gen_error = notified ? readfile(GENERATE_ERROR_FILE) : null;
+	// a reload past the daemon (UCI triggers, rpcd) failed to generate (a port taken):
+	// tried again every RELOAD_RETRY like ours
+	if (gen_error && !st.reload_error)
+		return reload_failed(trim(gen_error));
+	if (notified && st.reload_error && !gen_error) {
 		st.reload_error = null;	// whoever ran it, the config is applied
 		timers.retry?.cancel();
 	}

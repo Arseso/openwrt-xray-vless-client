@@ -226,6 +226,11 @@ wait_for @.state error 30
 status @.last_error | grep -q 'dns_port 10854' || { echo "FAIL: no port error: $(status @.last_error)"; exit 1; }
 [ "$(xray_pid)" = "$x" ] && grep -q '"port": 10853' /var/etc/xvpn/config.json || { echo "FAIL: running config replaced"; exit 1; }
 echo "OK: a taken main port is an error in the status, xray goes on with its config"
+# the rules follow the running config: DNS of the clients goes to xray, not to the holder
+nft list table inet xvpn | grep -q 'redirect to :10853' || { echo "FAIL: DNS not redirected to the running xray"; nft list table inet xvpn; exit 1; }
+[ "$(ip netns exec cl curl -s -m 3 http://45.0.0.2:53/)" = hello ] && { echo "FAIL: client DNS goes to the program on the new port"; exit 1; }
+tunnel || { echo "FAIL: no tunnel while the port is taken"; exit 1; }
+echo "OK: while the port is taken, clients and their DNS go through the running xray"
 kill $holder
 wait_for @.state connected 40
 grep -q '"port": 10854' /var/etc/xvpn/config.json || { echo "FAIL: dns_port not applied once free"; exit 1; }
@@ -234,7 +239,25 @@ uci set xvpn.main.dns_port=10853; uci commit xvpn
 /etc/init.d/xvpn reload
 wait_for @.state connected 40
 
-# IPv6 off on the router (disable_ipv6, the container's own netns): a bind on :: would fail,
+# the same at boot: no config yet (tmpfs), xray does not start, the clients are blocked
+# instead of their DNS going to the holder; the daemon tries again until the port is free
+/etc/init.d/xvpn stop
+rm -f /var/etc/xvpn/config.json /var/etc/xvpn/index.json
+uhttpd -f -p 0.0.0.0:10853 -h /tmp/www >/dev/null 2>&1 & holder=$!
+/etc/init.d/xvpn start
+wait_for @.state error 30
+status @.last_error | grep -q 'dns_port 10853' || { echo "FAIL: no port error at boot: $(status @.last_error)"; exit 1; }
+want_mode full block
+nft list table inet xvpn | grep -q redirect && { echo "FAIL: DNS redirected without xray"; exit 1; }
+[ "$(ip netns exec cl curl -s -m 3 http://45.0.0.2:53/)" = hello ] && { echo "FAIL: client DNS goes to the holder at boot"; exit 1; }
+blocked "port taken at boot"
+kill $holder
+wait_for @.state connected 40
+full_rules "port free after boot"
+tunnel || { echo "FAIL: no tunnel once the port is free after boot"; exit 1; }
+echo "OK: a port taken at boot blocks the clients until it is free"
+
+# IPv6 off on the router (disable_ipv6, the container's own netns): nothing to tunnel,
 # xray listens on 0.0.0.0; ipv6 = tunnel is a config error then, IPv4 still goes through
 sysctl -qw net.ipv6.conf.all.disable_ipv6=1
 /etc/init.d/xvpn reload

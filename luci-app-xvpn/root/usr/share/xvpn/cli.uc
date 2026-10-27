@@ -70,6 +70,8 @@ function fw_lock() {
 // what is applied and FW_ERROR_FILE the error until the wanted mode applies.
 // An SSID that has no device name cannot be in the rules: its clients would go around the
 // tunnel, so all VPN clients are blocked (passthrough lets them out anyway) and it is an error.
+// Ports and IPv6 come from the index of the config xray runs, not from UCI: a generate that
+// failed (a port taken) leaves xray on the previous ones.
 function fw(want) {
 	let lock = fw_lock();
 	want ??= readfile(FW_WANT_FILE);
@@ -78,8 +80,14 @@ function fw(want) {
 
 	mkdir_p(RUN_DIR);
 	write_file(FW_WANT_FILE, want);
-	let res = resolve(cfg, ubus.connect());
+	let idx = read_json(INDEX_FILE), rc = cfg;
+	if (idx?.ports)
+		rc = { ...cfg, main: { ...cfg.main, tproxy_port: idx.ports.tproxy, dns_port: idx.ports.dns } };
+	let res = { ...resolve(rc, ubus.connect()), ipv6: idx?.ipv6 };
 	let errs = [], mode = want;
+	// no config at all (boot with a port taken): no xray to send the clients and their DNS to
+	if (!idx && want == 'full')
+		mode = cfg.access.killswitch ? 'block' : 'passthrough';
 	if (length(res.errors)) {
 		push(errs, `access points not found: ${join('; ', res.errors)}`);
 		log(errs[0]);
@@ -87,13 +95,13 @@ function fw(want) {
 			mode = 'block';
 	}
 
-	let err = apply(cfg, res, MODES[mode]);
+	let err = apply(rc, res, MODES[mode]);
 	if (err != null) {
 		push(errs, `firewall rules failed: ${err}`);
 		let tried = mode;
 		mode = null;
 		for (let m in [ 'block', 'minimal' ])
-			if (m != tried && apply(cfg, res, MODES[m]) == null) {
+			if (m != tried && apply(rc, res, MODES[m]) == null) {
 				mode = m;
 				break;
 			}

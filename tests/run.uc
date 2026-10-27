@@ -106,7 +106,7 @@ eq('doh without servers: blackhole by default', nosrv.outbounds[0].tag, 'block')
 ok('doh without servers: no dns-module rule', length(filter(nosrv.routing.rules, (r) => r.inboundTag[0] == 'tproxy')) == 0);
 cfg.access.dns_server = '1.1.1.1';
 
-// IPv6 off on the router: the inbounds listen on 0.0.0.0, a bind on :: would fail
+// IPv6 off on the router: the inbounds listen on 0.0.0.0 (a kernel without IPv6 refuses ::)
 let v4idx = build_index(cfg, servers, p[2].id, { ipv6: false, busy: { tcp: {}, udp: {} } });
 let v4 = generate(cfg, servers, v4idx);
 eq('no ipv6: tproxy and dns-in on 0.0.0.0', map(filter(v4.inbounds, (i) => i.tag in [ 'tproxy', 'dns-in' ]), (i) => i.listen),
@@ -135,6 +135,7 @@ let taken = { tcp: { '20000': true, '20002': true }, udp: { '20001': true } };
 let pidx = build_index(cfg, servers, null, { ipv6: true, busy: taken });
 eq('busy test ports skipped', map(slice(pidx.servers, 0, 3), (e) => e.test_port), [ 20001, 20003, 20004 ]);
 eq('ports stay unique', length(uniq(map(pidx.servers, (e) => e.test_port))), length(servers));
+eq('index keeps the main ports for the rules', pidx.ports, { tproxy: 12345, dns: 10853 });
 eq('generate uses the index ports', map(filter(generate(cfg, servers, pidx).inbounds, (i) => i.tag == 'test-0'), (i) => i.port), [ 20001 ]);
 let low = { ...cfg, main: { ...cfg.main, test_port_base: 10084 } };
 eq('main ports skipped', map(slice(build_index(low, servers, null, null).servers, 0, 3), (e) => e.test_port), [ 10084, 10086, 10087 ]);
