@@ -30,6 +30,7 @@ const RELOAD_RETRY = H.reload_retry;	// s between a failed reload and the next t
 const RELOAD_TICK = min(10, max(1, int(RELOAD_IDLE / 4))) * 1000;
 const STALL = 3 * H.interval + RELOAD_MAX + 30;	// s without health checks: see watchdog()
 const TIME_FLAG = `${RUN_DIR}/time_synced`;	// hotplug.d/ntp/50-xvpn: sysntpd has set the clock
+const TIME_UNTIL = `${RUN_DIR}/time_wait`;	// end of the wait (monotonic): restarts do not wait again
 
 let index = { servers: [] }, index_raw = null;
 let prev = read_json(STATE_FILE) ?? {};
@@ -58,6 +59,7 @@ let st = {
 	xray_choose_code: null,	// 7: the test aborted with xray_choose saw a refused test port
 	time_wait: null,	// waiting for NTP until then (monotonic), see time_ok()
 	time_choose: null,	// choose_best() decision put off until the clock is set
+	subs_force: false,	// the first update at start, see auto_update()
 };
 let test_waiters = [], testq = null, test_resume = null, test_abort = null;
 let timers = {}, settling = false, reload = null;
@@ -376,15 +378,15 @@ function xray_down(problem, inst, reason) {
 
 // sysntpd runs: on with servers configured or taken from DHCP
 function ntp_on() {
-	let c = cursor(), n;
+	let c = cursor(), n, off = (v) => v in [ '0', 'false', 'no', 'off', 'disabled' ];
 	c.load('system');
 	n = c.get_all('system', 'ntp');
-	return n?.['.type'] == 'timeserver' && n.enabled != '0' && (length(n.server ?? []) || n.use_dhcp != '0')
+	return n?.['.type'] == 'timeserver' && !off(n.enabled) && (length(n.server ?? []) || !off(n.use_dhcp))
 		&& system([ '/etc/init.d/sysntpd', 'enabled' ]) == 0;
 }
 
 // No RTC: until NTP sets the clock VMess, Shadowsocks 2022, REALITY and TLS fail on
-// every server, so none is blamed. Waits at most time_wait s from the start.
+// every server, so none is blamed. Waits at most time_wait s from the first start after boot.
 function time_ok() {
 	if (st.time_wait == null)
 		return true;
@@ -394,6 +396,7 @@ function time_ok() {
 	log(synced ? 'the clock is set by NTP' : `no NTP sync in ${H.time_wait} s, going on with the clock as it is`);
 	st.time_wait = null;
 	timers.time?.cancel();
+	timers.subs?.set(1000);	// the updates put off meanwhile
 	return true;
 }
 
@@ -519,22 +522,27 @@ function set_passthrough(on) {
 		st.passthrough = !on;	// the next check tries again
 }
 
-// Meanwhile the active server is probed: without the kill switch the clients go direct
-// while it does not answer. Nothing goes to quarantine, xray is not checked.
+// Meanwhile the active server is probed: connected while it answers; without the kill
+// switch the clients go direct while it does not (or there is none). Nothing goes to
+// quarantine, xray is not checked.
 function wait_time(e) {
-	set_state('waiting_time', 'waiting for NTP to set the clock');
 	let gen = st.gen;
-	if (e)
-		probe(e.test_port, (ms, code) => {
-			if (!valid(gen) || st.active != e.id || code < 0 || st.time_wait == null)
-				return;
-			if (ms >= 0) {
-				st.latency[e.id] = { ms, at: time() };
-				set_passthrough(false);
-			}
-			else if (!cfg.access.killswitch)
-				set_passthrough(true);
-		});
+	function dead() {
+		set_state('waiting_time', 'waiting for NTP to set the clock');
+		if (!cfg.access.killswitch)
+			set_passthrough(true);
+	}
+	if (!e)
+		return dead();
+	probe(e.test_port, (ms, code) => {
+		if (!valid(gen) || st.active != e.id || code < 0 || st.time_wait == null)
+			return;
+		if (ms < 0)
+			return dead();
+		st.latency[e.id] = { ms, at: time() };
+		set_passthrough(false);
+		set_state('connected', null);
+	});
 }
 
 // Syncs the daemon with the config xray runs now.
@@ -728,6 +736,7 @@ choose_best = function(reason) {
 		st.time_choose = reason;	// check() takes it once the clock is set
 		return set_state('waiting_time', 'waiting for NTP to set the clock');
 	}
+	st.time_choose = null;
 	test_all((problem, inst, refused) => {
 		// the test may end mid-reload with partial data: decide once it settles
 		if (st.reloading) {
@@ -772,13 +781,14 @@ check = function() {
 	if (st.testing || st.reloading)
 		return;
 	alive();
+	let timed = time_ok();	// also without servers: it runs the updates put off
 	if (!length(index.servers)) {
 		set_state('no_servers', 'no servers in subscriptions');
 		return;
 	}
 
 	let e = server(st.active);
-	if (!time_ok())
+	if (!timed)
 		return wait_time(e);
 	if (st.time_choose) {
 		let reason = st.time_choose;
@@ -945,8 +955,9 @@ conn.publish('xvpn', {
 	},
 	test: {
 		call: () => {
-			// after a failed reload the test ports may not match what xray runs
-			if (st.reload_error)
+			// after a failed reload the test ports may not match what xray runs;
+			// before NTP sets the clock every server may look dead
+			if (st.reload_error || st.time_wait != null)
 				return { ok: false, error: 'busy' };
 			// starts a run or joins the running one: either way that run is over
 			// once status shows tests >= run (with no servers it is over at once)
@@ -984,17 +995,35 @@ conn.publish('xvpn', {
 	},
 });
 
+// automatic updates wait for the clock too (TLS fails with it behind), time_ok() runs them
+function auto_update() {
+	if (st.time_wait != null)
+		return;
+	let force = st.subs_force;
+	st.subs_force = false;
+	update_subs(force);
+}
+
 every('check', H.interval, check);
 every('rank', H.rank_interval, rank);
-every('subs', SUB_CHECK, () => update_subs(false));
+every('subs', SUB_CHECK, auto_update);
 every('watchdog', 30, watchdog);
 if (H.time_wait > 0 && !access(TIME_FLAG) && ntp_on()) {
-	st.time_wait = now() + H.time_wait;
-	timers.time = uloop.timer(H.time_wait * 1000, check);
-	set_state('waiting_time', 'waiting for NTP to set the clock');
+	let until = int(readfile(TIME_UNTIL) ?? 0);
+	if (!until) {
+		until = now() + H.time_wait;
+		write_file(TIME_UNTIL, `${until}`);
+	}
+	if (now() < until) {
+		st.time_wait = until;
+		timers.time = uloop.timer((until - now()) * 1000, check);
+		set_state('waiting_time', 'waiting for NTP to set the clock');
+	}
 }
-if (!length(index.servers))
-	update_subs(true);
+if (!length(index.servers)) {
+	st.subs_force = true;
+	auto_update();
+}
 else if (!readfile(ACTIVE_FILE))
 	// first start: pick the fastest server
 	timers.once = uloop.timer(3000, () => choose_best('startup'));

@@ -434,13 +434,14 @@ set xvpn.health.time_wait=20
 commit xvpn
 UCI
 kill $(cat /tmp/remote-18443.pid)
-rm -f /var/run/xvpn/time_synced
+rm -f /var/run/xvpn/time_synced /var/run/xvpn/time_wait	# a boot
 /etc/init.d/xvpn restart
 wait_for @.state waiting_time 15
 env -i ACTION=stratum stratum=16 /sbin/hotplug-call ntp
 sleep 9	# 3 checks
 [ "$(status @.state)" = waiting_time ] && [ "$(status @.passthrough)" = false ] || { echo "FAIL: waiting for the time"; ubus call xvpn status; exit 1; }
 not_quarantined "kill switch"
+[ "$(ubus call xvpn test | jsonfilter -e @.error)" = busy ] || { echo "FAIL: test while waiting for the time"; exit 1; }
 blocked "waiting for the time, kill switch on"
 remote 18443
 env -i ACTION=stratum stratum=2 /sbin/hotplug-call ntp
@@ -454,14 +455,18 @@ echo "OK: no quarantine before NTP sync, connected right after it"
 # time_wait s: the daemon goes on with the clock as it is
 uci set xvpn.access.killswitch=0; uci commit xvpn
 kill $(cat /tmp/remote-18443.pid)
-rm -f /var/run/xvpn/time_synced
+rm -f /var/run/xvpn/time_synced /var/run/xvpn/time_wait	# a boot
 /etc/init.d/xvpn restart
 wait_for @.state waiting_time 15
+t0=$(date +%s)
 wait_for @.passthrough true 15
 direct || { echo "FAIL: no passthrough while waiting for the time, kill switch off"; exit 1; }
 not_quarantined "kill switch off"
+/etc/init.d/xvpn restart	# a restart (uci commit, respawn) does not start the wait over
+wait_for @.state waiting_time 15
 remote 18443
 wait_cmd 30 sh -c "logread | grep -q 'no NTP sync in 20 s'"
+[ $(($(date +%s) - t0)) -le 30 ] || { echo "FAIL: the restart started the wait over"; exit 1; }
 wait_for @.state connected 15
 wait_for @.passthrough false 10
 active_is first && tunnel || { echo "FAIL: after the time wait ran out"; ubus call xvpn status; exit 1; }
