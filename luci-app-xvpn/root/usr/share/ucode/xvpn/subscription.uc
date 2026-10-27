@@ -4,7 +4,8 @@
 'use strict';
 
 import { readfile, unlink, lsdir } from 'fs';
-import { SUBS_DIR, RUN_DIR, read_json, write_json, mkdir_p, shq, run, fnv1a } from 'xvpn.util';
+import { cursor } from 'uci';
+import { SUBS_DIR, RUN_DIR, read_json, write_json, mkdir_p, shq, run, fnv1a, log, no_auto_ids, set_no_auto } from 'xvpn.util';
 import { b64, parse_link, parse_subscription } from 'xvpn.links';
 
 // Failed downloads are retried after this many seconds.
@@ -131,23 +132,6 @@ export function update(sub, proxy_port) {
 	return { changed, count: length(parsed.servers), skipped: parsed.skipped, error: null };
 };
 
-// Removes the cache and the status of subscriptions that are no longer in UCI.
-export function prune(cfg) {
-	let known = {};
-	for (let sub in cfg.subscriptions)
-		known[sub.id] = true;
-	for (let f in (lsdir(SUBS_DIR) ?? [])) {
-		let m = match(f, /^(.+)\.json$/);
-		if (m && !known[m[1]])
-			unlink(`${SUBS_DIR}/${f}`);
-	}
-	for (let f in (lsdir(RUN_DIR) ?? [])) {
-		let m = match(f, /^sub-(.+)\.(json|hdr|body)$/);
-		if (m && !known[m[1]])
-			unlink(`${RUN_DIR}/${f}`);
-	}
-};
-
 // Seconds until the subscription is due for an update (<= 0 means now).
 // cache and st: already loaded by the caller (rpcd lists every subscription)
 export function due_in(sub, cache, st) {
@@ -245,4 +229,50 @@ export function all_servers(cfg) {
 	for (let s in assign_ids(manual, 'manual'))
 		add(s, 'manual', 'manual');
 	return out;
+};
+
+// Ids of every server the subscriptions (enabled or not, before the filters) and the
+// manual links still have: a flag of health.no_auto outlives a filter or a disabled one.
+export function known_ids(cfg) {
+	let ids = {};
+	for (let sub in cfg.subscriptions)
+		for (let s in assign_ids(load_cache(sub.id)?.servers ?? [], sub.id))
+			ids[s.id] = true;
+	let manual = filter(map(cfg.manual ?? [], (l) => parse_link(l)), (s) => !s.error);
+	for (let s in assign_ids(manual, 'manual'))
+		ids[s.id] = true;
+	return ids;
+};
+
+// Drops the health.no_auto ids of servers that are gone (#60), commits only then.
+// c: a uci cursor; returns the ids dropped.
+export function prune_no_auto(c, known) {
+	let ids = no_auto_ids(c), keep = filter(ids, (id) => known[id]);
+	if (length(keep) == length(ids))
+		return [];
+	let err = set_no_auto(c, keep);
+	if (err) {
+		log(`${err}: ids of servers that are gone stay in health.no_auto`);
+		return [];
+	}
+	return filter(ids, (id) => !known[id]);
+};
+
+// Removes the cache and the status of subscriptions that are no longer in UCI
+// and the ids of servers that are gone from health.no_auto.
+export function prune(cfg) {
+	prune_no_auto(cursor(), known_ids(cfg));
+	let known = {};
+	for (let sub in cfg.subscriptions)
+		known[sub.id] = true;
+	for (let f in (lsdir(SUBS_DIR) ?? [])) {
+		let m = match(f, /^(.+)\.json$/);
+		if (m && !known[m[1]])
+			unlink(`${SUBS_DIR}/${f}`);
+	}
+	for (let f in (lsdir(RUN_DIR) ?? [])) {
+		let m = match(f, /^sub-(.+)\.(json|hdr|body)$/);
+		if (m && !known[m[1]])
+			unlink(`${RUN_DIR}/${f}`);
+	}
 };

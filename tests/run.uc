@@ -5,8 +5,8 @@
 
 import { readfile, writefile, mkdir } from 'fs';
 import { parse_link, parse_subscription } from 'xvpn.links';
-import { parse_userinfo, assign_ids, list_change } from 'xvpn.subscription';
-import { load_config } from 'xvpn.util';
+import { parse_userinfo, assign_ids, list_change, known_ids, prune_no_auto } from 'xvpn.subscription';
+import { load_config, fastest, no_auto_ids, set_no_auto } from 'xvpn.util';
 import { build_index, generate, ports_error } from 'xvpn.xrayconf';
 import { render, resolve, fix_ifnames, ifnames_applied } from 'xvpn.firewall';
 import { ipv6_up, busy_ports } from 'xvpn.host';
@@ -413,6 +413,45 @@ eq('no warning when there is nothing to fix', fix_ifnames(dcfg, ucur()), { chang
 
 eq('resolve drops names over 15 chars', resolve({ access: { networks: [], ports: [ 'lan2', 'a-very-long-port0' ], wifi: [] } }, null, ucur()),
 	{ nets: [], ports: [ 'lan2' ], errors: [] });
+
+// servers left out of auto selection (#60): best() in xvpnd skips them like the quarantined
+let lat = { a: { ms: 300 }, b: { ms: 100 }, c: { ms: 200 }, d: { ms: -1 } };
+let five = map([ 'a', 'b', 'c', 'd', 'e' ], (id) => ({ id }));
+let skip = (off) => (e) => off[e.id];
+eq('fastest', fastest(five, lat)?.id, 'b');
+eq('fastest skips no_auto', fastest(five, lat, skip({ b: true }))?.id, 'c');
+eq('fastest: dead and unmeasured are no candidates', fastest(five, lat, skip({ a: true, b: true, c: true })), null);
+
+writefile(`${confdir}/xvpn`, `
+config health 'health'
+	option interval '30'
+	list no_auto 'gone1'
+	list no_auto '${servers[0].id}'
+	list no_auto 'gone2'
+
+config manual 'manual'
+	list link '${lines[0]}'
+`);
+let xcur = () => cursor(confdir, `${OUT}/delta`);
+eq('no_auto read', no_auto_ids(xcur()), [ 'gone1', servers[0].id, 'gone2' ]);
+let mcfg = load_config(confdir);
+let man = known_ids({ subscriptions: [ { id: 'nocache' } ], manual: mcfg.manual });
+eq('known ids: the manual links, a subscription without a cache has none',
+	keys(man), [ assign_ids([ parse_link(lines[0]) ], 'manual')[0].id ]);
+eq('prune drops the ids that are gone', prune_no_auto(xcur(), { ...man, [servers[0].id]: true }), [ 'gone1', 'gone2' ]);
+eq('prune keeps the ids that are there', no_auto_ids(xcur()), [ servers[0].id ]);
+eq('nothing to prune: no commit', prune_no_auto(xcur(), { [servers[0].id]: true }), []);
+eq('other options stay', xcur().get('xvpn', 'health', 'interval'), '30');
+let xc = xcur();
+xc.set('xvpn', 'health', 'interval', '60');
+xc.save('xvpn');
+eq('uncommitted changes: no commit', [ set_no_auto(xcur(), []), cursor(confdir, `${OUT}/empty-delta`).get('xvpn', 'health', 'no_auto') ],
+	[ 'xvpn has uncommitted changes', [ servers[0].id ] ]);
+eq('uncommitted changes: nothing pruned', prune_no_auto(xcur(), {}), []);
+system([ 'rm', '-f', `${OUT}/delta/xvpn` ]);	// the change is dropped
+eq('the last id goes: the option goes', [ set_no_auto(xcur(), []), xcur().get('xvpn', 'health', 'no_auto') ], [ null, null ]);
+writefile(`${confdir}/xvpn`, "config manual 'manual'\n");
+eq('no health section: it is made', [ set_no_auto(xcur(), [ 'x' ]), no_auto_ids(xcur()) ], [ null, [ 'x' ] ]);
 
 print(`${passed} passed, ${failed} failed\n`);
 exit(failed ? 1 : 0);

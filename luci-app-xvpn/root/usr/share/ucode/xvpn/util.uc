@@ -246,3 +246,41 @@ export function load_config(confdir) {
 
 	return cfg;
 };
+
+// health.no_auto (#60): ids of the servers the daemon never chooses by itself (start,
+// failover, auto_best); a manual choice and the tests still take them. The daemon reads
+// it while it runs: init.d leaves it out of what restarts the daemon, xray does not see it.
+export function no_auto_ids(c) {
+	c ??= cursor();
+	c.load('xvpn');
+	return list(c.get('xvpn', 'health', 'no_auto'));
+};
+
+// Writes health.no_auto; an error message when it cannot. c: a uci cursor.
+export function set_no_auto(c, ids) {
+	c.load('xvpn');
+	// committing would commit someone's unfinished `uci set xvpn...` too
+	if (length(c.changes('xvpn') ?? {}))
+		return 'xvpn has uncommitted changes';
+	if (c.get('xvpn', 'health') == null)
+		c.set('xvpn', 'health', 'health');
+	if (length(ids))
+		c.set('xvpn', 'health', 'no_auto', ids);
+	else
+		c.delete('xvpn', 'health', 'no_auto');
+	c.commit('xvpn');
+	return null;
+};
+
+// The fastest server with a working latency, null when none. skip(e): left out.
+export function fastest(servers, latency, skip) {
+	let b = null;
+	for (let e in servers) {
+		let l = latency[e.id];
+		if (!l || l.ms < 0 || skip?.(e))
+			continue;
+		if (!b || l.ms < latency[b.id].ms)
+			b = e;
+	}
+	return b;
+};
