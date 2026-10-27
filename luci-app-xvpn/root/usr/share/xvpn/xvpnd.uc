@@ -11,7 +11,7 @@ import { cursor } from 'uci';
 import { readfile, unlink, access, stat } from 'fs';
 import {
 	load_config, read_json, write_json, write_file, mkdir_p, shq, update_running, procs, tree, kill_tree,
-	no_auto_ids, set_no_auto, fastest, MANUAL_FILE, ETC_DIR, RUN_DIR, CONFIG_FILE, INDEX_FILE, ACTIVE_FILE, STATE_FILE, FW_ERROR_FILE, GENERATE_ERROR_FILE, STALE_FILE
+	no_auto_ids, set_no_auto, auto_pick, MANUAL_FILE, ETC_DIR, RUN_DIR, CONFIG_FILE, INDEX_FILE, ACTIVE_FILE, STATE_FILE, FW_ERROR_FILE, GENERATE_ERROR_FILE, STALE_FILE
 } from 'xvpn.util';
 import { due_in } from 'xvpn.subscription';
 
@@ -31,6 +31,7 @@ const RELOAD_TICK = min(10, max(1, int(RELOAD_IDLE / 4))) * 1000;
 const STALL = 3 * H.interval + RELOAD_MAX + 30;	// s without health checks: see watchdog()
 const TIME_FLAG = `${RUN_DIR}/time_synced`;	// hotplug.d/ntp/50-xvpn: sysntpd has set the clock
 const TIME_UNTIL = `${RUN_DIR}/time_wait`;	// end of the wait (monotonic): restarts do not wait again
+const URL2 = (H.url2 && H.url2 != H.url) ? H.url2 : null;	// see limited_check()
 
 let index = { servers: [] }, index_raw = null;
 let prev = read_json(STATE_FILE) ?? {};
@@ -54,6 +55,7 @@ let st = {
 	last_test: prev.last_test,
 	latency: prev.latency ?? {},
 	quarantine: prev.quarantine ?? {},
+	limited: (URL2 && prev.limited_url == URL2) ? (prev.limited ?? {}) : {},	// { id: since }, see limited_check()
 	xray: {},	// see xray_down()
 	xray_choose: null,	// choose_best() decision put off while xray does not work
 	xray_choose_code: null,	// 7: the test aborted with xray_choose saw a refused test port
@@ -131,6 +133,9 @@ function load_index() {
 	for (let id in keys(st.quarantine))
 		if (!ids[id])
 			delete st.quarantine[id];
+	for (let id in keys(st.limited))
+		if (!ids[id])
+			delete st.limited[id];
 	// a running test also covers servers that have just appeared
 	if (testq)
 		for (let e in index.servers)
@@ -151,6 +156,7 @@ function save() {
 	write_json(STATE_FILE, {
 		last_switch: st.last_switch, last_test: st.last_test,
 		latency: st.latency, quarantine: st.quarantine,
+		limited: st.limited, limited_url: URL2,
 	});
 }
 
@@ -173,12 +179,12 @@ function spawn(cmd, args, cb) {
 }
 
 
-// HTTP ping through a SOCKS test port (or direct when port is null).
+// HTTP ping of url (health.url by default) through a SOCKS test port (or direct when port is null).
 // Calls cb(ms, code), ms < 0 on failure, code is the curl exit code (-1: curl did not start).
-function probe(port, cb) {
+function probe(port, cb, url) {
 	let out = `${RUN_DIR}/probe-${++probe_seq}`;
 	let cmd = sprintf("/usr/bin/curl -s -o /dev/null --connect-timeout %d --max-time %d -w '%%{http_code} %%{time_starttransfer}' %s %s > %s 2>/dev/null",
-		H.timeout, H.timeout, port ? `-x socks5h://127.0.0.1:${port}` : '', shq(H.url), shq(out));
+		H.timeout, H.timeout, port ? `-x socks5h://127.0.0.1:${port}` : '', shq(url ?? H.url), shq(out));
 
 	spawn('/bin/sh', [ '-c', cmd ], (code) => {
 		if (code < 0)
@@ -437,10 +443,20 @@ function by_hand(id) {
 	return chosen() == id && manual_id() == id;
 }
 
-// Only the servers in auto selection: the fastest out of quarantine, else out of all of them.
-function best(ignore_quarantine) {
-	let off = no_auto();
-	return fastest(index.servers, st.latency, (e) => off[e.id] || (!ignore_quarantine && quarantined(e.id)));
+// Only the servers in auto selection: the fastest out of quarantine and not limited, else
+// see auto_pick(). { server, limited } or null.
+function pick() {
+	let q = {};
+	for (let e in index.servers)
+		if (quarantined(e.id))
+			q[e.id] = true;
+	return auto_pick(index.servers, st.latency, no_auto(), q, st.limited);
+}
+
+// The best server with nothing against it, for a switch to a faster one; null when none.
+function best() {
+	let p = pick();
+	return (p && !p.limited && !quarantined(p.server.id)) ? p.server : null;
 }
 
 // Why best() found nothing, for last_error.
@@ -449,6 +465,31 @@ function no_candidates() {
 	if (n == length(index.servers))
 		return 'all servers are excluded from auto selection';
 	return n ? `no live servers in auto selection (${n} excluded)` : 'no live servers';
+}
+
+// A server that answers health.url may let through only the sites on its whitelist (#61):
+// tests also open health.url2 through it, by domain on another CDN. When that fails twice
+// in a row, the server is limited: auto selection leaves it while there are others
+// (auto_pick()), the user may choose it by hand. No quarantine, the checks of the
+// active server go on with health.url alone: it works, maybe it is the CDN that does not.
+// The next test gives the verdict again.
+function limited_check(e, gen, cb, again) {
+	probe(e.test_port, (ms, code) => {
+		// the test went on without us or the server went away: no verdict; 7 is xray's
+		if (testq == null || code < 0 || code == 7 || !valid(gen) || !server(e.id))
+			return cb();
+		if (ms < 0 && !again)
+			return limited_check(e, gen, cb, true);
+		if (ms < 0 && !st.limited[e.id]) {
+			st.limited[e.id] = time();
+			log(`"${e.name}" is limited: ${URL2} fails through it (curl ${code})`);
+		}
+		else if (ms >= 0 && st.limited[e.id]) {
+			delete st.limited[e.id];
+			log(`"${e.name}" is no longer limited`);
+		}
+		cb();
+	}, URL2);
 }
 
 function test_all(cb) {
@@ -517,7 +558,6 @@ function test_all(cb) {
 				continue;	// gone from the list meanwhile
 			running++;
 			probe(e.test_port, (ms, code) => {
-				running--;
 				if (testq !== q)
 					return;
 				alive();
@@ -527,12 +567,20 @@ function test_all(cb) {
 					if (server(id))
 						push(q.queue, id);	// went through the old config: measure again
 				}
-				else if (ms >= 0)
+				else if (ms >= 0) {
 					st.latency[id] = { ms, at: time() };
+					// the slot stays taken: one curl per slot, as without url2
+					if (URL2)
+						return limited_check(e, gen, () => {
+							running--;
+							next();
+						});
+				}
 				else if (code == 7)
 					q.refused = true;	// the test port refused: xray, not the server
 				else
 					q.failed[id] = time();
+				running--;
 				next();
 			});
 		}
@@ -817,7 +865,7 @@ choose_best = function(reason) {
 		if (problem)
 			return xray_down(problem, inst, reason);
 		xray_up();
-		let b = best() ?? best(true);
+		let p = pick(), b = p?.server;
 		if (!b) {
 			// a server left out of auto selection that the user chose stays while it answers
 			let e = server(st.active);
@@ -833,14 +881,30 @@ choose_best = function(reason) {
 			return;
 		}
 		set_passthrough(false);
+		let why = p.limited ? `only limited servers answer: ${URL2} fails through every one` : null;
 		if (b.id == st.active && chosen() == b.id) {
 			st.fails = 0;
-			set_state('connected', null);
+			set_state('connected', why);
 			return;
 		}
-		switch_to(b.id, reason);
+		switch_to(b.id, why ? `${reason}; ${why}` : reason);
 	});
 };
+
+// A test found the server the daemon chose limited: another one, as when it is left out
+// of auto selection (check()). One chosen by hand stays. True when it switches.
+function leave_limited() {
+	let e = server(st.active), b = best();
+	if (!e || !st.limited[e.id] || by_hand(e.id) || !b || st.reloading || st.reload_pending || st.reload_error)
+		return false;
+	let why = `"${e.name}" is limited: ${URL2} fails through it`;
+	// measured at an old address (cli.uc update): choose again at the new ones
+	if (access(STALE_FILE))
+		choose_best(why);
+	else
+		switch_to(b.id, why);
+	return true;
+}
 
 function failover(reason) {
 	if (st.active)
@@ -940,7 +1004,7 @@ function rank() {
 	if (st.testing || st.reloading || st.reload_error || st.state != 'connected' || st.time_wait != null)
 		return;
 	test_all((problem) => {
-		if (problem || !H.auto_best || st.reloading)
+		if (problem || st.reloading || leave_limited() || !H.auto_best)
 			return;
 		// a server out of auto selection the user chose is not left for a faster one
 		if (no_auto()[st.active] && by_hand(st.active))
@@ -983,7 +1047,7 @@ function status() {
 		id: e.id, name: e.name, proto: e.proto, address: e.address, port: e.port,
 		sub: e.sub, sub_name: e.sub_name,
 		latency: st.latency[e.id]?.ms, tested: st.latency[e.id]?.at,
-		quarantined: quarantined(e.id), auto: !off[e.id],
+		quarantined: quarantined(e.id), auto: !off[e.id], limited: !!st.limited[e.id],
 	}));
 	// cli.uc could not apply the rules and blocked the clients (fail closed)
 	// and a reload that failed: what xray runs may be not what the daemon wants
@@ -995,7 +1059,7 @@ function status() {
 		state: error ? 'error' : st.state, active: st.active, since: st.since, fails: st.fails,
 		testing: st.testing, tests: st.tests, updating: st.updating || !!update_running(), passthrough: st.passthrough,
 		last_error: error ?? st.last_error, last_switch: st.last_switch, last_test: st.last_test,
-		xray_restarts: st.xray.restarts ?? 0, servers,
+		xray_restarts: st.xray.restarts ?? 0, url2: URL2, servers,
 	};
 }
 
@@ -1059,7 +1123,10 @@ conn.publish('xvpn', {
 			// starts a run or joins the running one: either way that run is over
 			// once status shows tests >= run (with no servers it is over at once)
 			let run = st.tests + 1;
-			test_all(null);
+			test_all((problem) => {
+				if (!problem && !st.reloading)
+					leave_limited();
+			});
 			return { ok: true, run };
 		},
 	},

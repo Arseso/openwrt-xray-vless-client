@@ -213,6 +213,9 @@ export function load_config(confdir) {
 		},
 		health: {
 			url: h.url || 'https://www.gstatic.com/generate_204',
+			// tests and choices also check it through the servers that answer url (#61):
+			// another CDN, by domain; 'off' turns it off
+			url2: (h.url2 == 'off' || h.url2 == '0') ? null : (h.url2 || 'https://cp.cloudflare.com/generate_204'),
 			interval: num(h.interval, 30),
 			timeout: num(h.timeout, 5),
 			fail_threshold: num(h.fail_threshold, 3),
@@ -285,4 +288,17 @@ export function fastest(servers, latency, skip) {
 			b = e;
 	}
 	return b;
+};
+
+// The server the daemon chooses by itself: the fastest in auto selection (off: { id: true },
+// no_auto) out of quarantine (q) and not limited (#61: url2 fails through it). Else one
+// in quarantine that answered since, else a limited one: url2 failing everywhere is
+// likely its CDN, and a server with some sites beats none. { server, limited } or null.
+export function auto_pick(servers, latency, off, q, limited) {
+	for (let skip in [ [ q, limited ], [ limited ], [ q ], [] ]) {
+		let b = fastest(servers, latency, (e) => off[e.id] || length(filter(skip, (s) => s[e.id])) > 0);
+		if (b)
+			return { server: b, limited: !!limited[b.id] };
+	}
+	return null;
 };

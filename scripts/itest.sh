@@ -84,6 +84,8 @@ ip -n wan route add default via 45.0.0.1
 sysctl -qw net.ipv4.ip_forward=1
 mkdir -p /tmp/www; echo hello > /tmp/www/index.html
 ip netns exec wan uhttpd -f -p 45.0.0.2:80 -h /tmp/www >/dev/null 2>&1 &
+# health.url2 (#61) by domain: the remotes resolve it, a whitelisting one drops it
+echo '45.0.0.2 check2.test' >> /etc/hosts
 
 direct() { ip netns exec cl ping -c1 -W1 45.0.0.2 >/dev/null 2>&1; }
 tunnel() { [ "$(ip netns exec cl curl -s -m 5 http://45.0.0.2/)" = hello ]; }
@@ -123,12 +125,13 @@ SH
 direct || { echo "FAIL: test network: client cannot reach wan without xvpn"; exit 1; }
 echo "OK: test network, client goes direct without xvpn"
 
-remote() { # port [freedom settings]
+remote() { # port [freedom settings] [domain it drops: a whitelist without it]
 	_fr=${2:-}; [ -n "$_fr" ] || _fr='{}'
+	_drop=${3:+'"routing": { "rules": [ { "domain": [ "full:'$3'" ], "outboundTag": "drop" } ] },'}
 	cat > /tmp/remote-$1.json <<JSON
 { "inbounds": [ { "listen": "127.0.0.1", "port": $1, "protocol": "vless",
-    "settings": { "clients": [ { "id": "$UUID" } ], "decryption": "none" } } ],
-  "outbounds": [ { "protocol": "freedom", "settings": $_fr } ] }
+    "settings": { "clients": [ { "id": "$UUID" } ], "decryption": "none" } } ], $_drop
+  "outbounds": [ { "protocol": "freedom", "settings": $_fr }, { "protocol": "blackhole", "tag": "drop" } ] }
 JSON
 	xray run -c /tmp/remote-$1.json >/dev/null 2>&1 &
 	echo $! > /tmp/remote-$1.pid
@@ -170,6 +173,7 @@ add_list xvpn.access.network=lan
 add_list xvpn.access.port=vc0
 set xvpn.health.interval=3
 set xvpn.health.url=http://45.0.0.2/
+set xvpn.health.url2=http://check2.test/
 set xvpn.health.timeout=4
 set xvpn.health.fail_threshold=2
 set xvpn.health.reload_idle=15
@@ -701,6 +705,45 @@ wait_cmd 30 count_is 2
 wait_for @.state connected 30
 active_is second || { echo "FAIL: not back on second"; ubus call xvpn status; exit 1; }
 echo "OK: back in auto selection"
+
+# #61: "limited" answers health.url and drops the connections to health.url2 (a whitelist).
+# It is the fastest (second is slow), yet the start does not choose it; the status says why
+limited_of() { status "@.servers[@.name='$1'].limited"; }
+slow 18444; remote 18450 '' check2.test
+uci add_list xvpn.manual.link="$(link 18450 limited)"; uci commit xvpn
+/etc/init.d/xvpn stop
+rm -f /etc/xvpn/active /var/run/xvpn/state.json
+/etc/init.d/xvpn start
+wait_cmd 30 count_is 3
+wait_cmd 30 tests_done 1	# the choice at start: its test, not a check of the first active one
+wait_for @.state connected 40
+[ "$(limited_of limited)" = true ] && [ "$(limited_of second)" = false ] && [ "$(status @.url2)" = http://check2.test/ ] \
+	&& [ "$(latency limited)" -ge 0 ] && [ "$(latency limited)" -lt "$(latency second)" ] && [ "$(status "@.servers[@.name='limited'].quarantined")" = false ] \
+	|| { echo "FAIL: limited is not marked"; ubus call xvpn status; exit 1; }
+active_is second || { echo "FAIL: start chose $(active_name), not second"; ubus call xvpn status; exit 1; }
+logread | grep -q '"limited" is limited: http://check2.test/ fails' || { echo "FAIL: no log line about limited"; exit 1; }
+echo "OK: a server that fails health.url2 is limited, the start chooses a slower one, not quarantined"
+# chosen by hand it stays: the checks go on with health.url, a test does not leave it
+lid=$(id_of limited)
+wait_cmd 15 select_ok "$lid"
+wait_for @.state connected 30
+wait_cmd 20 active_is limited
+test_all	# its decision is taken as the run ends
+active_is limited && [ "$(status @.state)" = connected ] || { echo "FAIL: limited chosen by hand was left"; ubus call xvpn status; exit 1; }
+echo "OK: a limited server can be chosen by hand"
+# the daemon's choice (as after an update that made it limited): a test leaves it
+rm /etc/xvpn/active_manual
+test_all
+wait_cmd 20 active_is second
+wait_for @.state connected 30
+status @.last_switch.reason | grep -q 'is limited' || { echo "FAIL: switch reason: $(status @.last_switch.reason)"; exit 1; }
+echo "OK: a test leaves a limited server the daemon chose"
+kill $(cat /tmp/remote-18450.pid) $(cat /tmp/remote-18444.pid); remote 18444
+uci del_list xvpn.manual.link="$(link 18450 limited)"; uci commit xvpn
+reload_config
+wait_cmd 30 count_is 2
+wait_for @.state connected 30
+active_is second || { echo "FAIL: not back on second"; ubus call xvpn status; exit 1; }
 
 # subscription over http (curl reports file:// as HTTP 0), busybox has no base64
 # LuCI: a new subscription; its servers go before the manual links, so every test

@@ -14,7 +14,7 @@ const DEFAULTS = {
 	xray_bin: '/usr/bin/xray', loglevel: 'warning',
 	tproxy_port: 12345, dns_port: 10853, api_port: 10085, test_port_base: 20000,
 	client_mark: '0x01000000', tproxy_mark: '0x02000000', route_table: 100,
-	url: 'https://www.gstatic.com/generate_204', interval: 30, timeout: 5, fail_threshold: 3,
+	url: 'https://www.gstatic.com/generate_204', url2: 'https://cp.cloudflare.com/generate_204', interval: 30, timeout: 5, fail_threshold: 3,
 	rank_interval: 600, hysteresis: 150, quarantine: 300, concurrency: 4,
 };
 
@@ -77,6 +77,16 @@ return view.extend({
 		o.value('http://www.msftconnecttest.com/connecttest.txt');
 		o.validate = (sid, v) => !v || /^https?:\/\/[^\s/?#]+\S*$/i.test(v.trim()) || _('Enter an http:// or https:// URL');
 		o.write = (sid, v) => uci.set('xvpn', sid, 'url', v.trim());
+
+		// #61: servers that let through only the sites on their whitelist answer the first URL
+		o = s.option(form.Value, 'url2', _('Second check URL'),
+			_('Opened through every server that answers the check URL when all servers are tested and a server is chosen. A server that fails it is marked limited and is not chosen automatically while there are others; you can still choose it by hand. Use a URL by domain on another CDN than the check URL. "off" turns this check off.'));
+		o.placeholder = DEFAULTS.url2;
+		o.value('https://cp.cloudflare.com/generate_204');
+		o.value('https://www.gstatic.com/generate_204');
+		o.value('off', _('off'));
+		o.validate = (sid, v) => !v || v.trim() == 'off' || /^https?:\/\/[^\s/?#]+\S*$/i.test(v.trim()) || _('Enter an http:// or https:// URL or "off"');
+		o.write = (sid, v) => uci.set('xvpn', sid, 'url2', v.trim());
 
 		o = s.option(form.Value, 'interval', _('Check interval, s'),
 			_('How often the active server is checked.'));
