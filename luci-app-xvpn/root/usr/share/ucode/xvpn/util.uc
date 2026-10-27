@@ -160,6 +160,20 @@ function list(v) {
 	return type(v) == 'array' ? v : [ v ];
 }
 
+const DEFAULT_DNS = 'https://cloudflare-dns.com/dns-query';
+
+// An IP/host goes as <dns_server>:53 through the tunnel, https:// and tcp:// through the
+// xray DNS module. Other xray schemes (https+local://, quic+local://, …) would query
+// from the router directly, around the tunnel: the default instead.
+function dns_server(v) {
+	if (!v)
+		return DEFAULT_DNS;
+	if (index(v, '://') < 0 || match(v, /^(https|tcp):\/\/[^\/]/))
+		return v;
+	log(`dns_server ${v}: only https:// and tcp:// go through the tunnel, using ${DEFAULT_DNS}`);
+	return DEFAULT_DNS;
+}
+
 // Loads /etc/config/xvpn with defaults applied and numbers converted.
 export function load_config(confdir) {
 	let c = cursor(confdir);
@@ -182,7 +196,7 @@ export function load_config(confdir) {
 			client_mark: num(m.client_mark, 0x01000000),
 			tproxy_mark: num(m.tproxy_mark, 0x02000000),
 			route_table: num(m.route_table, 100),
-			sniffing: bool(m.sniffing, false),
+			sniffing: bool(m.sniffing, true),
 		},
 		access: {
 			networks: list(a.network),
@@ -191,7 +205,7 @@ export function load_config(confdir) {
 			killswitch: bool(a.killswitch, true),
 			ipv6: (a.ipv6 == 'tunnel') ? 'tunnel' : 'block',
 			dns_hijack: bool(a.dns_hijack, true),
-			dns_server: a.dns_server || '1.1.1.1',
+			dns_server: dns_server(a.dns_server),
 		},
 		health: {
 			url: h.url || 'https://www.gstatic.com/generate_204',

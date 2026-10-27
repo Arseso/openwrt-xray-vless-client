@@ -44,6 +44,7 @@
    ┌──────────────── xray (procd instance) ─────────────────┐
    │ inbound tproxy :12345 ─┐                                │
    │ inbound dns    :10853 ─┼─► outbound srv-<активный>  ──► │──► VPN-сервер
+   │   (dns_server — URL: dns-out → DNS-модуль xray, DoH)   │
    │ inbound test-i 127.0.0.1:20000+i ─► outbound srv-i      │
    │ inbound api    127.0.0.1:10085 (stats)                  │
    └─────────────────────────────────────────────────────────┘
@@ -117,7 +118,7 @@ config general 'main'
 	option client_mark '0x01000000'    # метка «клиент VPN» (вне масок mwan3 0x3F00 и pbr 0x00ff0000)
 	option tproxy_mark '0x02000000'    # метка для ip rule → table 
 	option route_table '100'
-	option sniffing '0'                # 1 = подменять IP на домен (http/tls/quic)
+	option sniffing '1'                # подменять IP на домен (http/tls/quic): многие серверы не пускают к IP
 
 config access 'access'
 	list network 'guest'               # целые сети OpenWrt
@@ -126,7 +127,8 @@ config access 'access'
 	option killswitch '1'
 	option ipv6 'block'                # block | tunnel
 	option dns_hijack '1'
-	option dns_server '1.1.1.1'        # DNS, куда идут запросы клиентов через туннель
+	option dns_server 'https://cloudflare-dns.com/dns-query'  # DNS клиентов через туннель: URL — DoH
+	                                   # DNS-модулем xray (по домену), IP — пересылка на <IP>:53
 
 config health 'health'
 	option url 'https://www.gstatic.com/generate_204'
@@ -239,7 +241,7 @@ table inet xvpn {
 ip rule add fwmark TPROXY/TPROXY table 100 ; ip route add local default dev lo table 100   (и -6)
 ```
 
-`ip rule` с fwmark добавляется, только если его нет, а дубли от нечистой остановки удаляются после этого: момента без правила нет (busybox `ip` не фильтрует `rule list`, поэтому правила считаются по выводу).
+`ip rule` и маршрут нужны только tproxy: они ставятся в `full` до `nft -f` (маршрут без меток безвреден, момента с метками без маршрута нет) и снимаются после перехода в `block`, `passthrough` и `minimal` — в `fw-guard` при загрузке lo ещё не поднят, и `ip route … dev lo` падал бы с «Nexthop device is not up». `ip rule` с fwmark добавляется, только если его нет, а дубли от нечистой остановки удаляются после этого (busybox `ip` не фильтрует `rule list`, поэтому правила считаются по выводу). В `block` в `guard_input` идут только допустимые порты (без дублей): `block` — откат неудавшегося `full`, и неверный `tproxy_port` не должен ронять и его до `minimal`, который не покрывает порты моста и SSID.
 
 Точки доступа → имена устройств (`resolve` в `firewall.uc`, при каждом `fw-*`):
 - **Сеть** → L3-устройство и устройство из `network.interface dump` (когда netifd её поднял) плюс `network.<имя>.device` из UCI (до netifd — guard при загрузке); `@алиасы` пропускаются. У Wi-Fi-only сети (без `device`) L3-устройство — сам SSID, поэтому её SSID обрабатываются как выбранные SSID.
@@ -331,6 +333,7 @@ LuCI обращается к демону только через rpcd `luci.xvp
 - Только полный туннель (раздельная маршрутизация — в идеях).
 - Трафик самого роутера в VPN не идёт.
 - DNS клиентов VPN идёт на один `dns_server` через туннель — локальные имена (`*.lan`) у них не резолвятся.
+- Серверы, которые не пускают к IP-адресам назначения (проверено на AX3000T с подпиской из 18 серверов, 2026-10-27: к IP не пропускал ни один), работают только по домену: sniffing (`main.sniffing`, по умолчанию `1`) подставляет домен из HTTP/TLS/QUIC, DNS идёт DoH по домену (`dns_server` — URL), запросы не A/AAAA (TXT, HTTPS) отбрасываются. `dns_server` — IP или хост (`<dns_server>:53` через туннель), `https://` или `tcp://` (DNS-модуль); прочие схемы xray (`https+local://`, `quic+local://`) ходили бы с роутера напрямую — вместо них берётся значение по умолчанию. С `dns_hijack=0` DNS клиентов идёт в tproxy как обычный UDP по IP и через такие серверы не пройдёт. Прочий UDP и TCP без домена (игры, VoIP по IP) через такие серверы не пройдёт. Health-check ходит по домену (`socks5h`) и этого не видит.
 - xray 25.1.30: нет VLESS `encryption` (ML-KEM), hysteria2, TUN. Решается подменой бинаря (`main.xray_bin`).
 
 ## 11. Идеи на будущее
