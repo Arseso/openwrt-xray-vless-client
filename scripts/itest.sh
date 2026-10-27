@@ -740,7 +740,8 @@ status @.last_switch.reason | grep -q 'is limited' || { echo "FAIL: switch reaso
 echo "OK: a test leaves a limited server the daemon chose"
 kill $(cat /tmp/remote-18450.pid) $(cat /tmp/remote-18444.pid); remote 18444
 uci del_list xvpn.manual.link="$(link 18450 limited)"; uci commit xvpn
-reload_config
+# not reload_config: its md5 of the configs dates from before the link was added, the same as now
+/etc/init.d/xvpn reload
 wait_cmd 30 count_is 2
 wait_for @.state connected 30
 active_is second || { echo "FAIL: not back on second"; ubus call xvpn status; exit 1; }
