@@ -25,6 +25,8 @@ export const FW_WARN_FILE = '/var/run/xvpn/fw_warn';
 export const FW_LOCK_FILE = '/var/lock/xvpn-fw';
 // generate ran out of time and kept the running config: the daemon counts the reload failed
 export const GENERATE_ERROR_FILE = '/var/run/xvpn/generate_error';
+// an update changed servers xray does not use now: the next reload (generate) applies them
+export const STALE_FILE = '/var/run/xvpn/stale';
 
 export function read_json(path) {
 	let s = readfile(path);

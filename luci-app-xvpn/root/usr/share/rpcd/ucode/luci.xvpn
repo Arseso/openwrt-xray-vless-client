@@ -139,7 +139,7 @@ const methods = {
 			return { links: map(slice(links, 0, 200), (l) => {
 				let s = (type(l) == 'string') ? parse_link(l) : { error: 'not a link' };
 				return s.error ? { error: s.error }
-					: { id: s.id, name: s.name, proto: s.proto, address: s.address, port: s.port };
+					: { id: s.hash, name: s.name, proto: s.proto, address: s.address, port: s.port };
 			}) };
 		}
 	},
