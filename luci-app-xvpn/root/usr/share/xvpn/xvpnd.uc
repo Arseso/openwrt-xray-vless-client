@@ -11,7 +11,7 @@ import { cursor } from 'uci';
 import { readfile, unlink, access, stat } from 'fs';
 import {
 	load_config, read_json, write_json, write_file, mkdir_p, shq, update_running, procs, tree, kill_tree,
-	no_auto_ids, set_no_auto, fastest, MANUAL_FILE, ETC_DIR, RUN_DIR, CONFIG_FILE, INDEX_FILE, ACTIVE_FILE, STATE_FILE, FW_ERROR_FILE, GENERATE_ERROR_FILE, STALE_FILE
+	no_auto_ids, set_no_auto, fastest, retry_delay, MANUAL_FILE, ETC_DIR, RUN_DIR, CONFIG_FILE, INDEX_FILE, ACTIVE_FILE, STATE_FILE, FW_ERROR_FILE, GENERATE_ERROR_FILE, STALE_FILE
 } from 'xvpn.util';
 import { due_in } from 'xvpn.subscription';
 
@@ -59,7 +59,7 @@ let st = {
 	xray_choose_code: null,	// 7: the test aborted with xray_choose saw a refused test port
 	time_wait: null,	// waiting for NTP until then (monotonic), see time_ok()
 	time_choose: null,	// choose_best() decision put off until the clock is set
-	choose_at: null,	// last choose_best() test (monotonic), see check()
+	dead: null,	// no live servers: { delay, next } (monotonic) of the next test of all, see check()
 	subs_force: false,	// the first update at start, see auto_update()
 };
 let test_waiters = [], testq = null, test_resume = null, test_abort = null;
@@ -121,6 +121,7 @@ function load_index() {
 	catch (e) { }
 	index = idx ?? { servers: [] };
 	st.gen++;
+	st.dead = null;	// other servers: test them at once
 
 	let ids = {};
 	for (let e in index.servers)
@@ -159,6 +160,9 @@ function set_state(s, err) {
 		log(`state: ${st.state} -> ${s}${err ? ` (${err})` : ''}`);
 	st.state = s;
 	st.last_error = err;
+	// a live server or WAN back: no pause before the next test of all (see check())
+	if (s == 'connected' || s == 'wan_down')
+		st.dead = null;
 }
 
 // When the process cannot be started (out of memory), cb gets -1 a second later.
@@ -793,7 +797,6 @@ choose_best = function(reason) {
 		return set_state('waiting_time', 'waiting for NTP to set the clock');
 	}
 	st.time_choose = null;
-	st.choose_at = now();
 	// an update moved servers xray does not use now (cli.uc update): measure them at their
 	// new addresses. A reload drops the connections, but the choice may switch anyway
 	if (access(STALE_FILE) && !st.reloading && !st.reload_error) {
@@ -827,6 +830,9 @@ choose_best = function(reason) {
 				set_state('connected', `${no_candidates()}, staying on "${e.name}"`);
 				return;
 			}
+			// the next test of all servers after a pause, longer each time (see check())
+			let delay = retry_delay(st.dead?.delay, H.interval, H.retry_max);
+			st.dead = { delay, next: now() + delay };
 			set_state('no_servers', no_candidates());
 			if (!cfg.access.killswitch)
 				set_passthrough(true);
@@ -847,6 +853,15 @@ function failover(reason) {
 		st.quarantine[st.active] = time() + H.quarantine;
 	set_state('failover', reason);
 	choose_best(reason);
+}
+
+// The active server answers.
+function up(e, ms) {
+	st.latency[e.id] = { ms, at: time() };
+	xray_up();
+	st.fails = 0;
+	set_passthrough(false);
+	set_state('connected', null);
 }
 
 check = function() {
@@ -892,26 +907,28 @@ check = function() {
 	let m = manual_id();
 	if (m && m != e.id && server(m) && !st.reload_error && !st.reload_pending)
 		return switch_to(m, 'chosen by hand, back in the list', true);
-	// left out of auto selection and not chosen by hand (the daemon chose it before, or
-	// generate's fallback: nothing chosen yet, the chosen one gone): choose again; while
-	// there is nothing to choose as often as a dead server fails over. Not after a failed
-	// reload: the active one is then what xray runs, not what was chosen (reload_failed())
-	if (no_auto()[e.id] && !by_hand(e.id) && !st.reload_error && !st.reload_pending) {
-		if (st.state != 'no_servers' || now() - (st.choose_at ?? 0) >= H.interval * H.fail_threshold)
-			choose_best(`"${e.name}" is excluded from auto selection`);
+	let off = no_auto()[e.id] && !by_hand(e.id);
+	// nothing to choose from (#12): the next test of all servers once the pause is over
+	// (retry_delay(), reset by set_state(), load_index() and the user); meanwhile only the
+	// active one is probed, one curl a check: back as soon as it answers
+	if (st.state == 'no_servers' && st.dead && now() < st.dead.next) {
+		if (!off)
+			probe(e.test_port, (ms, code) => {
+				if (valid(gen) && st.active == e.id && ms >= 0 && st.state == 'no_servers')
+					up(e, ms);
+			});
 		return;
 	}
+	// left out of auto selection and not chosen by hand (the daemon chose it before, or
+	// generate's fallback: nothing chosen yet, the chosen one gone): choose again. Not after
+	// a failed reload: the active one is then what xray runs, not what was chosen (reload_failed())
+	if (off && !st.reload_error && !st.reload_pending)
+		return choose_best(`"${e.name}" is excluded from auto selection`);
 	probe(e.test_port, (ms, code) => {
 		if (!valid(gen) || st.active != e.id || code < 0)
 			return;
-		if (ms >= 0) {
-			st.latency[e.id] = { ms, at: time() };
-			xray_up();
-			st.fails = 0;
-			set_passthrough(false);
-			set_state('connected', null);
-			return;
-		}
+		if (ms >= 0)
+			return up(e, ms);
 		xray_check(code, (problem, inst) => {
 			if (!valid(gen) || st.active != e.id || problem == XRAY_UNKNOWN)
 				return;
@@ -996,6 +1013,9 @@ function status() {
 		testing: st.testing, tests: st.tests, updating: st.updating || !!update_running(), passthrough: st.passthrough,
 		last_error: error ?? st.last_error, last_switch: st.last_switch, last_test: st.last_test,
 		xray_restarts: st.xray.restarts ?? 0, servers,
+		// no live servers: the next test of all (router clock) and the pause before it
+		retry: (st.state == 'no_servers' && st.dead)
+			? { at: time() + max(0, st.dead.next - now()), delay: st.dead.delay } : null,
 	};
 }
 
@@ -1059,7 +1079,13 @@ conn.publish('xvpn', {
 			// starts a run or joins the running one: either way that run is over
 			// once status shows tests >= run (with no servers it is over at once)
 			let run = st.tests + 1;
-			test_all(null);
+			// no live servers: choose from this run, the pause starts over (see check())
+			if (st.state == 'no_servers' && st.dead && !st.testing && !st.reloading) {
+				st.dead = null;
+				choose_best('test by hand');
+			}
+			else
+				test_all(null);
 			return { ok: true, run };
 		},
 	},
@@ -1098,8 +1124,10 @@ conn.publish('xvpn', {
 				return { ok: false, error: err };
 			log(`"${e.name}" ${auto ? 'takes part in' : 'is excluded from'} auto selection`);
 			// nothing to choose from until now: this one may be
-			if (auto && st.state == 'no_servers' && !st.testing && !st.reloading)
+			if (auto && st.state == 'no_servers' && !st.testing && !st.reloading) {
+				st.dead = null;
 				choose_best(`"${e.name}" is back in auto selection`);
+			}
 			// the daemon chose it: another one now, one chosen by hand stays (see check())
 			if (!auto && id == st.active && !by_hand(id) && !st.reload_error)
 				choose_best(`"${e.name}" is excluded from auto selection`);

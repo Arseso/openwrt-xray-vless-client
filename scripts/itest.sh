@@ -174,6 +174,7 @@ set xvpn.health.timeout=4
 set xvpn.health.fail_threshold=2
 set xvpn.health.reload_idle=15
 set xvpn.health.reload_retry=5
+set xvpn.health.retry_max=12
 add_list xvpn.manual.link='$(link 18444 second)'
 add_list xvpn.manual.link='$(link 18443 first)'
 commit xvpn
@@ -565,6 +566,25 @@ wait_for @.state connected 60
 [ "$(active_name)" = second ] || { echo "FAIL: failover expected second, got $(active_name)"; exit 1; }
 echo "OK: failover to the other server"
 logread | grep xvpn | grep -E 'switching|state' | tail -5
+
+# no live servers (#12): the test of all again after a pause, twice as long each time
+# (interval 3 s, retry_max 12 s): over 30 s far fewer runs than the 10 checks, the pause in
+# the status; a server back is taken by the next test at the latest
+kill $(cat /tmp/remote-18444.pid)
+wait_for @.state no_servers 30
+t0=$(status @.tests)
+sleep 30
+n=$(($(status @.tests) - t0))
+[ "$n" -ge 2 ] && [ "$n" -le 5 ] || { echo "FAIL: no live servers: $n tests in 30 s"; diag; exit 1; }
+# one call: during a test the state is failover and there is no retry
+paused() { _s=$(ubus call xvpn status); at=$(echo "$_s" | jsonfilter -e @.retry.at); [ "$(echo "$_s" | jsonfilter -e @.retry.delay)" = 12 ] && [ "$at" -ge "$(date +%s)" ]; }
+wait_cmd 10 paused
+echo "OK: no live servers: $n tests of all in 30 s, the pause grows to retry_max"
+remote 18443
+wait_cmd $((at - $(date +%s) + 10)) active_is first
+wait_for @.state connected 10
+[ -z "$(status @.retry)" ] || { echo "FAIL: the pause is left after connecting"; exit 1; }
+echo "OK: a server back is taken at the next test, the pause is reset"
 
 # servers left out of auto selection (#60). "third" is the fastest: the remotes of the
 # others pass requests on in 20-byte pieces 30 ms apart (freedom fragment), ~0.1 s each.
