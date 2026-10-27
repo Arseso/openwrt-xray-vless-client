@@ -4,7 +4,7 @@
 'use strict';
 
 import { cursor } from 'uci';
-import { unlink } from 'fs';
+import { readfile, unlink } from 'fs';
 import { NFT_FILE, VAR_DIR, RUN_DIR, FW_ROUTE_FILE, mkdir_p, write_file, write_json, read_json, run, log } from 'xvpn.util';
 import { ipv6_up } from 'xvpn.host';
 
@@ -292,11 +292,32 @@ export function render(cfg, res, opts) {
 	return join('\n', r);
 };
 
-// How many lines of `ip rule list` send the mark to the table: ip prints the mark without
-// leading zeros; busybox ip has no selectors in `rule list`, so the full output is parsed.
-export function rule_count(out, mark, table) {
-	let mk = sprintf('0x%x', mark), re = regexp(`fwmark ${mk}/${mk} lookup ${table}( |$)`);
-	return length(filter(split(out ?? '', '\n'), (l) => match(l, re)));
+// The names `ip rule list` prints for the table: its number, or its name when
+// /etc/iproute2/rt_tables has one (pbr and users name their tables there); names that
+// are not [A-Za-z0-9_.-] are skipped.
+export function table_names(rt, table) {
+	let r = [ `${table}` ];
+	for (let l in split(rt ?? '', '\n')) {
+		let f = match(trim(l), /^([0-9]+)[ \t]+([A-Za-z0-9_.-]+)([ \t#]|$)/);
+		if (f && +f[1] == table && !(f[2] in r))
+			push(r, f[2]);
+	}
+	return r;
+};
+
+// Prefs of the rules that send the mark to the table and select nothing else (ours,
+// `from all`): a rule with `from 192.168.1.5`, iif and so on is someone's. ip prints the
+// mark without leading zeros; busybox ip has no selectors in `rule list`, so the full
+// output is parsed. names: table_names().
+export function rule_prefs(out, mark, names) {
+	let mk = sprintf('0x%x', mark), r = [];
+	let re = regexp(`^([0-9]+):[ \t]+from all fwmark ${mk}/${mk} lookup (${join('|', map(names, (n) => replace(n, '.', '\\.')))})[ \t]*$`);
+	for (let l in split(out ?? '', '\n')) {
+		let f = match(l, re);
+		if (f)
+			push(r, +f[1]);
+	}
+	return r;
 };
 
 // The mark/table pairs to take down: the applied ones (FW_ROUTE_FILE) other than cur, and cur
@@ -316,42 +337,55 @@ export function stale_routes(applied, cur, add) {
 	return r;
 };
 
-// v6: false skips adding the IPv6 rule and route (IPv6 is off, ip -6 would fail).
 // After a change of main.tproxy_mark or main.route_table the rule and route with the previous
-// values are taken down too: FW_ROUTE_FILE lists what may be in place. It is written before
-// the rules are added, so an interrupted run leaves nothing it does not know of; it is in
+// values are taken down too: FW_ROUTE_FILE lists what may be in place. route_add() writes it
+// before it adds the rules, so an interrupted run leaves nothing it does not know of; it is in
 // tmpfs, as are the rules: without it (boot, an upgrade from before it) only cur is ours.
-function routing(cfg, add, v6) {
-	let m = cfg.main, cur = { mark: m.tproxy_mark, table: m.route_table };
-	let applied = read_json(FW_ROUTE_FILE), stale = stale_routes(applied, cur, add);
-	if (add) {
-		mkdir_p(RUN_DIR);
-		write_json(FW_ROUTE_FILE, [ cur, ...map(stale, (p) => ({ mark: p.mark, table: p.table })) ]);
+// The rules are deleted by pref: `ip rule del fwmark X/X table T` could take someone's rule
+// that has one more selector.
+function cur_route(cfg) {
+	return { mark: cfg.main.tproxy_mark, table: cfg.main.route_table };
+}
+
+function del_rules(fam, out, p, rt) {
+	let tm = hex32(p.mark);
+	for (let pref in rule_prefs(out, p.mark, table_names(rt, p.table)))
+		run(`ip ${fam} rule del pref ${pref} fwmark ${tm}/${tm} table ${p.table} 2>/dev/null`);
+}
+
+// Adds the rule and route of the current pair (and drops its duplicates left from an unclean
+// stop); the stale ones stay until the new nft rules are in: the old ones still set their mark.
+// v6: false skips IPv6 (it is off, ip -6 would fail).
+function route_add(cfg, v6) {
+	let cur = cur_route(cfg), rt = readfile('/etc/iproute2/rt_tables');
+	mkdir_p(RUN_DIR);
+	write_json(FW_ROUTE_FILE, [ cur, ...map(stale_routes(read_json(FW_ROUTE_FILE), cur, true),
+		(p) => ({ mark: p.mark, table: p.table })) ]);
+	for (let fam in (v6 === false ? [ '-4' ] : [ '-4', '-6' ])) {
+		let out = run(`ip ${fam} rule list 2>/dev/null`).out, tm = hex32(cur.mark);
+		let prefs = rule_prefs(out, cur.mark, table_names(rt, cur.table));
+		if (!length(prefs))
+			run(`ip ${fam} rule add fwmark ${tm}/${tm} table ${cur.table}`);
+		for (let pref in slice(prefs, 1))
+			run(`ip ${fam} rule del pref ${pref} fwmark ${tm}/${tm} table ${cur.table} 2>/dev/null`);
+		run(`ip ${fam} route replace local default dev lo table ${cur.table}`);
 	}
+}
+
+// Takes down the stale pairs (keep: the current one stays, as after route_add()) or all.
+function route_prune(cfg, keep) {
+	let cur = cur_route(cfg), rt = readfile('/etc/iproute2/rt_tables');
+	let stale = stale_routes(read_json(FW_ROUTE_FILE), cur, keep);
 	for (let fam in [ '-4', '-6' ]) {
-		let out = run(`ip ${fam} rule list 2>/dev/null`).out;
-		// the rule is added before duplicates left from an unclean stop and the stale rules
-		// are dropped: no moment without it
-		if (add && !(fam == '-6' && v6 === false)) {
-			let tm = hex32(cur.mark), n = rule_count(out, cur.mark, cur.table);
-			if (!n) {
-				run(`ip ${fam} rule add fwmark ${tm}/${tm} table ${cur.table}`);
-				n = 1;
-			}
-			for (; n > 1; n--)
-				run(`ip ${fam} rule del fwmark ${tm}/${tm} table ${cur.table} 2>/dev/null`);
-			run(`ip ${fam} route replace local default dev lo table ${cur.table}`);
-		}
+		let out = length(stale) ? run(`ip ${fam} rule list 2>/dev/null`).out : '';
 		for (let p in stale) {
-			let tm = hex32(p.mark);
-			for (let n = rule_count(out, p.mark, p.table); n > 0; n--)
-				run(`ip ${fam} rule del fwmark ${tm}/${tm} table ${p.table} 2>/dev/null`);
+			del_rules(fam, out, p, rt);
 			// only our route: the table may have someone's (it was freed for mwan3, pbr)
 			if (p.route)
 				run(`ip ${fam} route del local default dev lo table ${p.table} 2>/dev/null`);
 		}
 	}
-	if (add)
+	if (keep)
 		write_json(FW_ROUTE_FILE, [ cur ]);
 	else
 		unlink(FW_ROUTE_FILE);
@@ -364,23 +398,23 @@ export function apply(cfg, res, opts) {
 	write_file(NFT_FILE, render(cfg, res, opts));
 	// only tproxy needs the route; at boot (fw-guard, block) lo is still down and ip
 	// would fail with "Nexthop device is not up". For full it goes first: no moment
-	// with tproxy marks but no route (a route without marks is harmless)
+	// with tproxy marks but no route (a route without marks is harmless). The previous
+	// pair goes only once nft has replaced the rules that set its mark
 	let tproxy = !opts?.passthrough && !opts?.block && !opts?.minimal;
 	if (tproxy)
-		routing(cfg, true, res.ipv6);
+		route_add(cfg, res.ipv6);
 	let r = run(`nft -f ${NFT_FILE} 2>&1`);
 	if (r.code != 0) {
 		let err = trim(r.out) || `nft exited with ${r.code}`;
 		log(`nft failed: ${err}`);
 		return err;
 	}
-	if (!tproxy)
-		routing(cfg, false);
+	route_prune(cfg, tproxy);
 	return null;
 };
 
 export function remove(cfg) {
 	run('nft delete table inet xvpn 2>/dev/null');
 	run('nft delete table bridge xvpn 2>/dev/null');
-	routing(cfg, false);
+	route_prune(cfg, false);
 };
