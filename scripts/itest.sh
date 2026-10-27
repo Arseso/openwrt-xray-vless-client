@@ -147,6 +147,14 @@ wait_cmd() { # timeout cmd...
 	while [ $(date +%s) -lt $_end ]; do "$@" >/dev/null 2>&1 && return 0; sleep 1; done
 	echo "TIMEOUT waiting for: $*"; diag; exit 1
 }
+# a test of all servers; waits for this very run to finish, testing=false may still be
+# the moment before it starts or the end of another run
+tests_done() { [ "$(status @.tests)" -ge "$1" ]; }
+test_all() {
+	_run=$(ubus call xvpn test | jsonfilter -e @.run)
+	[ -n "$_run" ] || { echo "FAIL: ubus call xvpn test started no test"; diag; exit 1; }
+	wait_cmd 30 tests_done "$_run"
+}
 
 
 remote 18443
@@ -155,6 +163,7 @@ set xvpn.main.enabled=1
 add_list xvpn.access.network=lan
 add_list xvpn.access.port=vc0
 set xvpn.health.interval=3
+set xvpn.health.url=http://45.0.0.2/
 set xvpn.health.timeout=4
 set xvpn.health.fail_threshold=2
 set xvpn.health.reload_idle=15
@@ -437,11 +446,10 @@ wait_for @.state connected 30
 [ "$(active_name)" = second ] || { echo "FAIL: after update expected second, got $(active_name)"; exit 1; }
 echo "OK: update from LuCI went through the daemon, 4 servers, still on second"
 
-ubus call xvpn test >/dev/null
-sleep 1; wait_for @.testing false 30
+test_all
 [ "$(latency sub-dead)" = -1 ] && [ "$(latency first)" = -1 ] \
 	&& [ "$(latency sub-live)" -ge 0 ] && [ "$(latency second)" -ge 0 ] \
-	|| { echo "FAIL: latencies are attributed to wrong servers"; ubus call xvpn status; exit 1; }
+	|| { echo "FAIL: latencies are attributed to wrong servers"; ubus call xvpn status; logread | grep xvpn; exit 1; }
 echo "OK: measurements match the new server list"
 
 kill $(cat /tmp/remote-18444.pid)
@@ -507,9 +515,8 @@ wait_for @.state xray_down 30
 no_quarantine "xray stopped"
 echo "OK: stopped xray is xray_down, no quarantine"
 # a test with xray down does not mark the servers dead
-ubus call xvpn test >/dev/null
-sleep 1; wait_for @.testing false 30
-[ "$(latency "$a")" -ge 0 ] || { echo "FAIL: test with xray down wrote -1"; ubus call xvpn status; exit 1; }
+test_all
+[ "$(latency "$a")" -ge 0 ] || { echo "FAIL: test with xray down wrote -1"; ubus call xvpn status; logread | grep xvpn; exit 1; }
 echo "OK: measurements kept while xray is down"
 wait_cmd 40 xray_restarted "$x"
 wait_for @.state connected 40
