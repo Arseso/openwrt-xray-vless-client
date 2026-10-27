@@ -1,0 +1,11 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# sysntpd (busybox ntpd) has set the clock: xvpnd waits for it before blaming the servers,
+# the flag also tells a restarted xvpnd. A step is the clock set; stratum 16 is unsynced.
+
+case "$ACTION" in step|stratum|periodic) ;; *) exit 0;; esac
+[ "$ACTION" = step ] || [ "${stratum:-16}" -lt 16 ] || exit 0
+[ -f /var/run/xvpn/time_synced ] && exit 0
+mkdir -p /var/run/xvpn && touch /var/run/xvpn/time_synced
+ubus -t 2 call xvpn check >/dev/null 2>&1 </dev/null &
+exit 0
