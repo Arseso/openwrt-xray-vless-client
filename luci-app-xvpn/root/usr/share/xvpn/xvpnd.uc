@@ -10,7 +10,7 @@ import * as ubus from 'ubus';
 import { readfile, unlink, access, stat } from 'fs';
 import {
 	load_config, read_json, write_json, write_file, mkdir_p, shq, update_running, procs, tree, kill_tree,
-	ETC_DIR, RUN_DIR, CONFIG_FILE, INDEX_FILE, ACTIVE_FILE, STATE_FILE, FW_ERROR_FILE
+	ETC_DIR, RUN_DIR, CONFIG_FILE, INDEX_FILE, ACTIVE_FILE, STATE_FILE, FW_ERROR_FILE, GENERATE_ERROR_FILE
 } from 'xvpn.util';
 import { due_in } from 'xvpn.subscription';
 
@@ -24,7 +24,7 @@ const XRAY_UNKNOWN = 'unknown';	// procd does not answer: neither xray nor the s
 const cfg = load_config();
 const H = cfg.health;
 const RELOAD_IDLE = H.reload_idle;	// s a reload may make no progress before it is killed, see watch_reload()
-const RELOAD_MAX = H.generate_budget + 120;	// s at most for a reload; generate gives up after its budget
+const RELOAD_MAX = H.generate_budget + 120;	// s at most for a reload from taking procd's lock; generate gives up after its budget
 const RELOAD_RETRY = H.reload_retry;	// s between a failed reload and the next try
 const RELOAD_TICK = min(10, max(1, int(RELOAD_IDLE / 4))) * 1000;
 const STALL = 3 * H.interval + RELOAD_MAX + 30;	// s without health checks: see watchdog()
@@ -52,7 +52,7 @@ let st = {
 	quarantine: prev.quarantine ?? {},
 	xray: {},	// see xray_down()
 	xray_choose: null,	// choose_best() decision put off while xray does not work
-	xray_choose_code: null,	// 7: the aborted test saw a refused test port, see test_abort
+	xray_choose_code: null,	// 7: the test aborted with xray_choose saw a refused test port
 };
 let test_waiters = [], testq = null, test_resume = null, test_abort = null;
 let timers = {}, settling = false, reload = null;
@@ -401,7 +401,7 @@ function test_all(cb) {
 	}
 	let running = 0;
 
-	function done(problem, inst) {
+	function done(problem, inst, refused) {
 		st.testing = false;
 		testq = test_resume = test_abort = null;
 		st.last_test = time();
@@ -409,7 +409,7 @@ function test_all(cb) {
 		let w = test_waiters;
 		test_waiters = [];
 		for (let f in w)
-			f(problem, inst);
+			f(problem, inst, refused);
 	}
 
 	// failures count only when xray works: with xray down every server would look dead
@@ -476,11 +476,7 @@ function test_all(cb) {
 	test_resume = next;
 	// nothing is known about xray: choose_best() puts its decision off (see check()),
 	// a refused test port is checked there
-	test_abort = () => {
-		if (q.refused)
-			st.xray_choose_code = 7;
-		done(XRAY_UNKNOWN);
-	};
+	test_abort = () => done(XRAY_UNKNOWN, null, q.refused);
 	next();
 }
 
@@ -534,6 +530,9 @@ function settle() {
 }
 
 function after_reload() {
+	let err = readfile(GENERATE_ERROR_FILE);
+	if (err)
+		return reload_failed(trim(err));
 	st.reload_error = null;
 	load_index();
 	st.passthrough = false;
@@ -550,6 +549,12 @@ function reload_failed(why) {
 	st.reloading = st.reload_pending = false;
 	load_index();
 	st.gen++;
+	// clients go through the server of the config xray runs: a switch (select, failover)
+	// is done once a reload applies it, ACTIVE_FILE keeps it for the next try
+	if (index.active && server(index.active) && index.active != st.active) {
+		log(`"${server(index.active).name}" stays active until a reload goes through`);
+		st.active = index.active;
+	}
 	if (st.testing)
 		test_abort();
 	timers.retry?.cancel();
@@ -562,32 +567,38 @@ function reload_failed(why) {
 // What a working reload changes: its processes and their CPU time, and those of another
 // `init.d/xvpn` (rpcd, UCI triggers) that holds procd's service lock meanwhile. One waiting
 // for the lock or for a stuck procd changes nothing.
+// locked: start_service runs (it calls cli.uc), so the reload has procd's lock.
 function reload_sig(pid) {
 	let ps = procs(), seen = {}, cpu = 0;
+	let locked = length(filter(tree(pid, ps), (p) => match(ps[p]?.cmd ?? '', /\/usr\/share\/xvpn\/cli\.uc/))) > 0;
 	for (let root in [ pid, ...filter(keys(ps), (p) => match(ps[p].cmd, /\/etc\/init\.d\/xvpn/)) ])
 		for (let p in tree(root, ps))
 			if (!seen[p]) {
 				seen[p] = true;
 				cpu += ps[p]?.cpu ?? 0;
 			}
-	return `${join(',', sort(keys(seen)))} ${cpu}`;
+	return { sig: `${join(',', sort(keys(seen)))} ${cpu}`, locked };
 }
 
 function watch_reload(r) {
 	r.t = uloop.timer(RELOAD_TICK, () => {
 		if (reload !== r)
 			return;
-		let sig = reload_sig(r.p.pid()), t = now();
-		if (sig != r.sig) {
-			r.sig = sig;
+		let s = reload_sig(r.p.pid()), t = now();
+		if (s.sig != r.sig) {
+			r.sig = s.sig;
 			r.last = t;
 		}
-		if (t - r.last < RELOAD_IDLE && t - r.at < RELOAD_MAX)
+		// waiting for the lock behind a legit reload does not count, RELOAD_IDLE covers it
+		if (s.locked)
+			r.locked ??= t;
+		let long = r.locked != null && t - r.locked >= RELOAD_MAX;
+		if (t - r.last < RELOAD_IDLE && !long)
 			return r.t.set(RELOAD_TICK);
 		reload = null;
 		kill_tree(r.p.pid());
 		unlink(r.out);
-		reload_failed(t - r.at >= RELOAD_MAX ? `reload did not finish in ${RELOAD_MAX} s and was killed`
+		reload_failed(long ? `reload did not finish in ${RELOAD_MAX} s and was killed`
 			: `reload made no progress for ${RELOAD_IDLE} s and was killed`);
 	});
 }
@@ -600,8 +611,7 @@ reload_service = function() {
 	timers.retry?.cancel();
 	st.reloading = true;
 	st.gen++;	// measurements in flight go through the config being replaced
-	let r = reload = { at: now(), out: `${RUN_DIR}/reload-${++probe_seq}` };
-	r.last = r.at;
+	let r = reload = { last: now(), out: `${RUN_DIR}/reload-${++probe_seq}` };
 	// uloop.process reports a killed process as exit code 0: sh writes the script's own
 	r.p = spawn('/bin/sh', [ '-c', `/etc/init.d/xvpn reload; echo $? > ${shq(r.out)}` ], (code) => {
 		if (reload !== r)
@@ -635,7 +645,7 @@ reindex = function(notified) {
 			timers.settle.set(3000);
 		return;	// our own reload: after_reload() takes over
 	}
-	if (notified && st.reload_error) {
+	if (notified && st.reload_error && !readfile(GENERATE_ERROR_FILE)) {
 		st.reload_error = null;	// whoever ran it, the config is applied
 		timers.retry?.cancel();
 	}
@@ -667,7 +677,7 @@ function switch_to(id, reason) {
 
 choose_best = function(reason) {
 	st.xray_choose = null;
-	test_all((problem, inst) => {
+	test_all((problem, inst, refused) => {
 		// the test may end mid-reload with partial data: decide once it settles
 		if (st.reloading) {
 			st.choose_pending = reason;
@@ -676,6 +686,7 @@ choose_best = function(reason) {
 		// xray did not work during the test: decide once it does
 		if (problem == XRAY_UNKNOWN) {
 			st.xray_choose = reason;
+			st.xray_choose_code = refused ? 7 : null;
 			return;
 		}
 		if (problem)

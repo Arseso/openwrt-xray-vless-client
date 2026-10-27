@@ -592,7 +592,7 @@ printf '#!/bin/sh\n[ "$2" = -test ] && { sleep 4; grep -q 127.0.0.9 "$4" && exit
 chmod +x /tmp/xray-slow
 uci set xvpn.main.xray_bin=/tmp/xray-slow
 uci add_list xvpn.manual.link="vless://$UUID@127.0.0.9:18449?type=tcp&security=none#bad"
-uci commit xvpn	# no reload_config: the daemon reloads, xvpnd is not restarted
+uci commit xvpn	# no reload_config: the daemon runs the reload (procd restarts xvpnd at its end: file /etc/config/xvpn)
 k=$(killed)
 wait_cmd 15 select_ok "$id"	# busy for the pause after the last reload
 wait_cmd 90 sh -c "logread | grep -q 'rejected 1 server(s): bad'"

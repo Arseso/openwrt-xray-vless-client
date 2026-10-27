@@ -10,7 +10,7 @@ import * as uloop from 'uloop';
 import {
 	load_config, read_json, write_json, write_file, mkdir_p, log, run, shq, is_updater, kill_tree,
 	ACTIVE_FILE, CONFIG_FILE, INDEX_FILE, VAR_DIR, RUN_DIR, UPDATE_LOCK,
-	FW_WANT_FILE, FW_MODE_FILE, FW_ERROR_FILE, FW_WARN_FILE, FW_LOCK_FILE
+	FW_WANT_FILE, FW_MODE_FILE, FW_ERROR_FILE, FW_WARN_FILE, FW_LOCK_FILE, GENERATE_ERROR_FILE
 } from 'xvpn.util';
 import { all_servers, update, prune } from 'xvpn.subscription';
 import { build_index, generate } from 'xvpn.xrayconf';
@@ -25,9 +25,10 @@ const TEST_FULL = 40, TEST_ONE = 15, GENERATE_BUDGET = cfg.health.generate_budge
 const STARTED = clock(true)[0];
 
 // true: xray accepts the config; false: rejects it, hung or was killed (OOM); null: out of
-// time. uloop.process reports a killed process as exit code 0: sh writes xray's own code.
-function xray_ok(path, limit) {
-	let left = GENERATE_BUDGET - (clock(true)[0] - STARTED);
+// time, reserve seconds of the budget kept for later. uloop.process reports a killed
+// process as exit code 0: sh writes xray's own code.
+function xray_ok(path, limit, reserve) {
+	let left = GENERATE_BUDGET - (clock(true)[0] - STARTED) - (reserve ?? 0);
 	if (left <= 0)
 		return null;
 	let out = `${VAR_DIR}/xray-ok`, wait = min(limit, left), hung = false, t;
@@ -150,6 +151,7 @@ case 'generate': {
 
 	function commit(code) {
 		unlink(tmp);
+		unlink(GENERATE_ERROR_FILE);
 		if (!rename(next, CONFIG_FILE))
 			die(`cannot write ${CONFIG_FILE}`);
 		write_json(INDEX_FILE, idx);
@@ -159,14 +161,19 @@ case 'generate': {
 			print(`${length(servers)} servers, active ${idx.active ?? 'none'}\n`);
 		exit(code ?? (length(servers) ? 0 : 3));
 	}
+	function out_of_time() {
+		unlink(tmp);
+		unlink(next);
+		let err = `generate ran out of time (${GENERATE_BUDGET} s), xray goes on with the previous config`;
+		log(err);
+		mkdir_p(RUN_DIR);
+		write_file(GENERATE_ERROR_FILE, err);
+		exit(5);
+	}
 	function check(path, limit) {
 		let ok = xray_ok(path, limit);
-		if (ok == null) {
-			unlink(tmp);
-			unlink(next);
-			log(`generate ran out of time (${GENERATE_BUDGET} s), the running config is kept`);
-			exit(5);
-		}
+		if (ok == null)
+			out_of_time();
 		return ok;
 	}
 
@@ -178,14 +185,28 @@ case 'generate': {
 		write_json(tmp, generate(cfg, [], build_index(cfg, [], null)));
 		if (!check(tmp, TEST_ONE))
 			commit(4);
+		// out of time (a slow router, a big subscription): the servers not tested yet are
+		// dropped, a test of the whole config stays in the budget
+		let untested = 0;
 		for (let s in servers) {
+			if (untested) {
+				untested++;
+				continue;
+			}
 			write_json(tmp, generate(cfg, [ s ], build_index(cfg, [ s ], s.id)));
-			if (check(tmp, TEST_ONE))
+			let ok = xray_ok(tmp, TEST_ONE, TEST_FULL);
+			if (ok == null)
+				untested++;
+			else if (ok)
 				push(good, s);
 			else
 				push(bad, s.name);
 		}
 		log(`xray rejected ${length(bad)} server(s): ${join(', ', bad)}`);
+		if (untested && !length(good))
+			out_of_time();	// rather the previous config than none
+		if (untested)
+			log(`generate ran out of time (${GENERATE_BUDGET} s): ${untested} server(s) not tested, dropped`);
 		servers = good;
 		idx = build_index(cfg, servers, active);
 		write_json(next, generate(cfg, servers, idx));
