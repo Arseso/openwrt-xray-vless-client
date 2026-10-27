@@ -417,10 +417,14 @@ function quarantined(id) {
 function no_auto() {
 	let s = stat('/etc/config/xvpn'), sig = s ? `${s.inode}:${s.mtime}:${s.size}` : '';
 	if (sig != no_auto_sig) {
+		let was = no_auto_set;
 		no_auto_sig = sig;
 		no_auto_set = {};
 		for (let id in no_auto_ids())
 			no_auto_set[id] = true;
+		// back in auto selection (uci by hand, not set_auto): it may be alive, no pause
+		if (length(filter(keys(was), (id) => !no_auto_set[id])))
+			st.dead = null;
 	}
 	return no_auto_set;
 }
@@ -830,9 +834,12 @@ choose_best = function(reason) {
 				set_state('connected', `${no_candidates()}, staying on "${e.name}"`);
 				return;
 			}
-			// the next test of all servers after a pause, longer each time (see check())
-			let delay = retry_delay(st.dead?.delay, H.interval, H.retry_max);
-			st.dead = { delay, next: now() + delay };
+			// the next test of all servers after a pause, longer each time (see check()); once
+			// a run: two choose_best() waiting for the same one (set_auto during a test)
+			if (st.dead?.run != st.tests) {
+				let delay = retry_delay(st.dead?.delay, H.interval, H.retry_max);
+				st.dead = { delay, next: now() + delay, run: st.tests };
+			}
 			set_state('no_servers', no_candidates());
 			if (!cfg.access.killswitch)
 				set_passthrough(true);
@@ -910,12 +917,20 @@ check = function() {
 	let off = no_auto()[e.id] && !by_hand(e.id);
 	// nothing to choose from (#12): the next test of all servers once the pause is over
 	// (retry_delay(), reset by set_state(), load_index() and the user); meanwhile only the
-	// active one is probed, one curl a check: back as soon as it answers
+	// active one is probed, one curl a check: back as soon as it answers; a refused test
+	// port is xray's problem (see xray_check()), the choice is made once xray works again
 	if (st.state == 'no_servers' && st.dead && now() < st.dead.next) {
 		if (!off)
 			probe(e.test_port, (ms, code) => {
-				if (valid(gen) && st.active == e.id && ms >= 0 && st.state == 'no_servers')
-					up(e, ms);
+				if (!valid(gen) || st.active != e.id || st.state != 'no_servers')
+					return;
+				if (ms >= 0)
+					return up(e, ms);
+				if (code == 7)
+					xray_check(code, (problem, inst) => {
+						if (valid(gen) && problem && problem != XRAY_UNKNOWN)
+							xray_down(problem, inst, 'no live servers');
+					});
 			});
 		return;
 	}
@@ -937,7 +952,8 @@ check = function() {
 			xray_up();
 			st.latency[e.id] = { ms, at: time() };
 			st.fails++;
-			if (st.fails < H.fail_threshold) {
+			// no live servers: the pause was the wait, straight to failover
+			if (st.fails < H.fail_threshold && st.state != 'no_servers') {
 				set_state('degraded', `${st.fails} failed checks`);
 				return;
 			}
