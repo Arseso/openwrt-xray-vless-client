@@ -323,7 +323,7 @@ function xray_check(code, cb) {
 		return cb('xray is not running', inst);
 	if (match(readfile(`/proc/${inst.pid}/stat`) ?? '', /\) T /))
 		return cb('xray is stopped', inst);
-	spawn('/usr/bin/curl', [ '-s', '-o', '/dev/null', '--max-time', '3', `http://127.0.0.1:${cfg.main.api_port}/` ], (c) => {
+	spawn('/usr/bin/curl', [ '-s', '-o', '/dev/null', '--max-time', '3', `http://127.0.0.1:${index.ports?.api ?? cfg.main.api_port}/` ], (c) => {
 		if (c < 0)
 			cb(XRAY_UNKNOWN);
 		else if (c == 7 || c == 28)
@@ -710,7 +710,14 @@ reindex = function(notified) {
 			timers.settle.set(3000);
 		return;	// our own reload: after_reload() takes over
 	}
-	if (notified && st.reload_error && !readfile(GENERATE_ERROR_FILE)) {
+	let gen_error = notified ? readfile(GENERATE_ERROR_FILE) : null;
+	// a reload past the daemon (UCI triggers, rpcd) failed to generate (a port taken):
+	// tried again every RELOAD_RETRY like ours
+	if (gen_error && !st.reload_error)
+		return reload_failed(trim(gen_error));
+	if (gen_error)
+		st.reload_error = trim(gen_error);	// the latest reason, the retry is on already
+	if (notified && st.reload_error && !gen_error) {
 		st.reload_error = null;	// whoever ran it, the config is applied
 		timers.retry?.cancel();
 	}
@@ -915,7 +922,10 @@ function status() {
 	}));
 	// cli.uc could not apply the rules and blocked the clients (fail closed)
 	// and a reload that failed: what xray runs may be not what the daemon wants
-	let fw_error = readfile(FW_ERROR_FILE), error = fw_error ?? st.reload_error;
+	// generate failed past the daemon (start, rpcd: a port taken) and a config error in
+	// the index (ipv6 = tunnel without IPv6 on the router)
+	let fw_error = readfile(FW_ERROR_FILE), gen_error = readfile(GENERATE_ERROR_FILE);
+	let error = fw_error ?? st.reload_error ?? (gen_error ? trim(gen_error) : null) ?? index.config_error;
 	return {
 		state: error ? 'error' : st.state, active: st.active, since: st.since, fails: st.fails,
 		testing: st.testing, tests: st.tests, updating: st.updating || !!update_running(), passthrough: st.passthrough,
@@ -1030,6 +1040,9 @@ every('check', H.interval, check);
 every('rank', H.rank_interval, rank);
 every('subs', SUB_CHECK, auto_update);
 every('watchdog', 30, watchdog);
+// generate failed at start (a port taken): tried again every RELOAD_RETRY
+if (readfile(GENERATE_ERROR_FILE))
+	reload_failed(trim(readfile(GENERATE_ERROR_FILE)));
 if (H.time_wait > 0 && !access(TIME_FLAG) && ntp_on()) {
 	let until = int(readfile(TIME_UNTIL) ?? 0);
 	if (!until) {

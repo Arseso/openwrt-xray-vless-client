@@ -37,7 +37,7 @@ start_service() {
 	$CLI ifnames
 
 	# generate drops servers that xray rejects; 3: no servers, 4: xray does not work,
-	# 5: out of time, xray goes on with the config it runs
+	# 5: out of time or a port taken, xray goes on with the config it runs
 	local have_servers=1 rc=0
 	# its `xray run -test` with the same GC as xray
 	GOMEMLIMIT="$gomemlimit" GOGC="$gogc" $CLI generate >/dev/null || rc=$?

@@ -8,7 +8,8 @@
 # and a broken xray_bin are xray_down, not dead servers; a hung reload (sleep in init.d,
 # procd lock held) does not stop the health checks, a slow generate is not killed and a
 # killed one leaves the running config; before NTP sets the clock no server goes to quarantine;
-# the status tab and a reload of the same servers start no xray.
+# the status tab and a reload of the same servers start no xray; a test port taken by another
+# program is skipped, a main one is an error, xray starts with IPv6 off.
 set -e
 cd "$(dirname "$0")/.."
 DOCKER="${DOCKER:-docker}"
@@ -183,11 +184,19 @@ UCI
 no_tproxy "boot guard"
 blocked "boot, xvpn not started"
 
+# another program holds the first test port (busybox nc cannot listen, uhttpd stands for it):
+# generate skips it, "second" gets 20001 and "first" 20002
+uhttpd -f -p 127.0.0.1:20000 -h /tmp/www >/dev/null 2>&1 & holder=$!
 /etc/init.d/xvpn start
 sleep 2
 wait_for @.state connected 40
 [ "$(active_name)" = first ] || { echo "FAIL: expected first, got $(active_name)"; exit 1; }
 echo "OK: picked the live server"
+[ "$(jsonfilter -i /var/etc/xvpn/index.json -e '@.servers[*].test_port' | tr '\n' ' ')" = "20001 20002 " ] \
+	|| { echo "FAIL: test ports with 20000 taken: $(cat /var/etc/xvpn/index.json)"; exit 1; }
+[ "$(latency first)" -ge 0 ] || { echo "FAIL: first is not measured on its shifted port"; ubus call xvpn status; exit 1; }
+echo "OK: a taken test port is skipped, xray runs, the server works on 20002"
+kill $holder
 full_rules "connected"
 ip rule | grep -q 'lookup 100' || { echo "FAIL: no ip rule"; exit 1; }
 want_mode full full
@@ -209,6 +218,73 @@ touch /tmp/stop-probe; sleep 2
 echo "OK: no direct traffic during restart"
 tunnel || { echo "FAIL: no tunnel after restart"; exit 1; }
 echo "OK: tunnel is back after restart"
+
+# a main port taken by another program: generate keeps the running config (xray is not
+# restarted), the status shows which port until it is free, the daemon tries again
+uhttpd -f -p 0.0.0.0:10854 -h /tmp/www >/dev/null 2>&1 & holder=$!
+x=$(xray_pid)
+uci set xvpn.main.dns_port=10854; uci commit xvpn
+/etc/init.d/xvpn reload
+wait_for @.state error 30
+status @.last_error | grep -q 'dns_port 10854' || { echo "FAIL: no port error: $(status @.last_error)"; exit 1; }
+[ "$(xray_pid)" = "$x" ] && grep -q '"port": 10853' /var/etc/xvpn/config.json || { echo "FAIL: running config replaced"; exit 1; }
+echo "OK: a taken main port is an error in the status, xray goes on with its config"
+# the rules follow the running config: DNS of the clients goes to xray, not to the holder
+nft list table inet xvpn | grep -q 'redirect to :10853' || { echo "FAIL: DNS not redirected to the running xray"; nft list table inet xvpn; exit 1; }
+[ "$(ip netns exec cl curl -s -m 3 http://45.0.0.2:53/)" = hello ] && { echo "FAIL: client DNS goes to the program on the new port"; exit 1; }
+tunnel || { echo "FAIL: no tunnel while the port is taken"; exit 1; }
+echo "OK: while the port is taken, clients and their DNS go through the running xray"
+kill $holder
+wait_for @.state connected 40
+grep -q '"port": 10854' /var/etc/xvpn/config.json || { echo "FAIL: dns_port not applied once free"; exit 1; }
+echo "OK: the port applied once free"
+uci set xvpn.main.dns_port=10853; uci commit xvpn
+/etc/init.d/xvpn reload
+wait_for @.state connected 40
+
+# the same at boot: no config yet (tmpfs), xray does not start, the clients are blocked
+# instead of their DNS going to the holder; the daemon tries again until the port is free
+/etc/init.d/xvpn stop
+rm -f /var/etc/xvpn/config.json /var/etc/xvpn/index.json
+uhttpd -f -p 0.0.0.0:10853 -h /tmp/www >/dev/null 2>&1 & holder=$!
+/etc/init.d/xvpn start
+wait_for @.state error 30
+status @.last_error | grep -q 'dns_port 10853' || { echo "FAIL: no port error at boot: $(status @.last_error)"; exit 1; }
+want_mode full block
+nft list table inet xvpn | grep -q redirect && { echo "FAIL: DNS redirected without xray"; exit 1; }
+[ "$(ip netns exec cl curl -s -m 3 http://45.0.0.2:53/)" = hello ] && { echo "FAIL: client DNS goes to the holder at boot"; exit 1; }
+blocked "port taken at boot"
+kill $holder
+wait_for @.state connected 60
+full_rules "port free after boot"
+tunnel || { echo "FAIL: no tunnel once the port is free after boot"; exit 1; }
+echo "OK: a port taken at boot blocks the clients until it is free"
+
+# IPv6 off on the router (disable_ipv6, the container's own netns): nothing to tunnel,
+# xray listens on 0.0.0.0; ipv6 = tunnel is a config error then, IPv4 still goes through
+sysctl -qw net.ipv6.conf.all.disable_ipv6=1
+/etc/init.d/xvpn reload
+sleep 2
+wait_for @.state connected 40
+[ "$(jsonfilter -i /var/etc/xvpn/config.json -e '@.inbounds[@.tag="tproxy"].listen')" = 0.0.0.0 ] \
+	|| { echo "FAIL: tproxy does not listen on 0.0.0.0 without IPv6"; exit 1; }
+tunnel || { echo "FAIL: no tunnel with IPv6 off"; diag; exit 1; }
+echo "OK: IPv6 off: xray on 0.0.0.0, client goes through the tunnel"
+uci set xvpn.access.ipv6=tunnel; uci commit xvpn
+/etc/init.d/xvpn reload
+wait_for @.state error 30
+status @.last_error | grep -q 'IPv6 is off' || { echo "FAIL: no config error: $(status @.last_error)"; exit 1; }
+full_rules "ipv6 tunnel without IPv6"
+nft list table inet xvpn | grep -q 'tproxy ip6' && { echo "FAIL: tproxy ip6 without IPv6"; exit 1; }
+tunnel || { echo "FAIL: no tunnel with ipv6 tunnel and IPv6 off"; exit 1; }
+echo "OK: ipv6 tunnel without IPv6 is an error in the status, IPv4 still tunneled"
+uci set xvpn.access.ipv6=block; uci commit xvpn
+sysctl -qw net.ipv6.conf.all.disable_ipv6=0
+/etc/init.d/xvpn reload
+wait_for @.state connected 40
+[ "$(jsonfilter -i /var/etc/xvpn/config.json -e '@.inbounds[@.tag="tproxy"].listen')" = :: ] \
+	|| { echo "FAIL: tproxy not back on :: with IPv6 on"; cat /proc/net/if_inet6; exit 1; }
+echo "OK: back on :: once IPv6 is on"
 
 # fw4 flush (service firewall stop/restart) deletes all tables: the include puts them back
 /etc/init.d/firewall restart

@@ -5,6 +5,7 @@
 
 import { cursor } from 'uci';
 import { NFT_FILE, VAR_DIR, mkdir_p, write_file, run, log } from 'xvpn.util';
+import { ipv6_up } from 'xvpn.host';
 
 const BYPASS4 = [
 	'0.0.0.0/8', '10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8', '169.254.0.0/16',
@@ -184,6 +185,8 @@ export function resolve(cfg, ubus_conn, uci) {
 	return { nets: filter(uniq(nets), valid), ports: filter(uniq(ports), valid), errors };
 };
 
+// res.ipv6: false when IPv6 was off on the router at generate (from the index; apply()
+// checks it when there is no index).
 // opts.passthrough: keep marking but do not intercept (kill switch off and no live server).
 // opts.block: no interception, clients get neither internet nor DNS (service not started
 // yet or stopped, failed fw-apply); needs no tproxy, fib or nat support.
@@ -208,6 +211,9 @@ export function render(cfg, res, opts) {
 	let block = !!opts?.block;
 	let intercept = !opts?.passthrough && !block;
 	let hijack = intercept && a.dns_hijack;
+	// IPv6 off on the router: there is no IPv6 to tunnel and xray listens on 0.0.0.0 only,
+	// so no tproxy ip6 (nor its ip -6 route, which the kernel refuses); tunnel is a config error then
+	let v6 = (a.ipv6 == 'tunnel' && res.ipv6 !== false) ? 'tunnel' : 'block';
 	let r = [];
 
 	push(r,
@@ -235,7 +241,7 @@ export function render(cfg, res, opts) {
 			'\t\tip6 daddr @bypass6 return');
 		if (intercept) {
 			push(r, `\t\tmeta nfproto ipv4 meta l4proto { tcp, udp } meta mark set meta mark | ${tm} tproxy ip to :${m.tproxy_port} accept`);
-			if (a.ipv6 == 'tunnel')
+			if (v6 == 'tunnel')
 				push(r, `\t\tmeta nfproto ipv6 meta l4proto { tcp, udp } meta mark set meta mark | ${tm} tproxy ip6 to :${m.tproxy_port} accept`);
 		}
 		push(r, '\t}', '',
@@ -253,7 +259,7 @@ export function render(cfg, res, opts) {
 		'\t\tip6 daddr @bypass6 return');
 	if (block || (intercept && a.killswitch))
 		push(r, '\t\treject with icmpx type admin-prohibited');
-	else if (a.ipv6 == 'block')
+	else if (v6 == 'block')
 		push(r, '\t\tmeta nfproto ipv6 reject with icmpx type admin-prohibited');
 	// block must not fail on a bad port in the config: it is the fallback for a failed full,
 	// and minimal leaves single ports and SSIDs open
@@ -285,11 +291,14 @@ export function render(cfg, res, opts) {
 	return join('\n', r);
 };
 
-function routing(cfg, add) {
+// v6: false skips adding the IPv6 rule and route (IPv6 is off, ip -6 would fail)
+function routing(cfg, add, v6) {
 	let m = cfg.main, tm = hex32(m.tproxy_mark), t = m.route_table;
 	// ip prints the mark without leading zeros; busybox ip has no selectors in `rule list`
 	let mk = sprintf('0x%x', m.tproxy_mark), re = regexp(`fwmark ${mk}/${mk} lookup ${t}( |$)`);
 	for (let fam in [ '-4', '-6' ]) {
+		if (add && fam == '-6' && v6 === false)
+			continue;
 		let n = length(filter(split(run(`ip ${fam} rule list 2>/dev/null`).out, '\n'), (l) => match(l, re)));
 		// the rule is added before duplicates left from an unclean stop are dropped:
 		// no moment without it
@@ -308,6 +317,7 @@ function routing(cfg, add) {
 
 // Returns null on success, nft's error otherwise (the previous rules stay: nft -f is atomic).
 export function apply(cfg, res, opts) {
+	res = { ...res, ipv6: res.ipv6 ?? ipv6_up() };
 	mkdir_p(VAR_DIR);
 	write_file(NFT_FILE, render(cfg, res, opts));
 	// only tproxy needs the route; at boot (fw-guard, block) lo is still down and ip
@@ -315,7 +325,7 @@ export function apply(cfg, res, opts) {
 	// with tproxy marks but no route (a route without marks is harmless)
 	let tproxy = !opts?.passthrough && !opts?.block && !opts?.minimal;
 	if (tproxy)
-		routing(cfg, true);
+		routing(cfg, true, res.ipv6);
 	let r = run(`nft -f ${NFT_FILE} 2>&1`);
 	if (r.code != 0) {
 		let err = trim(r.out) || `nft exited with ${r.code}`;

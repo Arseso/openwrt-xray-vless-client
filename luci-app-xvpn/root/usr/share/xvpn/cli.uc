@@ -13,7 +13,8 @@ import {
 	FW_WANT_FILE, FW_MODE_FILE, FW_ERROR_FILE, FW_WARN_FILE, FW_LOCK_FILE, GENERATE_ERROR_FILE, STALE_FILE
 } from 'xvpn.util';
 import { all_servers, update, prune, list_change } from 'xvpn.subscription';
-import { build_index, generate } from 'xvpn.xrayconf';
+import { build_index, generate, ports_error } from 'xvpn.xrayconf';
+import { host_env } from 'xvpn.host';
 import { resolve, apply, remove, fix_ifnames, ifnames_applied } from 'xvpn.firewall';
 
 const cfg = load_config();
@@ -109,6 +110,8 @@ function fw_lock() {
 // what is applied and FW_ERROR_FILE the error until the wanted mode applies.
 // An SSID that has no device name cannot be in the rules: its clients would go around the
 // tunnel, so all VPN clients are blocked (passthrough lets them out anyway) and it is an error.
+// Ports and IPv6 come from the index of the config xray runs, not from UCI: a generate that
+// failed (a port taken) leaves xray on the previous ones.
 function fw(want) {
 	let lock = fw_lock();
 	want ??= readfile(FW_WANT_FILE);
@@ -117,8 +120,15 @@ function fw(want) {
 
 	mkdir_p(RUN_DIR);
 	write_file(FW_WANT_FILE, want);
-	let res = resolve(cfg, ubus.connect());
+	let idx = read_json(INDEX_FILE), rc = cfg;
+	if (idx?.ports)
+		rc = { ...cfg, main: { ...cfg.main, tproxy_port: idx.ports.tproxy, dns_port: idx.ports.dns } };
+	let res = { ...resolve(rc, ubus.connect()), ipv6: idx?.ipv6 };
 	let errs = [], mode = want;
+	// no config at all (boot with a port taken) or no servers: no xray to send the clients
+	// and their DNS to (its ports may be another program's, generate checks them with servers only)
+	if (!length(idx?.servers) && want == 'full')
+		mode = cfg.access.killswitch ? 'block' : 'passthrough';
 	if (length(res.errors)) {
 		push(errs, `access points not found: ${join('; ', res.errors)}`);
 		log(errs[0]);
@@ -126,13 +136,13 @@ function fw(want) {
 			mode = 'block';
 	}
 
-	let err = apply(cfg, res, MODES[mode]);
+	let err = apply(rc, res, MODES[mode]);
 	if (err != null) {
 		push(errs, `firewall rules failed: ${err}`);
 		let tried = mode;
 		mode = null;
 		for (let m in [ 'block', 'minimal' ])
-			if (m != tried && apply(cfg, res, MODES[m]) == null) {
+			if (m != tried && apply(rc, res, MODES[m]) == null) {
 				mode = m;
 				break;
 			}
@@ -193,8 +203,10 @@ case 'generate': {
 	prune(cfg);
 	let all = all_servers(cfg), servers = all;
 	let active = trim(readfile(ACTIVE_FILE) ?? ''), prev = read_json(INDEX_FILE);
-	// everything but the servers that goes into the config (ports, DNS, sniffing…)
-	let sig = bin_sig(), frame = conf_key([ cfg.main, cfg.access ]), tested = read_json(TESTED_FILE);
+	// IPv6 and the ports held by others (not by our running xray), once for every index below
+	let env = host_env();
+	// everything but the servers that goes into the config (ports, DNS, sniffing, listen…)
+	let sig = bin_sig(), frame = conf_key([ cfg.main, cfg.access, env.ipv6 ]), tested = read_json(TESTED_FILE);
 	if (type(tested?.ok) != 'object' || tested.bin != sig || tested.frame != frame)
 		tested = { bin: sig, frame, full: null, ok: {} };
 	let verdict = (s) => tested.ok[s.key ??= conf_key(s.outbound)];
@@ -205,7 +217,15 @@ case 'generate': {
 		log(`xray rejected ${length(skipped)} server(s) earlier: ${join(', ', skipped)}`);
 		servers = filter(servers, (s) => verdict(s) !== false);
 	}
-	let idx = build_index(cfg, servers, active, prev);
+	let idx = build_index(cfg, servers, active, prev, env);
+	// xray would not start: rather the config it runs, like out of time
+	let taken = length(servers) ? ports_error(cfg, env) : null;
+	if (taken) {
+		log(`xray ports ${taken}`);
+		mkdir_p(RUN_DIR);
+		write_file(GENERATE_ERROR_FILE, `xray ports ${taken}`);
+		exit(5);
+	}
 	// xray and the daemon keep the running config until the end: a generate killed
 	// midway changes nothing
 	let next = `${VAR_DIR}/config.new.json`, tmp = `${VAR_DIR}/check.json`;	// xray goes by the extension
@@ -269,7 +289,7 @@ case 'generate': {
 		let good = [], bad = [];
 		// xray that rejects a config without servers is broken itself: keep the servers,
 		// the daemon reports xray_down rather than "no servers"
-		write_json(tmp, generate(cfg, [], build_index(cfg, [], null)));
+		write_json(tmp, generate(cfg, [], build_index(cfg, [], null, null, env)));
 		if (!check(tmp, TEST_ONE))
 			commit(4);
 		// out of time (a slow router, a big subscription): the servers not tested yet are
@@ -286,7 +306,7 @@ case 'generate': {
 			}
 			let ok = false;
 			definite = false;
-			if (put(tmp, generate(cfg, [ s ], build_index(cfg, [ s ], s.id))))
+			if (put(tmp, generate(cfg, [ s ], build_index(cfg, [ s ], s.id, null, env))))
 				ok = xray_ok(tmp, TEST_ONE, TEST_FULL);
 			if (definite)
 				tested.ok[s.key] = ok;
@@ -303,7 +323,7 @@ case 'generate': {
 		if (untested)
 			log(`generate ran out of time (${GENERATE_BUDGET} s): ${untested} server(s) not tested, dropped`);
 		servers = good;
-		idx = build_index(cfg, servers, active, prev);
+		idx = build_index(cfg, servers, active, prev, env);
 		write_json(next, generate(cfg, servers, idx));
 		if (length(servers) && !check(next, TEST_FULL)) {
 			log(`xray rejects the generated config`);

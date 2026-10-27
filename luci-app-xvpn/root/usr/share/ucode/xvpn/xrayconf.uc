@@ -9,14 +9,22 @@
 // again, or the subscription disabled while another lists the same server. active_id
 // itself may be a hash too: ids from before #49 were the hash. moved_from: the id the
 // choice was found for that way (cli.uc generate and the daemon move the choice over).
-export function build_index(cfg, servers, active_id, prev) {
-	let index = [];
-	for (let i, s in servers)
+// env (host.uc host_env(); null: IPv6 on, all ports free): { ipv6, busy }.
+// Test ports taken by other programs (or by our main ports) are skipped: each server keeps
+// the port it got in the index. ipv6: false makes the inbounds listen on 0.0.0.0 (a kernel
+// without IPv6 refuses ::); with ipv6 = tunnel that is a config error the status shows.
+export function build_index(cfg, servers, active_id, prev, env) {
+	let m = cfg.main, busy = env?.busy?.tcp ?? {}, port = m.test_port_base, index = [];
+	let main = { [m.tproxy_port]: true, [m.dns_port]: true, [m.api_port]: true };
+	for (let i, s in servers) {
+		while (busy[port] || main[port])
+			port++;
 		push(index, {
 			id: s.id, hash: s.hash, name: s.name, proto: s.proto, address: s.address, port: s.port,
 			sub: s.sub, sub_name: s.sub_name,
-			tag: `srv-${i}`, test_port: cfg.main.test_port_base + i,
+			tag: `srv-${i}`, test_port: port++,
 		});
+	}
 
 	let active = filter(index, (e) => e.id == active_id)[0], moved_from = null;
 	if (!active && active_id) {
@@ -26,7 +34,28 @@ export function build_index(cfg, servers, active_id, prev) {
 			moved_from = active_id;
 	}
 	active ??= index[0];
-	return { active: active?.id, moved_from, servers: index };
+	// the rules (fw-apply), the daemon and rpcd go by the ports and IPv6 of the config xray runs
+	let r = {
+		active: active?.id, moved_from, servers: index, ipv6: env?.ipv6 ?? true,
+		ports: { tproxy: m.tproxy_port, dns: m.dns_port, api: m.api_port },
+	};
+	if (!r.ipv6 && cfg.access.ipv6 == 'tunnel')
+		r.config_error = 'ipv6 is set to tunnel, but IPv6 is off on the router (disable_ipv6 or no IPv6 address): set ipv6 to block or turn IPv6 on';
+	return r;
+};
+
+// The main ports xray needs, taken by other programs: an error for the status
+// (xray could not start with them), null when they are free.
+export function ports_error(cfg, env) {
+	let m = cfg.main, tcp = env?.busy?.tcp ?? {}, udp = env?.busy?.udp ?? {}, taken = [];
+	for (let p in [ [ 'tproxy_port', true ], [ 'dns_port', true ], [ 'api_port', false ] ]) {
+		let n = m[p[0]];
+		if (tcp[n] || (p[1] && udp[n]))
+			push(taken, `${p[0]} ${n}`);
+	}
+	return length(taken)
+		? `taken by another program: ${join(', ', taken)}; free it or change the port in the settings`
+		: null;
 };
 
 // a URL (https://, tcp://; load_config drops the others) is resolved by the xray DNS
@@ -40,10 +69,11 @@ export function generate(cfg, servers, idx) {
 	let m = cfg.main;
 	let active = filter(idx.servers, (e) => e.id == idx.active)[0];
 	let doh = dns_via_module(cfg);
+	let listen = (idx.ipv6 ?? true) ? '::' : '0.0.0.0';
 
 	let inbounds = [
 		{
-			tag: 'tproxy', listen: '::', port: m.tproxy_port, protocol: 'dokodemo-door',
+			tag: 'tproxy', listen, port: m.tproxy_port, protocol: 'dokodemo-door',
 			settings: { network: 'tcp,udp', followRedirect: true },
 			streamSettings: { sockopt: { tproxy: 'tproxy' } },
 			sniffing: m.sniffing
@@ -51,7 +81,7 @@ export function generate(cfg, servers, idx) {
 				: { enabled: false },
 		},
 		{
-			tag: 'dns-in', listen: '::', port: m.dns_port, protocol: 'dokodemo-door',
+			tag: 'dns-in', listen, port: m.dns_port, protocol: 'dokodemo-door',
 			// with the DNS module the address is a placeholder: dns-out answers A/AAAA itself
 			settings: { address: doh ? '1.1.1.1' : cfg.access.dns_server, port: 53, network: 'tcp,udp' },
 		},
@@ -103,7 +133,8 @@ export function generate(cfg, servers, idx) {
 	if (doh)
 		conf.dns = {
 			tag: 'dns-module', servers: [ cfg.access.dns_server ],
-			queryStrategy: (cfg.access.ipv6 == 'block') ? 'UseIPv4' : 'UseIP',
+			// without IPv6 on the router AAAA answers are of no use to the clients
+			queryStrategy: (cfg.access.ipv6 == 'block' || !(idx.ipv6 ?? true)) ? 'UseIPv4' : 'UseIP',
 		};
 	return conf;
 };
