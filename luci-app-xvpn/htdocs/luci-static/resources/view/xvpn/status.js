@@ -34,6 +34,7 @@ function fwErrorText(mode) {
 function stateInfo(state, fwMode) {
 	return {
 		starting: [ 'notice', _('Starting') ],
+		waiting_time: [ 'notice', _('Waiting for NTP time sync') ],
 		connected: [ 'success', _('Connected') ],
 		degraded: [ 'warning', _('Unstable: health checks fail') ],
 		failover: [ 'warning', _('Switching to another server') ],

@@ -4,17 +4,29 @@
 
 'use strict';
 
-export function build_index(cfg, servers, active_id) {
+// prev: the index of the running config. The chosen server keeps the choice when its id
+// changes but the connection (hash) does not: renamed, its subscription removed and added
+// again, or the subscription disabled while another lists the same server. active_id
+// itself may be a hash too: ids from before #49 were the hash. moved_from: the id the
+// choice was found for that way (cli.uc generate and the daemon move the choice over).
+export function build_index(cfg, servers, active_id, prev) {
 	let index = [];
 	for (let i, s in servers)
 		push(index, {
-			id: s.id, name: s.name, proto: s.proto, address: s.address, port: s.port,
+			id: s.id, hash: s.hash, name: s.name, proto: s.proto, address: s.address, port: s.port,
 			sub: s.sub, sub_name: s.sub_name,
 			tag: `srv-${i}`, test_port: cfg.main.test_port_base + i,
 		});
 
-	let active = filter(index, (e) => e.id == active_id)[0] ?? index[0];
-	return { active: active?.id, servers: index };
+	let active = filter(index, (e) => e.id == active_id)[0], moved_from = null;
+	if (!active && active_id) {
+		let hash = filter(prev?.servers ?? [], (e) => e.id == active_id)[0]?.hash ?? active_id;
+		active = filter(index, (e) => e.hash == hash)[0];
+		if (active)
+			moved_from = active_id;
+	}
+	active ??= index[0];
+	return { active: active?.id, moved_from, servers: index };
 };
 
 // a URL (https://, tcp://; load_config drops the others) is resolved by the xray DNS
