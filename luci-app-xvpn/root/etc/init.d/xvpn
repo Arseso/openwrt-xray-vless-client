@@ -10,9 +10,12 @@ CONF=/var/etc/xvpn/config.json
 
 start_service() {
 	config_load xvpn
-	local enabled xray_bin
+	local enabled xray_bin gomemlimit gogc
 	config_get_bool enabled main enabled 0
 	config_get xray_bin main xray_bin /usr/bin/xray
+	# Go GC of xray on a 256 MB router (DESIGN.md 9.1); not in the default config
+	config_get gomemlimit main gomemlimit 80MiB
+	config_get gogc main gogc 50
 
 	# VPN SSIDs get fixed names (xvpn-apN), deselected ones get theirs back; also when turned off,
 	# after fw-remove, which clears the warnings of the rules
@@ -26,7 +29,8 @@ start_service() {
 	# generate drops servers that xray rejects; 3: no servers, 4: xray does not work,
 	# 5: out of time, xray goes on with the config it runs
 	local have_servers=1 rc=0
-	$CLI generate >/dev/null || rc=$?
+	# its `xray run -test` with the same GC as xray
+	GOMEMLIMIT="$gomemlimit" GOGC="$gogc" $CLI generate >/dev/null || rc=$?
 	[ "$rc" = 0 ] || { [ "$rc" = 5 ] && [ -s "$CONF" ]; } || have_servers=0
 
 	# rules stay in place without servers: with kill switch on, clients stay offline instead of leaking;
@@ -36,6 +40,7 @@ start_service() {
 	if [ "$have_servers" = 1 ]; then
 		procd_open_instance xray
 		procd_set_param command "$xray_bin" run -c "$CONF"
+		procd_set_param env GOMEMLIMIT="$gomemlimit" GOGC="$gogc"
 		procd_set_param file "$CONF"
 		procd_set_param limits nofile="65535 65535"
 		procd_set_param stdout 1

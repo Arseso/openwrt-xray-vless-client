@@ -216,7 +216,8 @@ export function load_config(confdir) {
 			auto_best: bool(h.auto_best, false),
 			hysteresis: num(h.hysteresis, 150),
 			quarantine: num(h.quarantine, 300),
-			concurrency: num(h.concurrency, 8),
+			// parallel curl in a test, each with its connection in xray: 1..8 on 256 MB (#7)
+			concurrency: min(max(num(h.concurrency, 4), 1), 8),
 			// not in the default config, for tests (see DESIGN.md 6.3)
 			reload_idle: num(h.reload_idle, 60),
 			reload_retry: num(h.reload_retry, 30),

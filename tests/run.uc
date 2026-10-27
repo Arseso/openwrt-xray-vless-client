@@ -86,6 +86,11 @@ eq('tproxy route', conf.routing.rules[-1] ?? conf.routing.rules[length(conf.rout
 	{ type: 'field', inboundTag: [ 'tproxy', 'dns-in' ], outboundTag: 'srv-2' });
 eq('inbounds', length(conf.inbounds), 3 + length(servers));
 ok('no dns module for an IP', conf.dns == null);
+// stats come from the metrics section over loopback HTTP, there is no gRPC API (#7)
+eq('metrics', [ conf.metrics, conf.api ], [ { tag: 'metrics' }, null ]);
+eq('metrics inbound', filter(conf.inbounds, (i) => i.tag == 'metrics')[0],
+	{ tag: 'metrics', listen: '127.0.0.1', port: 10085, protocol: 'dokodemo-door', settings: { address: '127.0.0.1' } });
+eq('metrics route', conf.routing.rules[0], { type: 'field', inboundTag: [ 'metrics' ], outboundTag: 'metrics' });
 writefile(`${OUT}/config.json`, sprintf('%J', conf));
 
 // dns_server as a URL: queries go through the xray DNS module by domain

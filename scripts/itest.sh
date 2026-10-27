@@ -452,6 +452,26 @@ echo "OK: failover after the update went to the live sub-live"
 tunnel || { echo "FAIL: no tunnel through sub-live"; exit 1; }
 echo "OK: client goes through the tunnel after the update"
 
+# memory (#7): the status tab starts no xray, stats reads the metrics section over HTTP;
+# a reload with the same servers and binary runs no `xray run -test`
+printf '#!/bin/sh\necho "$*" >> /tmp/xray-runs\nexec /usr/bin/xray "$@"\n' > /tmp/xray-count; chmod +x /tmp/xray-count
+uci set xvpn.main.xray_bin=/tmp/xray-count; uci commit xvpn
+/etc/init.d/xvpn reload
+wait_for @.state connected 40
+[ "$(grep -c -- '-test' /tmp/xray-runs)" = 1 ] || { echo "FAIL: another binary is not tested once: $(cat /tmp/xray-runs)"; exit 1; }
+: > /tmp/xray-runs
+/etc/init.d/xvpn reload
+wait_for @.state connected 40
+tunnel || { echo "FAIL: no tunnel with the counting xray"; exit 1; }
+for i in 1 2 3; do s=$(ubus call luci.xvpn stats); ubus call luci.xvpn status >/dev/null; done
+[ ! -s /tmp/xray-runs ] || { echo "FAIL: xray started by a reload or the status tab: $(cat /tmp/xray-runs)"; exit 1; }
+[ "$(echo "$s" | jsonfilter -e "@.traffic['$(status @.active)'].down")" -gt 0 ] \
+	|| { echo "FAIL: no traffic of the active server in stats: $s"; exit 1; }
+echo "OK: stats from the metrics section, a reload of the same servers runs no xray -test"
+uci set xvpn.main.xray_bin=/usr/bin/xray; uci commit xvpn
+/etc/init.d/xvpn reload
+wait_for @.state connected 40
+
 # reload past the daemon (UCI triggers on wireless/network): ports shift again,
 # sub-live moves from 20001 to 20002
 { link 18447 sub-x; link 18448 sub-y; link 18446 sub-live; } | ucode -l fs -e 'print(b64enc(fs.stdin.read("all")))' > /www/sub.b64
@@ -605,6 +625,8 @@ wait_for @.state connected 40
 echo "OK: a slow generate (~35 s) is not killed, the rejected server is dropped"
 
 # generate killed midway (OOM, the daemon): the config and the index xray runs with stay
+# (without the kept verdicts it tests everything again, slowly)
+rm /var/etc/xvpn/tested.json
 c=$(md5sum < /var/etc/xvpn/config.json); x=$(md5sum < /var/etc/xvpn/index.json)
 ucode /usr/share/xvpn/cli.uc generate >/dev/null 2>&1 & g=$!
 sleep 10
