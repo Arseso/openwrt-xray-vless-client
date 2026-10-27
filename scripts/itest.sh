@@ -598,8 +598,10 @@ grep -q hang-reload /etc/init.d/xvpn || { echo "FAIL: test setup, no sleep in in
 touch /tmp/hang-reload
 wait_cmd 15 select_ok "$id"	# busy for the pause after the last reload
 wait_cmd 10 sh -c "ps w | grep -q '[s]leep 1000'"
+hung=$(ps w | awk '/[s]leep 1000/ { print $1 }')
 hung_reload "sleep in start_service"
-ps w | grep -q '[s]leep 1000' && { echo "FAIL: the hung reload was not killed"; exit 1; }
+# this very sleep: the retry after reload_retry may already sleep in a new one
+kill -0 $hung 2>/dev/null && { echo "FAIL: the hung reload was not killed"; exit 1; }
 rm /tmp/hang-reload
 wait_cmd 20 sh -c "logread | grep -q 'trying the reload again'"
 wait_for @.state connected 30
