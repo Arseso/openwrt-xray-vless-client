@@ -219,8 +219,9 @@ ubus call xvpn update
 - **Память** ([#7](https://github.com/Arseso/openwrt-xray-vless-client/issues/7)). На 256 МБ при генерации конфига дополнительно запускается `xray run -test`,
   вкладка Status раз в 30 с запускает `xray api`, тест серверов — до 8 `curl` одновременно.
   OOM-killer может выбрать xray — обрыв у всех клиентов.
-- **Не проверено на железе.** Тесты и интеграционный тест идут в контейнере OpenWrt x86-64;
-  проверка на AX3000T по чек-листу ([#25](https://github.com/Arseso/openwrt-xray-vless-client/issues/25)) ещё не пройдена, в том числе с аппаратным offload (PPE).
+- **Проверено на AX3000T** (OpenWrt 24.10.5, в том числе с аппаратным offload PPE) по чек-листу
+  [#25](https://github.com/Arseso/openwrt-xray-vless-client/issues/25), кроме VPN-SSID, dnsleaktest
+  и IPv6 — их ещё нужно пройти на устройстве.
 - **ICMP не проксируется.** С kill switch `ping` из VPN-сети в интернет не проходит — это ожидаемо.
   Без kill switch ICMP и прочее не-TCP/UDP идёт напрямую даже при работающем VPN.
 - **Без kill switch при `xray_down`** клиенты остаются без интернета: напрямую их пускают, только
