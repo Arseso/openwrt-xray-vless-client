@@ -7,7 +7,8 @@
 # subscription update from LuCI through the daemon and by a reload past it; a hung xray
 # and a broken xray_bin are xray_down, not dead servers; a hung reload (sleep in init.d,
 # procd lock held) does not stop the health checks, a slow generate is not killed and a
-# killed one leaves the running config.
+# killed one leaves the running config; the status tab and a reload of the same servers
+# start no xray.
 set -e
 cd "$(dirname "$0")/.."
 DOCKER="${DOCKER:-docker}"

@@ -13,7 +13,7 @@ start_service() {
 	local enabled xray_bin gomemlimit gogc
 	config_get_bool enabled main enabled 0
 	config_get xray_bin main xray_bin /usr/bin/xray
-	# Go GC of xray on a 256 MB router (DESIGN.md 9.1); not in the default config
+	# Go GC of xray on a 256 MB router (DESIGN.md 6.4); not in the default config
 	config_get gomemlimit main gomemlimit 80MiB
 	config_get gogc main gogc 50
 

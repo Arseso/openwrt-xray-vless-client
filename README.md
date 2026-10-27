@@ -216,9 +216,12 @@ ubus call xvpn update
   могут не отвечать, и демон уходит в `no_servers`; VPN поднимается после синхронизации времени на
   следующем цикле проверки. Пока живых серверов нет, демон повторно тестирует все серверы каждые
   30–90 с ([#12](https://github.com/Arseso/openwrt-xray-vless-client/issues/12)).
-- **Память** ([#7](https://github.com/Arseso/openwrt-xray-vless-client/issues/7)). На 256 МБ при генерации конфига дополнительно запускается `xray run -test`,
-  вкладка Status раз в 30 с запускает `xray api`, тест серверов — до 8 `curl` одновременно.
-  OOM-killer может выбрать xray — обрыв у всех клиентов.
+- **Память.** xray занимает 25–35 МБ при 20–200 серверах (замер в контейнере x86-64, на AX3000T
+  уточнится в [#25](https://github.com/Arseso/openwrt-xray-vless-client/issues/25)) и запускается с
+  `GOMEMLIMIT=80MiB GOGC=50` (скрытые опции `xvpn.main.gomemlimit` / `gogc`). Второй xray
+  (`xray run -test`) запускается, только когда меняется список серверов или бинарь, вкладка Status
+  xray не запускает, тест серверов — до 4 `curl` одновременно. Под очень большой нагрузкой xray
+  всё же может занять много памяти, и OOM-killer выберет его — обрыв у всех клиентов.
 - **Проверено на AX3000T** (OpenWrt 24.10.5, в том числе с аппаратным offload PPE) по чек-листу
   [#25](https://github.com/Arseso/openwrt-xray-vless-client/issues/25), кроме VPN-SSID, dnsleaktest
   и IPv6 — их ещё нужно пройти на устройстве.
