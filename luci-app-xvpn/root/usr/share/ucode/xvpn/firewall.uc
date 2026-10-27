@@ -255,10 +255,14 @@ export function render(cfg, res, opts) {
 		push(r, '\t\treject with icmpx type admin-prohibited');
 	else if (a.ipv6 == 'block')
 		push(r, '\t\tmeta nfproto ipv6 reject with icmpx type admin-prohibited');
+	// block must not fail on a bad port in the config: it is the fallback for a failed full,
+	// and minimal leaves single ports and SSIDs open
+	let lports = filter([ m.tproxy_port, m.dns_port ], (p) => !block || (type(p) == 'int' && p > 0 && p < 65536));
 	push(r, '\t}', '',
 		'\tchain guard_input {',
-		'\t\ttype filter hook input priority filter - 5; policy accept;',
-		`\t\tmeta l4proto { tcp, udp } th dport { ${m.tproxy_port}, ${m.dns_port} } meta mark & ${both} == 0 drop`);
+		'\t\ttype filter hook input priority filter - 5; policy accept;');
+	if (length(lports))
+		push(r, `\t\tmeta l4proto { tcp, udp } th dport { ${join(', ', lports)} } meta mark & ${both} == 0 drop`);
 	// the router's dnsmasq would resolve for them via the provider
 	if (block)
 		push(r, `\t\tmeta mark & ${cm} == ${cm} meta l4proto { tcp, udp } th dport 53 reject`);

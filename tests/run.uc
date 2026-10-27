@@ -120,6 +120,12 @@ ok('block rejects dns', index(blk, 'th dport 53 reject') >= 0);
 ok('block marks ports', index(blk, 'iifname @ports meta mark set meta mark | 0x01000000') >= 0);
 ok('block needs no tproxy', index(blk, 'tproxy') < 0 && index(blk, 'fib ') < 0 && index(blk, 'redirect') < 0);
 ok('full has no dns reject', index(nft, 'th dport 53 reject') < 0);
+// a bad port breaks full, but block (its fallback) must still load
+let bad = { ...cfg, main: { ...cfg.main, tproxy_port: 99999 } };
+let blkbad = render(bad, res, { block: true });
+ok('block skips a bad port', index(blkbad, '99999') < 0 && index(blkbad, 'th dport { 10853 }') >= 0);
+ok('full keeps the bad port', index(render(bad, res), '99999') >= 0);
+writefile(`${OUT}/block-badport.nft`, blkbad);
 writefile(`${OUT}/block.nft`, blk);
 let min = render(cfg, res, { minimal: true });
 ok('minimal rejects nets', index(min, 'iifname @nets reject with icmpx type admin-prohibited') >= 0);
