@@ -17,9 +17,16 @@ export function build_index(cfg, servers, active_id) {
 	return { active: active?.id, servers: index };
 };
 
+// a URL (https://…) is resolved by the xray DNS module: its queries reach the
+// server by domain, so they pass servers that refuse IP destinations
+export function dns_via_module(cfg) {
+	return index(cfg.access.dns_server, '://') > 0;
+};
+
 export function generate(cfg, servers, index) {
 	let m = cfg.main;
 	let active = filter(index.servers, (e) => e.id == index.active)[0];
+	let doh = dns_via_module(cfg);
 
 	let inbounds = [
 		{
@@ -32,7 +39,8 @@ export function generate(cfg, servers, index) {
 		},
 		{
 			tag: 'dns-in', listen: '::', port: m.dns_port, protocol: 'dokodemo-door',
-			settings: { address: cfg.access.dns_server, port: 53, network: 'tcp,udp' },
+			// with the DNS module the address is a placeholder: dns-out answers A/AAAA itself
+			settings: { address: doh ? '1.1.1.1' : cfg.access.dns_server, port: 53, network: 'tcp,udp' },
 		},
 		{
 			tag: 'api', listen: '127.0.0.1', port: m.api_port, protocol: 'dokodemo-door',
@@ -54,14 +62,20 @@ export function generate(cfg, servers, index) {
 
 	// unmatched traffic never leaves directly
 	push(outbounds, { tag: 'block', protocol: 'blackhole' });
+	if (doh) {
+		// other query types (TXT, HTTPS…) would go to an IP: drop them
+		push(outbounds, { tag: 'dns-out', protocol: 'dns', settings: { nonIPQuery: 'drop' } });
+		push(rules, { type: 'field', inboundTag: [ 'dns-in' ], outboundTag: 'dns-out' });
+	}
 	if (active) {
-		push(rules, { type: 'field', inboundTag: [ 'tproxy', 'dns-in' ], outboundTag: active.tag });
+		push(rules, { type: 'field', inboundTag: doh ? [ 'tproxy', 'dns-module' ] : [ 'tproxy', 'dns-in' ],
+			outboundTag: active.tag });
 		// the first outbound is the default one
 		let pos = filter(outbounds, (o) => o.tag == active.tag)[0];
 		outbounds = [ pos, ...filter(outbounds, (o) => o.tag != active.tag) ];
 	}
 
-	return {
+	let conf = {
 		log: { loglevel: m.loglevel, access: 'none' },
 		api: { tag: 'api', services: [ 'StatsService' ] },
 		stats: {},
@@ -70,4 +84,10 @@ export function generate(cfg, servers, index) {
 		outbounds,
 		routing: { domainStrategy: 'AsIs', rules },
 	};
+	if (doh)
+		conf.dns = {
+			tag: 'dns-module', servers: [ cfg.access.dns_server ],
+			queryStrategy: (cfg.access.ipv6 == 'block') ? 'UseIPv4' : 'UseIP',
+		};
+	return conf;
 };

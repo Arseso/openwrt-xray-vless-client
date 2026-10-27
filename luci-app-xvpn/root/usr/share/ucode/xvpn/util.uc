@@ -182,7 +182,7 @@ export function load_config(confdir) {
 			client_mark: num(m.client_mark, 0x01000000),
 			tproxy_mark: num(m.tproxy_mark, 0x02000000),
 			route_table: num(m.route_table, 100),
-			sniffing: bool(m.sniffing, false),
+			sniffing: bool(m.sniffing, true),
 		},
 		access: {
 			networks: list(a.network),
@@ -191,7 +191,7 @@ export function load_config(confdir) {
 			killswitch: bool(a.killswitch, true),
 			ipv6: (a.ipv6 == 'tunnel') ? 'tunnel' : 'block',
 			dns_hijack: bool(a.dns_hijack, true),
-			dns_server: a.dns_server || '1.1.1.1',
+			dns_server: a.dns_server || 'https://cloudflare-dns.com/dns-query',
 		},
 		health: {
 			url: h.url || 'https://www.gstatic.com/generate_204',

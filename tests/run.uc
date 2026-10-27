@@ -84,7 +84,19 @@ eq('default outbound is active', conf.outbounds[0].tag, 'srv-2');
 eq('tproxy route', conf.routing.rules[-1] ?? conf.routing.rules[length(conf.routing.rules) - 1],
 	{ type: 'field', inboundTag: [ 'tproxy', 'dns-in' ], outboundTag: 'srv-2' });
 eq('inbounds', length(conf.inbounds), 3 + length(servers));
+ok('no dns module for an IP', conf.dns == null);
 writefile(`${OUT}/config.json`, sprintf('%J', conf));
+
+// dns_server as a URL: queries go through the xray DNS module by domain
+cfg.access.dns_server = 'https://cloudflare-dns.com/dns-query';
+let dconf = generate(cfg, servers, idx);
+eq('doh module', dconf.dns, { tag: 'dns-module', servers: [ 'https://cloudflare-dns.com/dns-query' ], queryStrategy: 'UseIPv4' });
+ok('dns-in to dns-out', length(filter(dconf.routing.rules, (r) => r.inboundTag[0] == 'dns-in' && r.outboundTag == 'dns-out')) == 1);
+eq('doh route', dconf.routing.rules[length(dconf.routing.rules) - 1],
+	{ type: 'field', inboundTag: [ 'tproxy', 'dns-module' ], outboundTag: 'srv-2' });
+eq('default outbound with doh', dconf.outbounds[0].tag, 'srv-2');
+writefile(`${OUT}/config-doh.json`, sprintf('%J', dconf));
+cfg.access.dns_server = '1.1.1.1';
 
 // firewall
 // SSIDs come with a wildcard (WDS, dynamic VLAN) and may overlap an exact name: nft -c checks it

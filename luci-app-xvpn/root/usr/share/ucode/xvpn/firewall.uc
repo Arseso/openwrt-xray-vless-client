@@ -312,7 +312,9 @@ export function apply(cfg, res, opts) {
 		log(`nft failed: ${err}`);
 		return err;
 	}
-	routing(cfg, true);
+	// only tproxy needs the route; at boot (fw-guard, block) lo is still down and ip
+	// would fail with "Nexthop device is not up"
+	routing(cfg, !opts?.passthrough && !opts?.block && !opts?.minimal);
 	return null;
 };
 

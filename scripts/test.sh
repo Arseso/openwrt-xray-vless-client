@@ -22,5 +22,6 @@ $DOCKER run --rm --cap-add NET_ADMIN -v "$PWD:/src:ro" "$@" "$IMAGE" sh -ec '
 	xray=xray; [ ! -e /opt/xray ] || xray=/opt/xray
 	$xray version | head -1
 	$xray run -test -c /tmp/out/config.json
+	$xray run -test -c /tmp/out/config-doh.json
 	for f in /tmp/out/*.nft; do nft -c -f "$f" && echo "nft ok: $f"; done
 '
