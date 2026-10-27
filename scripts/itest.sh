@@ -7,7 +7,7 @@
 # subscription update from LuCI through the daemon and by a reload past it; a hung xray
 # and a broken xray_bin are xray_down, not dead servers; a hung reload (sleep in init.d,
 # procd lock held) does not stop the health checks, a slow generate is not killed and a
-# killed one leaves the running config.
+# killed one leaves the running config; before NTP sets the clock no server goes to quarantine.
 set -e
 cd "$(dirname "$0")/.."
 DOCKER="${DOCKER:-docker}"
@@ -412,6 +412,59 @@ want_mode full full
 [ -z "$(fw @.error)" ] || { echo "FAIL: error left after a successful fw-apply"; exit 1; }
 ip rule | grep -q 'lookup 100' || { echo "FAIL: no ip rule after returning to full"; exit 1; }
 echo "OK: error cleared after a successful fw-apply"
+
+# boot with the clock not set (no RTC, NTP pending): the servers look dead, none goes to
+# quarantine until sysntpd sets the clock (hotplug ntp), then the VPN comes up. The clock of
+# the container cannot be changed: a stopped remote stands for a server that rejects the
+# time. The image has no system.ntp, so sysntpd does not run; the hotplug event is sent by hand.
+not_quarantined() { # what
+	ubus call xvpn status | grep -q '"quarantined": true' && { echo "FAIL: quarantine while waiting for the time ($1)"; ubus call xvpn status; exit 1; }
+	return 0
+}
+uci batch <<UCI
+set system.ntp=timeserver
+add_list system.ntp.server=127.0.0.1
+commit system
+set xvpn.health.time_wait=20
+commit xvpn
+UCI
+kill $(cat /tmp/remote-18443.pid)
+rm -f /var/run/xvpn/time_synced
+/etc/init.d/xvpn restart
+wait_for @.state waiting_time 15
+env -i ACTION=stratum stratum=16 /sbin/hotplug-call ntp
+sleep 9	# 3 checks
+[ "$(status @.state)" = waiting_time ] && [ "$(status @.passthrough)" = false ] || { echo "FAIL: waiting for the time"; ubus call xvpn status; exit 1; }
+not_quarantined "kill switch"
+blocked "waiting for the time, kill switch on"
+remote 18443
+env -i ACTION=stratum stratum=2 /sbin/hotplug-call ntp
+[ -f /var/run/xvpn/time_synced ] || { echo "FAIL: hotplug ntp set no flag"; exit 1; }
+wait_for @.state connected 10
+logread | grep -q 'the clock is set by NTP' && active_is first || { echo "FAIL: after NTP sync"; ubus call xvpn status; exit 1; }
+tunnel || { echo "FAIL: no tunnel after NTP sync"; exit 1; }
+echo "OK: no quarantine before NTP sync, connected right after it"
+
+# kill switch off: clients go direct while the active server does not answer; no sync in
+# time_wait s: the daemon goes on with the clock as it is
+uci set xvpn.access.killswitch=0; uci commit xvpn
+kill $(cat /tmp/remote-18443.pid)
+rm -f /var/run/xvpn/time_synced
+/etc/init.d/xvpn restart
+wait_for @.state waiting_time 15
+wait_for @.passthrough true 15
+direct || { echo "FAIL: no passthrough while waiting for the time, kill switch off"; exit 1; }
+not_quarantined "kill switch off"
+remote 18443
+wait_cmd 30 sh -c "logread | grep -q 'no NTP sync in 20 s'"
+wait_for @.state connected 15
+wait_for @.passthrough false 10
+active_is first && tunnel || { echo "FAIL: after the time wait ran out"; ubus call xvpn status; exit 1; }
+echo "OK: passthrough while waiting for the time, going on after time_wait"
+uci set xvpn.access.killswitch=1; uci delete xvpn.health.time_wait; uci commit xvpn
+uci delete system.ntp; uci commit system
+/etc/init.d/xvpn restart
+wait_for @.state connected 40
 
 # failover: kill the active remote, start the other one
 kill $(cat /tmp/remote-18443.pid); remote 18444
