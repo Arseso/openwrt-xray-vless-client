@@ -28,8 +28,9 @@ const STARTED = clock(true)[0];
 // hundreds of outbounds it takes as much memory. A reload that only selects a server or
 // follows a wifi change tests nothing; a changed server list is tested once (one test of the
 // whole config while xray accepts it; one by one only the servers it has not judged yet).
-// { bin: bin_sig(), frame: <the config without servers passed>, ok: { <outbound key>: bool } },
-// in /var: after a boot everything is tested once again
+// { bin: bin_sig(), frame: <main and access settings>, full: <the server set whose whole
+// config passed>, ok: { <outbound key>: bool } }; another binary or other settings start
+// anew. In /var: after a boot everything is tested once again
 const TESTED_FILE = `${VAR_DIR}/tested.json`;
 
 // another binary (an upgrade, xray_bin changed or fixed in place) may judge otherwise
@@ -49,9 +50,17 @@ for (let k in [ 'GOMEMLIMIT', 'GOGC' ])
 	if (getenv(k))
 		XRAY_ENV[k] = getenv(k);
 
-// the last xray_ok was xray's own answer: not hung, not killed by a signal (OOM), so it
-// may be kept
+// the last xray_ok was xray's own verdict on the config, so it may be kept: accepted, or
+// exit code 23 (config error); not hung, not killed (OOM), not a Go runtime error (2)
 let definite = false;
+
+// write_json that checks the file is whole: on a full tmpfs xray would reject a truncated
+// config with the same 23
+function put(path, obj) {
+	let text = sprintf('%J\n', obj);
+	write_file(path, text);
+	return readfile(path) === text;
+}
 
 // true: xray accepts the config; false: rejects it, hung or was killed (OOM); null: out of
 // time, reserve seconds of the budget kept for later. uloop.process reports a killed
@@ -80,7 +89,7 @@ function xray_ok(path, limit, reserve) {
 		return null;
 	if (hung)
 		log(`${cfg.main.xray_bin} run -test hung for ${limit} s, killed`);
-	definite = !hung && code != null && int(code) < 128;
+	definite = !hung && code != null && int(code) in [ 0, 23 ];
 	return !hung && code != null && int(code) == 0;
 }
 
@@ -173,11 +182,12 @@ case 'generate': {
 	prune(cfg);
 	let all = all_servers(cfg), servers = all;
 	let active = trim(readfile(ACTIVE_FILE) ?? '');
-	let sig = bin_sig(), tested = read_json(TESTED_FILE);
-	if (type(tested?.ok) != 'object' || tested.bin != sig)
-		tested = { bin: sig, frame: null, ok: {} };
-	let frame = conf_key(generate(cfg, [], build_index(cfg, [], null)));
+	// everything but the servers that goes into the config (ports, DNS, sniffing…)
+	let sig = bin_sig(), frame = conf_key([ cfg.main, cfg.access ]), tested = read_json(TESTED_FILE);
+	if (type(tested?.ok) != 'object' || tested.bin != sig || tested.frame != frame)
+		tested = { bin: sig, frame, full: null, ok: {} };
 	let verdict = (s) => tested.ok[s.key ??= conf_key(s.outbound)];
+	let set_key = (list) => conf_key(sort(map(list, (s) => s.key ?? conf_key(s.outbound))));
 	// rejected before: dropped without a test
 	let skipped = map(filter(servers, (s) => verdict(s) === false), (s) => s.name);
 	if (length(skipped)) {
@@ -194,7 +204,7 @@ case 'generate': {
 	// the verdicts got so far are kept whatever the end: they are xray's own
 	function keep(passed) {
 		if (passed) {
-			tested.frame = frame;
+			tested.full = set_key(servers);
 			for (let s in servers)
 				tested.ok[s.key] = true;
 		}
@@ -236,8 +246,8 @@ case 'generate': {
 	}
 
 	// one malformed server must not take the whole VPN down: drop the ones xray rejects
-	// everything here was accepted by this binary before: no test
-	let known = (tested.frame == frame && length(filter(servers, (s) => verdict(s) !== true)) == 0);
+	// the same servers with the same settings were accepted by this binary before: no test
+	let known = (tested.full == set_key(servers));
 	let testing = length(servers) && !known && access(cfg.main.xray_bin, 'x');
 	if (testing && !check(next, TEST_FULL)) {
 		let good = [], bad = [];
@@ -246,7 +256,6 @@ case 'generate': {
 		write_json(tmp, generate(cfg, [], build_index(cfg, [], null)));
 		if (!check(tmp, TEST_ONE))
 			commit(4);
-		tested.frame = frame;
 		// out of time (a slow router, a big subscription): the servers not tested yet are
 		// dropped, a test of the whole config stays in the budget
 		let untested = 0;
@@ -259,8 +268,10 @@ case 'generate': {
 				untested++;
 				continue;
 			}
-			write_json(tmp, generate(cfg, [ s ], build_index(cfg, [ s ], s.id)));
-			let ok = xray_ok(tmp, TEST_ONE, TEST_FULL);
+			let ok = false;
+			definite = false;
+			if (put(tmp, generate(cfg, [ s ], build_index(cfg, [ s ], s.id))))
+				ok = xray_ok(tmp, TEST_ONE, TEST_FULL);
 			if (definite)
 				tested.ok[s.key] = ok;
 			if (ok == null)

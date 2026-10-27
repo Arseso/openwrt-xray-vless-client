@@ -469,6 +469,14 @@ for i in 1 2 3; do s=$(ubus call luci.xvpn stats); ubus call luci.xvpn status >/
 [ "$(echo "$s" | jsonfilter -e "@.traffic['$(status @.active)'].down")" -gt 0 ] \
 	|| { echo "FAIL: no traffic of the active server in stats: $s"; exit 1; }
 echo "OK: stats from the metrics section, a reload of the same servers runs no xray -test"
+# a GOMEMLIMIT Go cannot parse would stop xray at start: the default instead
+uci set xvpn.main.gomemlimit=80MB; uci commit xvpn
+/etc/init.d/xvpn reload
+wait_for @.state connected 40
+logread | grep -q "main.gomemlimit '80MB'" && tr '\0' '\n' < /proc/$(xray_pid)/environ | grep -qx GOMEMLIMIT=80MiB \
+	|| { echo "FAIL: bad gomemlimit: $(tr '\0' ' ' < /proc/$(xray_pid)/environ)"; exit 1; }
+echo "OK: a bad gomemlimit falls back to 80MiB"
+uci delete xvpn.main.gomemlimit
 uci set xvpn.main.xray_bin=/usr/bin/xray; uci commit xvpn
 /etc/init.d/xvpn reload
 wait_for @.state connected 40

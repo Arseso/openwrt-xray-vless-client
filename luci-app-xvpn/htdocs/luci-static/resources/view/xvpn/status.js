@@ -7,9 +7,9 @@
 'require ui';
 'require dom';
 
-// luci.xvpn stats reads xray's metrics over loopback HTTP (no xray process): on every poll,
-// but an action's refresh right after a poll does not count it again
-const STATS_EVERY = 3;
+// luci.xvpn stats reads xray's metrics over loopback HTTP (no xray process); a hung xray
+// holds rpcd for the 1 s timeout until the daemon sees xray_down: once in this many seconds
+const STATS_EVERY = 10;
 
 const callStatus = rpc.declare({ object: 'luci.xvpn', method: 'status' });
 const callTest = rpc.declare({ object: 'luci.xvpn', method: 'test' });
@@ -138,7 +138,7 @@ return view.extend({
 		// running: false when the daemon is not on ubus; enabled and the router time come with it
 		return L.resolveDefault(callStatus(), {}).then((status) => {
 			const up = (status.running === true);
-			// with xray down the query would wait for its timeout (2 s) and hold rpcd
+			// with xray down the query would wait for its timeout and hold rpcd
 			const due = up && status.enabled && status.state != 'xray_down' && !(status.time - this.statsAt < STATS_EVERY);
 			if (due)
 				this.statsAt = status.time;
