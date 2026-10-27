@@ -21,13 +21,19 @@ const DEFAULTS = {
 const PORTS = [ 'tproxy_port', 'dns_port', 'api_port' ];
 const MARKS = [ 'client_mark', 'tproxy_mark' ];
 
-// load_config() reads numbers with int() (or hex() after 0x), which also takes "12abc":
-// the UI asks for plain decimal numbers
+// load_config() reads numbers with hex() after 0x, else with int(), which also takes "12abc":
+// the UI takes the same decimal and hex numbers, but only whole ones
+function number(v) {
+	v = String(v ?? '').trim();
+	return /^0x[0-9a-f]+$/i.test(v) ? parseInt(v, 16) : /^\d+$/.test(v) ? parseInt(v, 10) : NaN;
+}
+
 function integer(min, max) {
 	return (sid, v) => {
 		if (v == null || v === '')
 			return true;
-		if (!/^\d+$/.test(v) || +v < min || +v > max)
+		const n = number(v);
+		if (isNaN(n) || n < min || n > max)
 			return _('Enter a whole number from %d to %d').format(min, max);
 		return true;
 	};
@@ -75,7 +81,7 @@ return view.extend({
 		o = s.option(form.Value, 'interval', _('Check interval, s'),
 			_('How often the active server is checked.'));
 		o.placeholder = DEFAULTS.interval;
-		const shorter = (sid) => (+this.value(h, sid, 'timeout') < +this.value(h, sid, 'interval'))
+		const shorter = (sid) => (number(this.value(h, sid, 'timeout')) < number(this.value(h, sid, 'interval')))
 			|| _('The timeout must be shorter than the check interval');
 		o.validate = (sid, v) => {
 			const r = integer(5, 3600)(sid, v);
@@ -121,10 +127,7 @@ return view.extend({
 		o.validate = integer(0, 10000);
 		o.depends('auto_best', '1');
 		// the value stays in the config while the option is hidden
-		o.remove = function(sid) {
-			if (this.isActive(sid))
-				uci.unset('xvpn', sid, 'hysteresis');
-		};
+		o.retain = true;
 
 		s = m.section(form.NamedSection, 'main', 'general', _('xray'));
 		s.addremove = false;
@@ -160,9 +163,9 @@ return view.extend({
 			const r = integer(1, 65535)(sid, v);
 			if (r !== true)
 				return r;
-			const p = +this.value(adv, sid, name), base = +this.value(adv, sid, 'test_port_base');
+			const p = number(this.value(adv, sid, name)), base = number(this.value(adv, sid, 'test_port_base'));
 			for (let other of PORTS)
-				if (other != name && +this.value(adv, sid, other) == p)
+				if (other != name && number(this.value(adv, sid, other)) == p)
 					return _('The same port as "%s"').format(portNames[other]);
 			if (p >= base && p < base + count)
 				return _('The port is in the range of the test ports %d–%d').format(base, base + count - 1);
@@ -186,7 +189,7 @@ return view.extend({
 			const r = integer(1024, 65535)(sid, v);
 			if (r !== true)
 				return r;
-			const base = +this.value(adv, sid, 'test_port_base');
+			const base = number(this.value(adv, sid, 'test_port_base'));
 			if (base + count - 1 > 65535)
 				return _('%d servers need ports up to %d').format(count, base + count - 1);
 			return true;
@@ -202,10 +205,11 @@ return view.extend({
 			o.validate = (sid, v) => {
 				if (!v)
 					return true;
-				if (!/^0x[0-9a-f]{1,8}$/i.test(v) || !parseInt(v, 16))
-					return _('Enter a non-zero hex number from 0x1 to 0xffffffff');
+				const n = number(v);
+				if (isNaN(n) || n < 1 || n > 0xffffffff)
+					return _('Enter a number from 0x1 to 0xffffffff (hex) or from 1 to 4294967295');
 				const other = MARKS.find((n) => n != name);
-				if (parseInt(this.value(adv, sid, name), 16) & parseInt(this.value(adv, sid, other), 16))
+				if (number(this.value(adv, sid, name)) & number(this.value(adv, sid, other)))
 					return _('Shares bits with "%s"').format(markNames[other]);
 				return true;
 			};
@@ -218,7 +222,7 @@ return view.extend({
 			const r = integer(1, 2147483647)(sid, v);
 			if (r !== true)
 				return r;
-			if (+v >= 253 && +v <= 255)
+			if (number(v) >= 253 && number(v) <= 255)
 				return _('Tables 253–255 are default, main and local');
 			return true;
 		};

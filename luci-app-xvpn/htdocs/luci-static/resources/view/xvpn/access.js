@@ -29,24 +29,32 @@ function bandText(band) {
 	return { '2g': '2.4 GHz', '5g': '5 GHz', '6g': '6 GHz', '60g': '60 GHz' }[band] ?? band;
 }
 
-// what util.uc dns_server() takes as is: an IP (forwarded to <IP>:53 through the tunnel)
-// or an https:// / tcp:// URL; anything else would be replaced by the default
+// what util.uc dns_server() takes as is: an IP or a host name without a scheme (forwarded to
+// <dns_server>:53 through the tunnel) or an https:// / tcp:// URL, the scheme in lower case;
+// it would replace other schemes (+local would query around the tunnel) by the default
 function validDns(sid, v) {
 	if (!v)
 		return true;
 	v = v.trim();
-	if (/^(https|tcp):\/\/[^\/\s]+\S*$/i.test(v))
+	if (/^(https|tcp):\/\/[^\/\s]+\S*$/.test(v))
 		return true;
-	if (/^\d{1,3}(\.\d{1,3}){3}$/.test(v) && v.split('.').every((o) => +o <= 255))
-		return true;
-	if (/^[0-9a-f:.]+$/i.test(v) && v.includes(':')) {
+	if (v.includes('://'))
+		return _('Only https:// (DoH) and tcp:// URLs go through the tunnel, the scheme in lower case');
+	if (/^\d{1,3}(\.\d{1,3}){3}$/.test(v))
+		return v.split('.').every((o) => +o <= 255) || _('Invalid IPv4 address');
+	if (v.includes(':')) {
 		try {
-			new URL('http://[' + v + ']/');
-			return true;
+			if (/^[0-9a-f:.]+$/i.test(v)) {
+				new URL('http://[' + v + ']/');
+				return true;
+			}
 		}
 		catch (e) { }
+		return _('Invalid IPv6 address');
 	}
-	return _('Enter an IP address, an https:// (DoH) or a tcp:// URL');
+	if (/^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/i.test(v))
+		return true;
+	return _('Enter an IP address, a host name, an https:// (DoH) or a tcp:// URL');
 }
 
 // checkboxes for a list; ui.Select with widget 'checkbox' returns only one value
@@ -101,10 +109,17 @@ const CheckList = form.MultiValue.extend({
 
 	renderWidget(section_id, option_index, cfgvalue) {
 		const values = L.toArray(cfgvalue ?? this.default);
-		// a configured name the router does not have any more stays selectable
-		for (let v of values)
-			if (!this.keylist.includes(v))
-				this.value(v, choice(v, [], _('not found')));
+		// a configured name the router does not have any more stays selectable until it is
+		// deselected and saved (the form is rendered again after saving)
+		this.missing ??= [];
+		for (let v of this.missing) {
+			const i = this.keylist.indexOf(v);
+			this.keylist.splice(i, 1);
+			this.vallist.splice(i, 1);
+		}
+		this.missing = values.filter((v) => !this.keylist.includes(v));
+		for (let v of this.missing)
+			this.value(v, choice(v, [], _('not found')));
 		if (!this.keylist.length)
 			return E('em', {}, _('none found'));
 		return new UICheckList(values, this.transformChoices(), { id: this.cbid(section_id), sort: this.keylist }).render();
@@ -189,7 +204,7 @@ return view.extend({
 		o.rmempty = false;
 
 		o = s.option(form.Value, 'dns_server', _('DNS server'),
-			_('A URL is DoH (https://) or DNS over TCP (tcp://) through the DNS module of xray: it answers only A and AAAA queries. An IP address: queries are forwarded to it, port 53, through the tunnel. Other schemes (+local) would query around the tunnel and are not accepted.'));
+			_('A URL is DoH (https://) or DNS over TCP (tcp://) through the DNS module of xray: it answers only A and AAAA queries. An IP address or a host name: queries are forwarded to it, port 53, through the tunnel. Other schemes (+local) would query around the tunnel and are not accepted.'));
 		o.placeholder = DEFAULT_DNS;
 		o.value('https://cloudflare-dns.com/dns-query');
 		o.value('https://dns.google/dns-query');

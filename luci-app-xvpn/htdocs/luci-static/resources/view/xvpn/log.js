@@ -8,11 +8,12 @@
 
 const callLog = rpc.declare({ object: 'luci.xvpn', method: 'log' });
 
-const REFRESH = 5;
+// rpcd serves nothing else while it reads the log
+const REFRESH = 10;
 
 // logread lines: "Tue Oct 27 10:00:00 2026 user.notice xvpn: …"; the backend sends only the lines
-// tagged xvpn and those of xray (tagged with the name of its binary)
-const XVPN = / xvpn(\[\d+\])?: /;
+// tagged xvpn, ucode (the output of xvpnd itself) and those of xray (the name of its binary)
+const XVPN = / (xvpn|ucode)(\[\d+\])?: /;
 const SOURCES = {
 	'': () => true,
 	xvpn: (l) => XVPN.test(l),
@@ -121,7 +122,7 @@ return view.extend({
 		const node = E('div', { 'class': 'cbi-map' }, [
 			E('h2', {}, _('XVPN: log')),
 			E('div', { 'class': 'cbi-map-descr' },
-				_('The last 300 lines of the system log from the xvpn service and xray. The log level of xray is set in the Settings tab.')),
+				_('The last lines of the system log from the xvpn service, its daemon and xray. The log level of xray is set in the Settings tab.')),
 			E('div', { 'class': 'cbi-section' }, [
 				E('div', { 'style': 'display:flex;flex-wrap:wrap;gap:.5em 1em;align-items:center;margin-bottom:.5em' }, [
 					this.query,
