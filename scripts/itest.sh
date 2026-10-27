@@ -12,7 +12,8 @@ set -e
 cd "$(dirname "$0")/.."
 DOCKER="${DOCKER:-docker}"
 IMAGE="${IMAGE:-openwrt/rootfs:x86-64-24.10.4}"
-NAME=${NAME:-xvpn-itest}
+# unique per checkout: parallel runs from other worktrees must not remove this container
+NAME=${NAME:-xvpn-itest-$(printf %s "$PWD" | cksum | cut -d' ' -f1)}
 
 $DOCKER rm -f $NAME >/dev/null 2>&1 || true
 # without S11sysctl: in a privileged container it would write the host's kernel.* sysctls
