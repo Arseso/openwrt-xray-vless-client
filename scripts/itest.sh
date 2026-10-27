@@ -742,7 +742,9 @@ echo "OK: a test leaves a limited server the daemon chose"
 # fewer live servers than URL2_CDN: all are limited, the start still chooses the fastest
 # of them, connected with the reason in last_error, not no_servers
 ip netns exec wan nft -f - <<NFT
-table inet drop81 { chain in { type filter hook input priority 0; tcp dport 81 drop; } }
+table inet drop81 {
+	chain input { type filter hook input priority 0; tcp dport 81 drop; }
+}
 NFT
 uci set xvpn.health.url2=http://check2.test:81/; uci commit xvpn
 /etc/init.d/xvpn stop
