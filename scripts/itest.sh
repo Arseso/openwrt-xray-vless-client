@@ -579,7 +579,7 @@ logread | grep xvpn | grep -E 'switching|state' | tail -5
 # by hand starts it over. Dead remotes answer at once (blackhole: HTTP 403), xray works.
 # The active one is probed meanwhile: back, it is connected by that probe, before the next
 # test and without a test run
-dead() { # port: kept in /tmp/remote-$1.pid, the next remote() or slow() replaces it
+dead() { # port: kept in /tmp/remote-$1.pid for slow() or a kill before remote()
 	kill $(cat /tmp/remote-$1.pid) 2>/dev/null || true
 	cat > /tmp/remote-$1.json <<JSON
 { "inbounds": [ { "listen": "127.0.0.1", "port": $1, "protocol": "vless",
@@ -608,6 +608,7 @@ wait_cmd 20 retry_is 12
 [ "$(tests_since)" = 4 ] || { echo "FAIL: no live servers: $(tests_since) tests until the pause is 12 s again"; diag; exit 1; }
 echo "OK: no live servers: the pause grows to retry_max, a test by hand starts it over"
 n=$(status @.tests)
+kill $(cat /tmp/remote-18444.pid)	# xray binds with reuseport: the blackhole would answer too
 remote 18444
 wait_cmd 12 connected_to second
 [ $((at - $(date +%s))) -ge 3 ] && [ "$(status @.tests)" = "$n" ] && [ -z "$(status @.retry)" ] \
