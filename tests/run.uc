@@ -4,7 +4,7 @@
 'use strict';
 
 import { readfile, writefile, mkdir, stat } from 'fs';
-import { parse_link, parse_subscription } from 'xvpn.links';
+import { parse_link, parse_subscription, transport } from 'xvpn.links';
 import { parse_userinfo, assign_ids, list_change, known_ids, prune_no_auto, NO_AUTO_GRACE } from 'xvpn.subscription';
 import { load_config, fastest, no_auto_ids, set_no_auto, mkdir_p, read_json, SUBS_DIR } from 'xvpn.util';
 import { build_index, generate, ports_error } from 'xvpn.xrayconf';
@@ -56,6 +56,11 @@ ok('vless encryption unsupported', p[11].error);
 ok('ss 2022 bad key', p[12].error);
 ok('hashes unique', length(uniq(map(filter(p, (s) => !s.error), (s) => s.hash))) == 9);
 eq('hash stable', parse_link(lines[0]).hash, p[0].hash);
+eq('transport labels', map([ 0, 1, 2, 3, 4, 5, 6, 7 ], (i) => transport(p[i].outbound)),
+	[ 'tcp+reality+vision', 'xhttp+reality', 'ws+tls', 'grpc+tls', 'httpupgrade', 'ws+tls', 'tcp+tls', 'tcp' ]);
+// xray json items keep their own network names
+eq('transport json', [ transport({ streamSettings: { network: 'raw', security: 'reality' } }),
+	transport({ streamSettings: { network: 'splithttp' } }), transport(null) ], [ 'tcp+reality', 'xhttp', 'tcp' ]);
 
 // subscriptions
 let b = parse_subscription(readfile(`${FIX}/sub-base64.txt`));
@@ -129,6 +134,7 @@ let cfg = {
 let servers = [ ...assign_ids(b.servers, 's1'), ...assign_ids(xj.servers, 's2') ];
 let idx = build_index(cfg, servers, servers[2].id);
 eq('index active', idx.active, servers[2].id);
+eq('index transport', idx.servers[2].transport, transport(servers[2].outbound));
 let mv = build_index(cfg, servers, servers[3].hash);
 eq('index active by the hash (id before #49)', [ mv.active, mv.moved_from ], [ servers[3].id, servers[3].hash ]);
 eq('index active found by id: not moved', build_index(cfg, servers, servers[3].id, idx).moved_from, null);

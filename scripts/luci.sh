@@ -44,9 +44,12 @@ $DOCKER exec -i -e NET="$NET" -e PASS="$PASS" $NAME sh -e <<'IN'
 UUID=11111111-2222-3333-4444-555555555555
 mkdir -p /var/lock
 i=0; until logread 2>/dev/null | grep -q 'init complete'; do [ $i -lt 30 ] || break; sleep 1; i=$((i+1)); done
-# netifd puts eth0 into br-lan and drops the docker address: give it back as wan
+# netifd puts eth0 into br-lan and drops the docker address: give it back as wan.
+# docker passes on the host's DNS server, often a home router at 192.168.1.1: the
+# default LAN address would take it over and DNS would end at our own dnsmasq
 set -- $NET
 uci batch <<UCI
+set network.lan.ipaddr=192.168.199.1
 del_list network.@device[0].ports=eth0
 set network.@device[0].bridge_empty=1
 set network.wan=interface
@@ -61,8 +64,10 @@ UCI
 /etc/init.d/network restart
 /etc/init.d/firewall restart
 sleep 3
-opkg update >/dev/null
-opkg install luci ucode-mod-uloop xray-core curl >/dev/null
+# downloads.openwrt.org may fail right after the network restart (wget returned 4):
+# tried again, as in itest.sh
+i=0; until opkg update >/dev/null; do i=$((i+1)); [ $i -lt 5 ] || exit 1; sleep 5; done
+i=0; until opkg install luci ucode-mod-uloop xray-core curl >/dev/null; do i=$((i+1)); [ $i -lt 5 ] || exit 1; sleep 5; done
 printf '%s\n%s\n' "$PASS" "$PASS" | passwd root >/dev/null 2>&1
 IN
 sync

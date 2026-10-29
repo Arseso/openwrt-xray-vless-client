@@ -980,7 +980,7 @@ function status() {
 	reindex(false);
 	let off = no_auto();
 	let servers = map(index.servers, (e) => ({
-		id: e.id, name: e.name, proto: e.proto, address: e.address, port: e.port,
+		id: e.id, name: e.name, proto: e.proto, transport: e.transport, address: e.address, port: e.port,
 		sub: e.sub, sub_name: e.sub_name,
 		latency: st.latency[e.id]?.ms, tested: st.latency[e.id]?.at,
 		quarantined: quarantined(e.id), auto: !off[e.id],

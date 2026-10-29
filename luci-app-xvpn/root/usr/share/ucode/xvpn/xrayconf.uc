@@ -4,6 +4,8 @@
 
 'use strict';
 
+import { transport } from 'xvpn.links';
+
 // prev: the index of the running config. The chosen server keeps the choice when its id
 // changes but the connection (hash) does not: renamed, its subscription removed and added
 // again, or the subscription disabled while another lists the same server. active_id
@@ -20,7 +22,8 @@ export function build_index(cfg, servers, active_id, prev, env) {
 		while (busy[port] || main[port])
 			port++;
 		push(index, {
-			id: s.id, hash: s.hash, name: s.name, proto: s.proto, address: s.address, port: s.port,
+			id: s.id, hash: s.hash, name: s.name, proto: s.proto, transport: transport(s.outbound),
+			address: s.address, port: s.port,
 			sub: s.sub, sub_name: s.sub_name,
 			tag: `srv-${i}`, test_port: port++,
 		});

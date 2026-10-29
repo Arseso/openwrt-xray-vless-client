@@ -163,6 +163,19 @@ export function stream_settings(p, address) {
 	return { stream: ss };
 };
 
+// Short transport label for the UI: network, security and the vision flow, e.g.
+// "grpc+reality", "tcp+tls+vision". Takes outbounds of links and of xray json items.
+export function transport(ob) {
+	let ss = ob?.streamSettings ?? {}, s = ob?.settings ?? {};
+	let net = lc(ss.network ?? 'tcp');
+	let parts = [ NETWORKS[net] ?? net ];
+	if (ss.security && ss.security != 'none')
+		push(parts, ss.security);
+	if (index(s.vnext?.[0]?.users?.[0]?.flow ?? '', 'vision') >= 0)
+		push(parts, 'vision');
+	return join('+', parts);
+};
+
 function server(proto, name, address, port, outbound, key) {
 	return {
 		// the connection itself: dedupes servers listed twice; the stable id comes from

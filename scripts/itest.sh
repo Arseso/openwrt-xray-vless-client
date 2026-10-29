@@ -43,9 +43,12 @@ diag() {
 	echo "--- logread"; logread | grep -E 'xvpn|xray|procd' | tail -30
 }
 i=0; until logread 2>/dev/null | grep -q 'init complete'; do [ $i -lt 30 ] || break; sleep 1; i=$((i+1)); done
-# netifd puts eth0 into br-lan and drops the docker address: give it back as wan
+# netifd puts eth0 into br-lan and drops the docker address: give it back as wan.
+# docker passes on the host's DNS server, often a home router at 192.168.1.1: the
+# default LAN address would take it over and DNS would end at our own dnsmasq
 set -- $NET
 uci batch <<UCI
+set network.lan.ipaddr=192.168.199.1
 del_list network.@device[0].ports=eth0
 set network.@device[0].bridge_empty=1
 set network.wan=interface
