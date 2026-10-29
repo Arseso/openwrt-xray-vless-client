@@ -55,6 +55,13 @@ set network.wan.ipaddr=$1
 set network.wan.gateway=$2
 commit network
 UCI
+# DNS for wan: the host's resolvers, but not one in the router's own LAN (a home router at
+# 192.168.1.1 as the host's DNS: dnsmasq would ask itself and refuse), 1.1.1.1 as the fallback
+for ns in $(awk '/^nameserver/ { print $2 }' /etc/resolv.conf) 1.1.1.1; do
+	case $ns in 192.168.1.*|127.*|*:*) continue ;; esac
+	uci add_list network.wan.dns=$ns
+done
+uci commit network
 /etc/init.d/network restart
 sleep 3
 # downloads.openwrt.org may fail right after the network restart or on a busy host
