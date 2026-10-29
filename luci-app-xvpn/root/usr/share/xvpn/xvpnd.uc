@@ -917,8 +917,9 @@ check = function() {
 	let off = no_auto()[e.id] && !by_hand(e.id);
 	// nothing to choose from (#12): the next test of all servers once the pause is over
 	// (retry_delay(), reset by set_state(), load_index() and the user); meanwhile only the
-	// active one is probed, one curl a check: back as soon as it answers; a refused test
-	// port is xray's problem (see xray_check()), the choice is made once xray works again
+	// active one is probed, one curl a check: back as soon as it answers. A refused test
+	// port is xray's problem (see xray_check()): xray_down() as on the usual path, without a
+	// decision put off (the next check of it would pass on the api port and test all again)
 	if (st.state == 'no_servers' && st.dead && now() < st.dead.next) {
 		if (!off)
 			probe(e.test_port, (ms, code) => {
@@ -928,8 +929,9 @@ check = function() {
 					return up(e, ms);
 				if (code == 7)
 					xray_check(code, (problem, inst) => {
-						if (valid(gen) && problem && problem != XRAY_UNKNOWN)
-							xray_down(problem, inst, 'no live servers');
+						if (valid(gen) && st.active == e.id && st.state == 'no_servers'
+								&& problem && problem != XRAY_UNKNOWN)
+							xray_down(problem, inst);
 					});
 			});
 		return;
