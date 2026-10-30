@@ -204,6 +204,16 @@ export function load_config(confdir) {
 			tproxy_mark: num(m.tproxy_mark, 0x02000000),
 			route_table: num(m.route_table, 100),
 			sniffing: bool(m.sniffing, true),
+			// BitTorrent (sniffed from the first packets) goes to blackhole (#15)
+			block_bittorrent: bool(m.block_bittorrent, false),
+			// xray policy level 0 in s (#15, DESIGN.md 6.4); not in the default config.
+			// conn_idle 120 instead of xray's 300: a torrent client keeps fewer sessions open
+			handshake: num(m.handshake, 4),
+			conn_idle: num(m.conn_idle, 120),
+			uplink_only: num(m.uplink_only, 2),
+			downlink_only: num(m.downlink_only, 5),
+			// KB a connection; null: xray's own (4 on arm64, 512 on amd64)
+			buffer_size: num(m.buffer_size, null),
 		},
 		access: {
 			networks: list(a.network),

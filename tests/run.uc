@@ -130,7 +130,8 @@ eq('new order: no reload', list_change(v2, [ v2[1], v2[0], v2[2], v2[3] ], [ v2[
 // config generation
 let cfg = {
 	main: { tproxy_port: 12345, dns_port: 10853, api_port: 10085, test_port_base: 20000, loglevel: 'warning', sniffing: false,
-		client_mark: 0x01000000, tproxy_mark: 0x02000000, route_table: 100 },
+		client_mark: 0x01000000, tproxy_mark: 0x02000000, route_table: 100,
+		block_bittorrent: false, handshake: 4, conn_idle: 120, uplink_only: 2, downlink_only: 5, buffer_size: null },
 	access: { dns_server: '1.1.1.1', killswitch: true, ipv6: 'block', dns_hijack: true },
 };
 let servers = [ ...assign_ids(b.servers, 's1'), ...assign_ids(xj.servers, 's2') ];
@@ -159,7 +160,30 @@ eq('metrics', [ conf.metrics, conf.api ], [ { tag: 'metrics' }, null ]);
 eq('metrics inbound', filter(conf.inbounds, (i) => i.tag == 'metrics')[0],
 	{ tag: 'metrics', listen: '127.0.0.1', port: 10085, protocol: 'dokodemo-door', settings: { address: '127.0.0.1' } });
 eq('metrics route', conf.routing.rules[0], { type: 'field', inboundTag: [ 'metrics' ], outboundTag: 'metrics' });
+// session timeouts of level 0, the level of all inbounds (#15); bufferSize: xray's own
+eq('policy level 0', conf.policy.levels['0'], { handshake: 4, connIdle: 120, uplinkOnly: 2, downlinkOnly: 5 });
+ok('policy: inbounds of level 0', length(filter(conf.inbounds, (i) => i.settings?.userLevel)) == 0);
+eq('policy: stats kept', conf.policy.system, { statsOutboundUplink: true, statsOutboundDownlink: true });
+ok('no bittorrent block by default', length(filter(conf.routing.rules, (r) => r.protocol)) == 0);
+eq('sniffing off', conf.inbounds[0].sniffing, { enabled: false });
 writefile(`${OUT}/config.json`, sprintf('%J', conf));
+// BitTorrent to blackhole before the route to the server; without sniffing the protocol is
+// still detected, the IP is kept
+cfg.main.block_bittorrent = true;
+cfg.main.buffer_size = 4;
+let bt = generate(cfg, servers, idx);
+eq('bittorrent rule', bt.routing.rules[length(bt.routing.rules) - 2],
+	{ type: 'field', inboundTag: [ 'tproxy' ], protocol: [ 'bittorrent' ], outboundTag: 'block' });
+eq('bittorrent: route to the server last', bt.routing.rules[length(bt.routing.rules) - 1].outboundTag, 'srv-2');
+eq('bittorrent without sniffing: protocol only', bt.inbounds[0].sniffing, { enabled: true, destOverride: [] });
+eq('buffer_size', bt.policy.levels['0'].bufferSize, 4);
+cfg.main.sniffing = true;
+eq('bittorrent with sniffing: domains as before', generate(cfg, servers, idx).inbounds[0].sniffing,
+	{ enabled: true, destOverride: [ 'http', 'tls', 'quic' ], routeOnly: false });
+writefile(`${OUT}/config-bt.json`, sprintf('%J', bt));
+cfg.main.sniffing = false;
+cfg.main.block_bittorrent = false;
+cfg.main.buffer_size = null;
 
 // dns_server as a URL: queries go through the xray DNS module by domain
 cfg.access.dns_server = 'https://cloudflare-dns.com/dns-query';
@@ -468,6 +492,16 @@ for (let v in [ [ null, 'https://cp.cloudflare.com/generate_204' ], [ 'off', nul
 	eq(`url2 ${v[0]}`, load_config(`${OUT}/dnscfg`).health.url2, v[1]);
 }
 eq('url2_cdn by default', load_config(`${OUT}/dnscfg`).health.url2_cdn, 3);
+// policy (#15): hidden options, defaults without them
+writefile(`${OUT}/dnscfg/xvpn`, "config general 'main'\n");
+let pm = load_config(`${OUT}/dnscfg`).main;
+eq('policy defaults', [ pm.handshake, pm.conn_idle, pm.uplink_only, pm.downlink_only, pm.buffer_size, pm.block_bittorrent ],
+	[ 4, 120, 2, 5, null, false ]);
+writefile(`${OUT}/dnscfg/xvpn`, "config general 'main'\n\toption conn_idle '30'\n\toption buffer_size '0'\n\toption block_bittorrent '1'\n");
+pm = load_config(`${OUT}/dnscfg`).main;
+eq('policy options', [ pm.conn_idle, pm.buffer_size, pm.block_bittorrent ], [ 30, 0, true ]);
+writefile(`${OUT}/dnscfg/xvpn`, "config general 'main'\n\toption buffer_size 'big'\n");
+eq('buffer_size not a number: xray default', load_config(`${OUT}/dnscfg`).main.buffer_size, null);
 
 // no live servers (#12): the pause between tests of all servers doubles up to retry_max
 let pauses = [], d = null;

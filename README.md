@@ -57,6 +57,19 @@ ssh root@192.168.1.1 'opkg update && opkg install /tmp/luci-app-xvpn_*.ipk'
 
 `opkg update` нужен, чтобы зависимости (в первую очередь `xray-core`) скачались из фидов.
 
+Русский интерфейс — отдельный пакет перевода `luci-i18n-xvpn-ru_*.ipk` (лежит рядом с основным
+в релизе и в `dist/`); перевод самого LuCI — `luci-i18n-base-ru` из фида:
+
+```bash
+scp -O luci-i18n-xvpn-ru_*.ipk root@192.168.1.1:/tmp/
+```
+
+```bash
+ssh root@192.168.1.1 'opkg install luci-i18n-base-ru /tmp/luci-i18n-xvpn-ru_*.ipk'
+```
+
+Язык выбирается в LuCI: **System → System → Language and Style** (или «auto» — по браузеру).
+
 ### Сборка из исходников
 
 Нужен docker. Сборка идёт в OpenWrt SDK 24.10.4 (`openwrt/sdk:mediatek-filogic-24.10.4`):
@@ -65,7 +78,7 @@ ssh root@192.168.1.1 'opkg update && opkg install /tmp/luci-app-xvpn_*.ipk'
 sh scripts/build.sh
 ```
 
-Результат — `dist/luci-app-xvpn_*.ipk`; дальше как выше. По умолчанию скрипт вызывает
+Результат — `dist/luci-app-xvpn_*.ipk` и `dist/luci-i18n-xvpn-ru_*.ipk`; дальше как выше. По умолчанию скрипт вызывает
 `docker --context default`, другой docker задаётся переменной `DOCKER`.
 
 ### После обновления прошивки (sysupgrade)
@@ -88,8 +101,8 @@ echo /etc/xvpn/ >> /etc/sysupgrade.conf
 
 ## Настройка
 
-Всё настраивается в LuCI: **Services → XVPN**. Интерфейс пока на английском (переводов нет,
-[#22](https://github.com/Arseso/openwrt-xray-vless-client/issues/22)). Вкладки:
+Всё настраивается в LuCI: **Services → XVPN** («Службы → XVPN»). Интерфейс на английском и
+русском (пакет `luci-i18n-xvpn-ru`, см. выше). Вкладки:
 
 | Вкладка | Что там |
 |---------|---------|
@@ -214,6 +227,7 @@ ICMP) отклоняется.
 | Path to xray (`main.xray_bin`) | `/usr/bin/xray` | абсолютный путь |
 | Log level of xray (`main.loglevel`) | `warning` | `debug`, `info`, `warning`, `error`, `none` |
 | Sniffing (`main.sniffing`) | `1` | подменять IP на домен из HTTP/TLS/QUIC: многие серверы не пускают к IP |
+| Block BitTorrent (`main.block_bittorrent`) | `0` | BitTorrent клиентов (рукопожатие по TCP и uTP) — в blackhole: торрент-клиент открывает тысячи сессий |
 | TPROXY, DNS, API port (`main.tproxy_port`, `dns_port`, `api_port`) | `12345`, `10853`, `10085` | разные и вне диапазона тестовых портов |
 | First test port (`main.test_port_base`) | `20000` | SOCKS-порт для проверки каждого сервера: этот и следующие, по одному на сервер |
 | Client mark, TPROXY mark (`main.client_mark`, `tproxy_mark`) | `0x01000000`, `0x02000000` | метки firewall в hex, ненулевые, без общих битов; не пересекаться с mwan3 (`0x3f00`) и pbr (`0x00ff0000`) |
@@ -434,6 +448,9 @@ echo /usr/local/bin/xray >> /etc/sysupgrade.conf   # чтобы sysupgrade ег�
   (`xray run -test`) запускается, только когда меняется список серверов или бинарь, вкладка Status
   xray не запускает, тест серверов — до 4 `curl` одновременно. Под очень большой нагрузкой xray
   всё же может занять много памяти, и OOM-killer выберет его — обрыв у всех клиентов.
+  Сессия без трафика закрывается через 120 с (у xray по умолчанию 300): так торрент-клиент держит
+  меньше сессий. Скрытые опции `xvpn.main.conn_idle`, `handshake`, `uplink_only`, `downlink_only`
+  (секунды) и `buffer_size` (КБ на соединение, по умолчанию как у xray) — DESIGN.md, §6.4.
 - **Проверено на AX3000T** (OpenWrt 24.10.5, в том числе с аппаратным offload PPE) по чек-листу
   [#25](https://github.com/Arseso/openwrt-xray-vless-client/issues/25), кроме VPN-SSID, dnsleaktest
   и IPv6 — их ещё нужно пройти на устройстве.
@@ -546,6 +563,15 @@ sh scripts/luci.sh
 LuCI с пакетом из рабочей копии и тестовыми серверами для ручной проверки интерфейса:
 http://127.0.0.1:8019, логин `root`, пароль — переменная `PASS` в скрипте. `sh scripts/luci.sh sync`
 копирует файлы пакета заново (настройки сохраняются), `sh scripts/luci.sh stop` удаляет контейнер.
+
+```bash
+sh scripts/i18n.sh
+```
+
+Переводы: строки интерфейса пишутся по-английски через `_()` / `N_()`, скрипт в docker
+пересобирает `luci-app-xvpn/po/templates/xvpn.pot` (как `build/i18n-scan.pl` фида luci) и
+вливает его в `po/*/xvpn.po`; новые строки там появляются непереведёнными — их нужно перевести
+в `po/ru/xvpn.po`. Пакеты `luci-i18n-xvpn-<язык>` собирает `luci.mk` из `po/` сам.
 
 `DOCKER_CONTEXT=default` нужен, если docker по умолчанию смотрит в другой контекст (например,
 незапущенный Docker Desktop). `scripts/build.sh` и `scripts/luci.sh` сами вызывают

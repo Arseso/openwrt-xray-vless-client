@@ -169,6 +169,10 @@ return view.extend({
 		o.default = '1';
 		o.rmempty = false;
 
+		o = s.option(form.Flag, 'block_bittorrent', _('Block BitTorrent'),
+			_('BitTorrent connections of the clients are dropped: a torrent client opens thousands of sessions, which may run the router out of memory.'));
+		o.default = '0';
+
 		const adv = s = m.section(form.NamedSection, 'main', 'general', _('Advanced'),
 			_('Change only on a conflict with other services of the router.'));
 		s.addremove = false;
