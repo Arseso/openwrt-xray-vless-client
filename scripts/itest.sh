@@ -91,8 +91,11 @@ ip -n wan route add default via 45.0.0.1
 sysctl -qw net.ipv4.ip_forward=1
 mkdir -p /tmp/www; echo hello > /tmp/www/index.html
 ip netns exec wan uhttpd -f -p 45.0.0.2:80 -h /tmp/www >/dev/null 2>&1 &
-# health.url2 (#61) by domain: the remotes resolve it, a whitelisting one drops it
-echo '45.0.0.2 check2.test' >> /etc/hosts
+# health.url2 (#61) by domain on its own address: the remotes resolve it, a whitelisting one
+# drops it, a DROP of 45.0.0.3 in wan stands for its CDN down
+ip -n wan addr add 45.0.0.3/24 dev vw1
+ip netns exec wan uhttpd -f -p 45.0.0.3:80 -h /tmp/www >/dev/null 2>&1 &
+echo '45.0.0.3 check2.test' >> /etc/hosts
 
 direct() { ip netns exec cl ping -c1 -W1 45.0.0.2 >/dev/null 2>&1; }
 tunnel() { [ "$(ip netns exec cl curl -s -m 5 http://45.0.0.2/)" = hello ]; }
@@ -181,6 +184,7 @@ add_list xvpn.access.port=vc0
 set xvpn.health.interval=3
 set xvpn.health.url=http://45.0.0.2/
 set xvpn.health.url2=http://check2.test/
+set xvpn.health.url2_cdn=1
 set xvpn.health.timeout=4
 set xvpn.health.fail_threshold=2
 set xvpn.health.reload_idle=15
@@ -759,8 +763,10 @@ wait_for @.state connected 30
 active_is second || { echo "FAIL: not back on second"; ubus call xvpn status; exit 1; }
 echo "OK: back in auto selection"
 
-# #61: "limited" answers health.url and drops the connections to health.url2 (a whitelist).
-# It is the fastest (second is slow), yet the start does not choose it; the status says why
+# #61: "limited" answers health.url and resets the connections to health.url2 (a whitelist,
+# blackhole in its remote). It is the fastest (second is slow), yet the start does not
+# choose it; the status says why. url2_cdn is 1: the first live server that fails url2
+# makes the daemon ask url2 directly, it answers, so the verdicts go on
 limited_of() { status "@.servers[@.name='$1'].limited"; }
 slow 18444; remote 18450 '' check2.test
 uci add_list xvpn.manual.link="$(link 18450 limited)"; uci commit xvpn
@@ -791,26 +797,30 @@ wait_cmd 20 active_is second
 wait_for @.state connected 30
 status @.last_switch.reason | grep -q 'is limited' || { echo "FAIL: switch reason: $(status @.last_switch.reason)"; exit 1; }
 echo "OK: a test leaves a limited server the daemon chose"
-# url2 is dropped through every server (timeouts, as when its CDN is down) and there are
-# fewer live servers than URL2_CDN: all are limited, the start still chooses the fastest
-# of them, connected with the reason in last_error, not no_servers
+# url2 times out through second and directly (its CDN down: DROP of 45.0.0.3 in wan):
+# the marks stay as they were, no switch
 ip netns exec wan nft -f - <<NFT
-table inet drop81 {
-	chain input { type filter hook input priority 0; tcp dport 81 drop; }
+table inet dropcdn {
+	chain input { type filter hook input priority 0; ip daddr 45.0.0.3 drop; }
 }
 NFT
-uci set xvpn.health.url2=http://check2.test:81/; uci commit xvpn
+test_all
+[ "$(limited_of limited)" = true ] && [ "$(limited_of second)" = false ] && active_is second && [ "$(status @.state)" = connected ] \
+	&& logread | grep -q 'and directly: its CDN is down' || { echo "FAIL: url2 CDN down"; ubus call xvpn status; exit 1; }
+echo "OK: url2 down directly too: its CDN, the marks stay, no switch"
+ip netns exec wan nft delete table inet dropcdn
+# no live servers (#12 pause), then only the limited one comes back: chosen, connected, the
+# reason in last_error, no retry
+dead 18444; dead 18450
 /etc/init.d/xvpn stop
 rm -f /etc/xvpn/active /var/run/xvpn/state.json
 /etc/init.d/xvpn start
-wait_cmd 30 tests_done 1
-wait_for @.state connected 30
-[ "$(limited_of second)" = true ] && [ "$(limited_of limited)" = true ] && active_is limited \
-	&& status @.last_error | grep -q 'only limited servers answer' && status @.last_switch.reason | grep -q 'only limited servers answer' \
-	|| { echo "FAIL: url2 down everywhere"; ubus call xvpn status; exit 1; }
-echo "OK: url2 timing out through every server: the fastest limited one, connected, the reason shown"
-ip netns exec wan nft delete table inet drop81
-uci set xvpn.health.url2=http://check2.test/
+wait_for @.state no_servers 30
+kill $(cat /tmp/remote-18450.pid); remote 18450 '' check2.test
+wait_cmd 30 connected_to limited
+[ "$(limited_of limited)" = true ] && [ -z "$(status @.retry)" ] && status @.last_error | grep -q 'only limited servers answer' \
+	|| { echo "FAIL: only the limited one back"; ubus call xvpn status; exit 1; }
+echo "OK: after the pause with no live servers the only limited one is chosen, connected, the reason shown"
 kill $(cat /tmp/remote-18450.pid) $(cat /tmp/remote-18444.pid); remote 18444
 uci del_list xvpn.manual.link="$(link 18450 limited)"; uci commit xvpn
 # not reload_config: its md5 of the configs dates from before the link was added, the same as now

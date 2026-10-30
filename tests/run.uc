@@ -435,6 +435,7 @@ for (let v in [ [ null, 'https://cp.cloudflare.com/generate_204' ], [ 'off', nul
 	writefile(`${OUT}/dnscfg/xvpn`, "config health 'health'\n" + (v[0] ? `\toption url2 '${v[0]}'\n` : ''));
 	eq(`url2 ${v[0]}`, load_config(`${OUT}/dnscfg`).health.url2, v[1]);
 }
+eq('url2_cdn by default', load_config(`${OUT}/dnscfg`).health.url2_cdn, 3);
 
 // no live servers (#12): the pause between tests of all servers doubles up to retry_max
 let pauses = [], d = null;

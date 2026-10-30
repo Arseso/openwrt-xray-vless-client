@@ -32,7 +32,7 @@ const STALL = 3 * H.interval + RELOAD_MAX + 30;	// s without health checks: see 
 const TIME_FLAG = `${RUN_DIR}/time_synced`;	// hotplug.d/ntp/50-xvpn: sysntpd has set the clock
 const TIME_UNTIL = `${RUN_DIR}/time_wait`;	// end of the wait (monotonic): restarts do not wait again
 const URL2 = (H.url2 && H.url2 != H.url) ? H.url2 : null;	// see limited_check()
-const URL2_CDN = 3;	// live servers in a row that fail url2 before any passes it: its CDN is down
+const URL2_CDN = H.url2_cdn;	// live servers in a row that fail url2 before any passes it: ask it directly
 
 let index = { servers: [] }, index_raw = null;
 let prev = read_json(STATE_FILE) ?? {};
@@ -57,6 +57,7 @@ let st = {
 	latency: prev.latency ?? {},
 	quarantine: prev.quarantine ?? {},
 	limited: (URL2 && prev.limited_url == URL2) ? (prev.limited ?? {}) : {},	// { id: since }, see limited_check()
+	url2_down: false,	// the last test found the CDN of url2 down, see limited_check()
 	xray: {},	// see xray_down()
 	xray_choose: null,	// choose_best() decision put off while xray does not work
 	xray_choose_code: null,	// 7: the test aborted with xray_choose saw a refused test port
@@ -485,9 +486,10 @@ function no_candidates() {
 // tests also open health.url2 through it, by domain on another CDN. A failure is tried once
 // more (not a timeout: a CDN that drops would cost 2 x timeout per server); the verdicts
 // of the run go to q.limited, set_limited() takes them once xray is known to work.
-// The first URL2_CDN live servers in a row that fail it: the CDN is down, no verdicts in
-// this run and no more url2 requests. No quarantine either way, the checks of the active
-// server go on with health.url alone.
+// The first URL2_CDN live servers in a row that fail it: a group of whitelists or the CDN
+// is down. url2 is asked directly then, past xray: it fails too, the CDN is down, no
+// verdicts in this run and no more url2 requests (st.url2_down). No quarantine either way,
+// the checks of the active server go on with health.url alone.
 function limited_check(q, e, gen, cb, again) {
 	if (q.url2_off)
 		return cb();
@@ -499,19 +501,27 @@ function limited_check(q, e, gen, cb, again) {
 			return limited_check(q, e, gen, cb, true);
 		if (ms >= 0)
 			q.url2_ok = true;
-		else if (!q.url2_ok && ++q.url2_fails >= URL2_CDN) {
-			q.url2_off = true;
-			q.limited = {};
-			log(`${URL2} fails through ${URL2_CDN} servers in a row: its CDN is likely down, the limited marks stay as they are`);
-			return cb();
-		}
 		q.limited[e.id] = (ms < 0) ? `curl ${code}` : null;
-		cb();
+		if (ms >= 0 || q.url2_ok || ++q.url2_fails != URL2_CDN)
+			return cb();
+		probe(null, (dms, dcode) => {
+			if (testq !== q)
+				return cb();
+			if (dms < 0 && dcode >= 0) {
+				q.url2_off = true;
+				q.limited = {};
+				log(`${URL2} fails through ${URL2_CDN} servers in a row and directly: its CDN is down, the limited marks stay as they are`);
+			}
+			else
+				q.url2_ok = true;	// it answers past xray: those are whitelists, go on
+			cb();
+		}, URL2);
 	}, URL2);
 }
 
 // The url2 verdicts of a test run (null: passes it).
 function set_limited(q) {
+	st.url2_down = !!q.url2_off;	// leave_limited() does not act on old marks meanwhile
 	for (let id, why in q.limited) {
 		let e = server(id);
 		if (!e || !why == !st.limited[id])
@@ -567,10 +577,12 @@ function test_all(cb) {
 			if (!valid(gen)) {
 				// a reload during the check: the failures went through the old config
 				q.finishing = false;
-				for (let id in keys(q.failed))
+				// and so did the url2 verdicts: those servers are measured again too
+				for (let id in uniq([ ...keys(q.failed), ...keys(q.limited) ]))
 					if (server(id))
 						push(q.queue, id);
 				q.failed = {};
+				q.limited = {};
 				q.refused = false;
 				return next();
 			}
@@ -941,7 +953,7 @@ let leave_limited_pending = false;
 function leave_limited() {
 	let e = server(st.active);
 	let busy = () => st.reloading || st.reload_pending || st.reload_error || st.testing;
-	if (!e || !st.limited[e.id] || by_hand(e.id) || !best() || busy() || leave_limited_pending)
+	if (!e || !st.limited[e.id] || by_hand(e.id) || !best() || busy() || leave_limited_pending || st.url2_down)
 		return false;
 	let gen = st.gen;
 	leave_limited_pending = true;
@@ -952,6 +964,7 @@ function leave_limited() {
 			return;
 		if (ms >= 0) {
 			delete st.limited[e.id];
+			save();
 			log(`"${e.name}" is no longer limited: ${URL2} opens through it again`);
 			return;
 		}

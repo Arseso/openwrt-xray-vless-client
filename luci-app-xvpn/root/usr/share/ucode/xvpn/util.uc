@@ -230,6 +230,8 @@ export function load_config(confdir) {
 			reload_retry: num(h.reload_retry, 30),
 			generate_budget: num(h.generate_budget, 240),
 			time_wait: num(h.time_wait, 120),
+			// live servers in a row that fail url2 before it is asked directly (#61)
+			url2_cdn: max(1, num(h.url2_cdn, 3)),
 			retry_max: num(h.retry_max, 600),
 		},
 		subscriptions: [],
