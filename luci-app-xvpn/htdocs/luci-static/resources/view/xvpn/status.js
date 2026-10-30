@@ -370,6 +370,9 @@ return view.extend({
 				sw ? [ _('Last switch'), txt(
 					((sw.from && sw.from != sw.to) ? name(sw.from) + ' → ' : '') + name(sw.to) + ': ' + (sw.reason ?? '') + ', ' + ago(now, sw.at)) ] : null,
 				(up && status.last_test) ? [ _('Last test of all servers'), txt(ago(now, status.last_test)) ] : null,
+				// no live servers: the daemon tests all of them again after a pause, longer each time
+				(up && status.retry) ? [ _('Next test of all servers'), txt(((status.retry.at <= now) ? _('due')
+					: _('in %s').format(dur(status.retry.at - now))) + ' ' + _('(pause %s)').format(dur(status.retry.delay))) ] : null,
 				(up && status.last_error && status.last_error.trim() != fwError)
 					? [ _('Last error'), lines(status.last_error, 'color:var(--error-color-high, #c00)') ] : null,
 				[ _('Firewall rules'), txt(fwText) ],

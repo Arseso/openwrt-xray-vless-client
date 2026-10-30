@@ -230,6 +230,7 @@ export function load_config(confdir) {
 			reload_retry: num(h.reload_retry, 30),
 			generate_budget: num(h.generate_budget, 240),
 			time_wait: num(h.time_wait, 120),
+			retry_max: num(h.retry_max, 600),
 		},
 		subscriptions: [],
 		manual: list(man.link),
@@ -301,4 +302,10 @@ export function auto_pick(servers, latency, off, q, limited) {
 			return { server: b, limited: !!limited[b.id] };
 	}
 	return null;
+};
+
+// The pause before the next test of all servers while none is alive (#12): interval at
+// first, then twice the last one (prev), at most max_ (not less than interval).
+export function retry_delay(prev, interval, max_) {
+	return min(prev ? prev * 2 : interval, max(max_, interval));
 };

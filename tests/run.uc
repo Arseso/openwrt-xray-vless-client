@@ -6,7 +6,7 @@
 import { readfile, writefile, mkdir, stat } from 'fs';
 import { parse_link, parse_subscription } from 'xvpn.links';
 import { parse_userinfo, assign_ids, list_change, known_ids, prune_no_auto, NO_AUTO_GRACE } from 'xvpn.subscription';
-import { load_config, fastest, auto_pick, no_auto_ids, set_no_auto, mkdir_p, read_json, SUBS_DIR } from 'xvpn.util';
+import { load_config, fastest, auto_pick, retry_delay, no_auto_ids, set_no_auto, mkdir_p, read_json, SUBS_DIR } from 'xvpn.util';
 import { build_index, generate, ports_error } from 'xvpn.xrayconf';
 import { render, resolve, fix_ifnames, ifnames_applied } from 'xvpn.firewall';
 import { ipv6_up, busy_ports } from 'xvpn.host';
@@ -435,6 +435,14 @@ for (let v in [ [ null, 'https://cp.cloudflare.com/generate_204' ], [ 'off', nul
 	writefile(`${OUT}/dnscfg/xvpn`, "config health 'health'\n" + (v[0] ? `\toption url2 '${v[0]}'\n` : ''));
 	eq(`url2 ${v[0]}`, load_config(`${OUT}/dnscfg`).health.url2, v[1]);
 }
+
+// no live servers (#12): the pause between tests of all servers doubles up to retry_max
+let pauses = [], d = null;
+for (let i = 0; i < 7; i++)
+	push(pauses, d = retry_delay(d, 30, 600));
+eq('retry_delay doubles up to the max', pauses, [ 30, 60, 120, 240, 480, 600, 600 ]);
+eq('retry_delay: a max below interval is interval', [ retry_delay(null, 30, 10), retry_delay(30, 30, 10) ], [ 30, 30 ]);
+eq('retry_delay: a smaller max is applied at once', retry_delay(480, 30, 120), 120);
 
 writefile(`${confdir}/xvpn`, `
 config health 'health'
