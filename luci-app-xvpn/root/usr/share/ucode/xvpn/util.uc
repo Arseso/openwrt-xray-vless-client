@@ -189,6 +189,7 @@ export function load_config(confdir) {
 	let a = c.get_all('xvpn', 'access') ?? {};
 	let h = c.get_all('xvpn', 'health') ?? {};
 	let man = c.get_all('xvpn', 'manual') ?? {};
+	let sp = c.get_all('xvpn', 'split') ?? {};
 
 	let cfg = {
 		main: {
@@ -245,6 +246,16 @@ export function load_config(confdir) {
 			// live servers in a row that fail url2 before it is asked directly (#61)
 			url2_cdn: max(1, num(h.url2_cdn, 3)),
 			retry_max: num(h.retry_max, 600),
+		},
+		// split tunneling (#67): checked and normalized by split.uc
+		split: {
+			ip: list(sp.ip),
+			domain: list(sp.domain),
+			ru: bool(sp.ru, false),
+			// hours between downloads of the Russian list
+			ru_interval: max(1, num(sp.ru_interval, 168)),
+			// not in the default config: other sources of the list (split.uc RU_URLS)
+			ru_url: list(sp.ru_url),
 		},
 		subscriptions: [],
 		manual: list(man.link),
