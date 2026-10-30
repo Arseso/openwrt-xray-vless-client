@@ -181,6 +181,7 @@ ICMP) отклоняется.
 | Path to xray (`main.xray_bin`) | `/usr/bin/xray` | абсолютный путь |
 | Log level of xray (`main.loglevel`) | `warning` | `debug`, `info`, `warning`, `error`, `none` |
 | Sniffing (`main.sniffing`) | `1` | подменять IP на домен из HTTP/TLS/QUIC: многие серверы не пускают к IP |
+| Block BitTorrent (`main.block_bittorrent`) | `0` | BitTorrent клиентов (рукопожатие по TCP и uTP) — в blackhole: торрент-клиент открывает тысячи сессий |
 | TPROXY, DNS, API port (`main.tproxy_port`, `dns_port`, `api_port`) | `12345`, `10853`, `10085` | разные и вне диапазона тестовых портов |
 | First test port (`main.test_port_base`) | `20000` | SOCKS-порт для проверки каждого сервера: этот и следующие, по одному на сервер |
 | Client mark, TPROXY mark (`main.client_mark`, `tproxy_mark`) | `0x01000000`, `0x02000000` | метки firewall в hex, ненулевые, без общих битов; не пересекаться с mwan3 (`0x3f00`) и pbr (`0x00ff0000`) |
@@ -399,6 +400,9 @@ echo /usr/local/bin/xray >> /etc/sysupgrade.conf   # чтобы sysupgrade ег�
   (`xray run -test`) запускается, только когда меняется список серверов или бинарь, вкладка Status
   xray не запускает, тест серверов — до 4 `curl` одновременно. Под очень большой нагрузкой xray
   всё же может занять много памяти, и OOM-killer выберет его — обрыв у всех клиентов.
+  Сессия без трафика закрывается через 120 с (у xray по умолчанию 300): так торрент-клиент держит
+  меньше сессий. Скрытые опции `xvpn.main.conn_idle`, `handshake`, `uplink_only`, `downlink_only`
+  (секунды) и `buffer_size` (КБ на соединение, по умолчанию как у xray) — DESIGN.md, §6.4.
 - **Проверено на AX3000T** (OpenWrt 24.10.5, в том числе с аппаратным offload PPE) по чек-листу
   [#25](https://github.com/Arseso/openwrt-xray-vless-client/issues/25), кроме VPN-SSID, dnsleaktest
   и IPv6 — их ещё нужно пройти на устройстве.

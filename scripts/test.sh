@@ -32,7 +32,7 @@ $DOCKER run --rm --cap-add NET_ADMIN -v "$PWD:/src:ro" -e XRAY_REJECT="${XRAY_RE
 	xray=/usr/bin/xray mode=strict; [ ! -e /opt/xray ] || { xray=/opt/xray; mode=lenient; }
 	v=$($xray version) || { echo "$xray version failed: $v"; exit 1; }
 	echo "$v" | head -1
-	for f in config config-doh config-noipv6; do
+	for f in config config-doh config-noipv6 config-bt; do
 		ucode /src/tests/xray-check.uc config $xray /tmp/out/$f.json $mode
 	done
 
