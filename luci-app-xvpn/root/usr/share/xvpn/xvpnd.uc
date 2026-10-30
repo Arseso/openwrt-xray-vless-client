@@ -81,6 +81,27 @@ let reload_service, reindex, choose_best, check, reload_failed;
 const LOG_QUEUE = 100;
 let logq = [], logging = false, log_dropped = 0;
 
+// ucode-mod-uloop (2025.07.18) clears a process after its callback and writes into the handle
+// after dropping its own reference to it: a handle nobody else holds is freed by then (use
+// after free; musl may unmap it, xvpnd died in uloop.so). Every handle is held here until
+// a later run_process(): by then uloop has cleared it. Not in the callback's closure: without
+// periodic GC that cycle would never be freed.
+let procs_held = {}, procs_done = [], procs_seq = 0;
+
+function run_process(cmd, args, cb) {
+	for (let k in procs_done)
+		delete procs_held[k];
+	procs_done = [];
+	let key = `${++procs_seq}`;
+	let p = uloop.process(cmd, args, { PATH: '/usr/sbin:/usr/bin:/sbin:/bin' }, (code) => {
+		cb(code);
+		push(procs_done, key);	// after cb: a run_process() in it must not drop this one yet
+	});
+	if (p)
+		procs_held[key] = p;
+	return p;
+}
+
 function flush_log() {
 	let batch = logq, p;
 	logq = [];
@@ -88,12 +109,11 @@ function flush_log() {
 		push(batch, `${log_dropped} log messages dropped, logd is stuck`);
 	log_dropped = 0;
 	logging = true;
-	p = uloop.process('/bin/sh', [ '-c', 'printf "%s\\n" "$@" | /usr/bin/logger -t xvpn', 'sh', ...batch ],
-		{ PATH: '/usr/sbin:/usr/bin:/sbin:/bin' }, () => {
-			logging = false;
-			if (length(logq))
-				flush_log();
-		});
+	p = run_process('/bin/sh', [ '-c', 'printf "%s\\n" "$@" | /usr/bin/logger -t xvpn', 'sh', ...batch ], () => {
+		logging = false;
+		if (length(logq))
+			flush_log();
+	});
 	if (!p)
 		logging = false;	// out of memory: these are lost
 }
@@ -176,7 +196,7 @@ function set_state(s, err) {
 
 // When the process cannot be started (out of memory), cb gets -1 a second later.
 function spawn(cmd, args, cb) {
-	let p = uloop.process(cmd, args, { PATH: '/usr/sbin:/usr/bin:/sbin:/bin' }, cb ?? (() => null));
+	let p = run_process(cmd, args, cb ?? (() => null));
 	if (!p) {
 		log(`cannot start ${cmd}`);
 		if (cb)
