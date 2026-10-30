@@ -272,6 +272,61 @@ xray перезапускается (а соединения клиентов р
 поменяются местами в подписке (или в ручных ссылках), их пинг и карантин до следующего теста
 показываются у другого сервера.
 
+### Другая версия xray
+
+По умолчанию работает `xray-core` 25.1.30 из фида OpenWrt 24.10. Путь к бинарю задаёт
+`xvpn.main.xray_bin`, так что можно поставить свежий релиз с
+[GitHub](https://github.com/XTLS/Xray-core/releases), не трогая пакет.
+
+| xray | Статус |
+|---|---|
+| 25.1.30 (фид 24.10) | по умолчанию; CI, шаг `test`, и интеграционный тест |
+| 26.10.29 (закреплён в `scripts/ci.sh`, `XRAY_PINNED`) | CI, шаг `test-xray`: конфиг принимается, серверы из таблицы ниже отвергаются по одному |
+| 26.10.21 | проверен вручную так же, результат тот же |
+| остальные | не проверялись; о релизе новее закреплённого `ci.sh` предупреждает |
+
+> **Внимание.** На xray 26 серверы с `allowInsecure=1` (или `insecure=1`) в ссылке и vless/trojan
+> без TLS к публичному адресу **отвергаются и пропадают из списка**. Если подписка состоит из
+> таких серверов, со свежим бинарём VPN останется без серверов — проверьте журнал после подмены.
+
+Конфиг один для всех версий, по версии xray генератор ничего не меняет. Зато xray 26 запрещает
+то, что может прийти в подписке:
+
+| Что в ссылке | xray 25.1.30 | xray 26 |
+|---|---|---|
+| vless или trojan без TLS/REALITY (`security=none`) к публичному адресу | работает | сервер отвергнут: «vless without TLS or other encryption is prohibited…»; к приватному IP и локальному домену (`.lan`, `localhost`) можно |
+| `allowInsecure=1` / `insecure=1` | работает | сервер отвергнут: «The feature "allowInsecure" has been removed…» |
+| `pcs=` / `vcn=` (`pinnedPeerCertSha256` / `verifyPeerCertByName`, замена `allowInsecure`) | игнорируются | работают |
+| WebSocket, gRPC, HTTPUpgrade | работают | работают, с предупреждением о депрекации |
+
+Отвергнутый сервер выпадает из списка, остальные работают. В журнал пишется причина:
+`xray rejected server "<имя>": <причина xray>`. Вердикт запоминается до смены бинаря, настроек или
+самого сервера, при следующих reload — строка `xray rejected N server(s) earlier: <имя> (<причина>)`.
+
+Как подменить бинарь (AX3000T и другие aarch64 — `Xray-linux-arm64-v8a.zip`). Бинарь 26.x
+весит ~33 МБ на флеше, zip — ~14 МБ в `/tmp` (это RAM): сначала проверьте место —
+`df -h /overlay` (нужно больше 35 МБ свободных) и `free`. Нужен `unzip`:
+
+```bash
+opkg update && opkg install unzip
+cd /tmp
+z=Xray-linux-arm64-v8a.zip; u=https://github.com/XTLS/Xray-core/releases/download/v26.10.29
+wget $u/$z $u/$z.dgst
+echo "$(sed -n 's/^SHA2-256= *//p' $z.dgst)  $z" | sha256sum -c -   # должно быть «OK»
+mkdir -p /usr/local/bin && unzip -o $z xray -d /usr/local/bin && rm $z $z.dgst
+/usr/local/bin/xray version
+uci set xvpn.main.xray_bin=/usr/local/bin/xray
+uci commit xvpn
+/etc/init.d/xvpn restart
+echo /usr/local/bin/xray >> /etc/sysupgrade.conf   # чтобы sysupgrade его сохранил
+```
+
+`wget` из busybox может не уметь HTTPS — тогда `opkg install wget-ssl` или скачайте на компьютере и
+скопируйте `scp -O`. После подмены все серверы один раз проверяются заново (`xray run -test`).
+Вернуться на версию из фида: `uci set xvpn.main.xray_bin=/usr/bin/xray`, `uci commit xvpn`,
+`/etc/init.d/xvpn restart`. Расход памяти xray 26 на AX3000T не замерялся. Ссылки с VLESS
+`encryption` (ML-KEM) парсер пропускает и со свежим бинарём.
+
 ## Как это работает
 
 - **Полный туннель через TPROXY.** Трафик клиентов выбранных точек доступа метится в своих
@@ -332,7 +387,7 @@ xray перезапускается (а соединения клиентов р
   у них не резолвятся.
 - **Смена сервера рвёт все соединения** клиентов ([#13](https://github.com/Arseso/openwrt-xray-vless-client/issues/13)).
 - **xray 25.1.30 из фида:** нет VLESS `encryption` (ML-KEM), hysteria2, tuic; транспорты `h2` и
-  `quic` пропускаются. Путь к другому бинарю — `xvpn.main.xray_bin` (совместимость — [#14](https://github.com/Arseso/openwrt-xray-vless-client/issues/14)).
+  `quic` пропускаются. Другой бинарь — `xvpn.main.xray_bin`, см. [Другая версия xray](#другая-версия-xray).
 - Подписки в форматах Clash YAML и sing-box JSON не поддерживаются — смените `user_agent` ([#36](https://github.com/Arseso/openwrt-xray-vless-client/issues/36)).
 - Прочие известные проблемы — в [issues](https://github.com/Arseso/openwrt-xray-vless-client/issues):
   - флаг `reloading` может зависнуть и остановить health-check ([#6](https://github.com/Arseso/openwrt-xray-vless-client/issues/6), PR [#46](https://github.com/Arseso/openwrt-xray-vless-client/pull/46));
@@ -442,7 +497,7 @@ sh scripts/ci.sh
 ```
 
 Скрипт проверяет закоммиченный HEAD (незакоммиченные изменения не проверяются): `test.sh` с
-xray из фида и с последним релизом xray с GitHub (пока только предупреждение, [#14](https://github.com/Arseso/openwrt-xray-vless-client/issues/14)), `itest.sh`
+xray из фида и с закреплённым релизом xray с GitHub (`test-xray`, обязательный шаг, [#14](https://github.com/Arseso/openwrt-xray-vless-client/issues/14); о более новом релизе — предупреждение), `itest.sh`
 (не дольше 12 мин) и `build.sh`; ipk — в `dist/`, логи шагов — в `.ci/`. Занимает около
 15 минут.
 
