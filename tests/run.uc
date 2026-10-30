@@ -8,7 +8,7 @@ import { parse_link, parse_subscription } from 'xvpn.links';
 import { parse_userinfo, assign_ids, list_change, known_ids, prune_no_auto, NO_AUTO_GRACE } from 'xvpn.subscription';
 import { load_config, fastest, auto_pick, retry_delay, no_auto_ids, set_no_auto, mkdir_p, read_json, SUBS_DIR } from 'xvpn.util';
 import { build_index, generate, ports_error } from 'xvpn.xrayconf';
-import { render, resolve, fix_ifnames, ifnames_applied } from 'xvpn.firewall';
+import { render, resolve, fix_ifnames, ifnames_applied, table_names, rule_prefs, stale_routes } from 'xvpn.firewall';
 import { ipv6_up, busy_ports } from 'xvpn.host';
 import { cursor } from 'uci';
 
@@ -54,14 +54,20 @@ ok('hysteria2 unsupported', p[9].error);
 ok('h2 unsupported', p[10].error);
 ok('vless encryption unsupported', p[11].error);
 ok('ss 2022 bad key', p[12].error);
-ok('hashes unique', length(uniq(map(filter(p, (s) => !s.error), (s) => s.hash))) == 9);
+eq('allowInsecure kept (xray 26 rejects the server, #14)', p[13].outbound.streamSettings.tlsSettings,
+	{ serverName: 'ins.example.com', allowInsecure: true });
+eq('pcs and vcn', p[14].outbound.streamSettings.tlsSettings, { serverName: 'pin.example.com',
+	pinnedPeerCertSha256: '7b2d8f0c3a6e9b14d5f8a2c7e0b3d6f9a1c4e7b0d3f6a9c2e5b8d1f4a7c0e3b6', verifyPeerCertByName: 'pin.example.com' });
+eq('vmess pcs and vcn', p[15].outbound.streamSettings.tlsSettings, { serverName: 'vp.example.com',
+	pinnedPeerCertSha256: '7b2d8f0c3a6e9b14d5f8a2c7e0b3d6f9a1c4e7b0d3f6a9c2e5b8d1f4a7c0e3b6', verifyPeerCertByName: 'vp.example.com' });
+ok('hashes unique', length(uniq(map(filter(p, (s) => !s.error), (s) => s.hash))) == 12);
 eq('hash stable', parse_link(lines[0]).hash, p[0].hash);
 
 // subscriptions
 let b = parse_subscription(readfile(`${FIX}/sub-base64.txt`));
 eq('base64 sub', [ b.format, length(b.servers), b.skipped ], [ 'base64', 9, 4 ]);
 let pl = parse_subscription(readfile(`${FIX}/links.txt`));
-eq('plain sub', [ pl.format, length(pl.servers) ], [ 'plain', 9 ]);
+eq('plain sub', [ pl.format, length(pl.servers) ], [ 'plain', 12 ]);
 let xj = parse_subscription(readfile(`${FIX}/sub-xray.json`));
 eq('xray json sub', [ xj.format, length(xj.servers), xj.skipped, xj.servers[0].name ], [ 'xray-json', 1, 1, '🇫🇮 Finland' ]);
 ok('xray json drops sockopt', xj.servers[0].outbound.streamSettings.sockopt == null);
@@ -264,6 +270,31 @@ cfg.access.killswitch = false;
 writefile(`${OUT}/tunnel.nft`, render(cfg, { nets: [], ports: [] }));
 writefile(`${OUT}/passthrough.nft`, render(cfg, res, { passthrough: true }));
 ok('passthrough has no tproxy', index(render(cfg, res, { passthrough: true }), 'tproxy ip') < 0);
+
+// ip rules: busybox prints them all, the mark without leading zeros, a trailing space and
+// the table name from rt_tables; only `from all` with the exact pair is ours
+let rules = '0:\tfrom all lookup local \n32760:\tfrom all fwmark 0x2000000/0x2000000 lookup 1000 \n' +
+	'32761:\tfrom all fwmark 0x2000000/0x2000000 lookup 200 \n32762:\tfrom all fwmark 0x2000000/0x2000000 lookup 100 \n' +
+	'32763:\tfrom 192.168.1.5 fwmark 0x2000000/0x2000000 lookup 100 \n32764:\tfrom all iif br-lan fwmark 0x2000000/0x2000000 lookup 100 \n' +
+	'32765:\tfrom all fwmark 0x2000000/0x2000000 lookup 100\n32766:\tfrom all fwmark 0x2000000 lookup 100 \n' +
+	'32767:\tfrom all fwmark 0x12000000/0x12000000 lookup 100 \n32768:\tfrom all fwmark 0x2000000/0x2000000 lookup xv.t \n';
+eq('rule_prefs: ours and its duplicate, not someone\'s with more selectors', rule_prefs(rules, 0x02000000, [ '100' ]), [ 32762, 32765 ]);
+eq('rule_prefs: table 1000 is not 100', rule_prefs(rules, 0x02000000, [ '200' ]), [ 32761 ]);
+eq('rule_prefs: none', [ rule_prefs(rules, 0x04000000, [ '100' ]), rule_prefs('', 0x02000000, [ '100' ]), rule_prefs(null, 1, [ '1' ]) ], [ [], [], [] ]);
+eq('rule_prefs: a named table', rule_prefs(rules, 0x02000000, [ '300', 'xv.t' ]), [ 32768 ]);
+eq('rule_prefs: the dot is not any character', rule_prefs('1:\tfrom all fwmark 0x1/0x1 lookup xvxt ', 1, [ 'xv.t' ]), []);
+let rt = '#\n# reserved values\n#\n255\tlocal\n254\tmain\n100 xvpn  # ours\n100\talias\n300 xv.t\n301 bad$name\n';
+eq('table_names', [ table_names(rt, 100), table_names(rt, 300), table_names(rt, 301), table_names(null, 7) ],
+	[ [ '100', 'xvpn', 'alias' ], [ '300', 'xv.t' ], [ '301' ], [ '7' ] ]);
+let c100 = { mark: 0x02000000, table: 100 }, c200 = { mark: 0x02000000, table: 200 }, m4 = { mark: 0x04000000, table: 100 };
+eq('stale: nothing applied', [ stale_routes(null, c100, true), stale_routes([ c100 ], c100, true) ], [ [], [] ]);
+eq('stale: table changed', stale_routes([ c100 ], c200, true), [ { ...c100, route: true } ]);
+eq('stale: mark changed, the table stays in use', stale_routes([ c100 ], m4, true), [ { ...c100, route: false } ]);
+eq('stale: interrupted run, both', stale_routes([ c200, c100, m4 ], c200, true), [ { ...c100, route: true }, { ...m4, route: true } ]);
+eq('stale: remove takes cur and the applied', stale_routes([ c200 ], c100, false), [ { ...c200, route: true }, { ...c100, route: true } ]);
+eq('stale: remove without the file, duplicates once', [ stale_routes(null, c100, false), stale_routes([ c100 ], c100, false) ],
+	[ [ { ...c100, route: true } ], [ { ...c100, route: true } ] ]);
+eq('stale: a broken file is ignored', [ stale_routes({ mark: 1 }, c100, true), stale_routes([ { mark: '1', table: 2 }, 5 ], c100, true) ], [ [], [] ]);
 
 // fail-closed table: blocks even with kill switch off, needs no tproxy/fib/nat
 let blk = render(cfg, res, { block: true });

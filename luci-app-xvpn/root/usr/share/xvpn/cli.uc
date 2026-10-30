@@ -30,8 +30,9 @@ const STARTED = clock(true)[0];
 // follows a wifi change tests nothing; a changed server list is tested once (one test of the
 // whole config while xray accepts it; one by one only the servers it has not judged yet).
 // { bin: bin_sig(), frame: <main and access settings>, full: <the server set whose whole
-// config passed>, ok: { <outbound key>: bool } }; another binary or other settings start
-// anew. In /var: after a boot everything is tested once again
+// config passed>, ok: { <outbound key>: bool }, why: { <outbound key>: <xray's reason> } };
+// another binary or other settings start anew. In /var: after a boot everything is tested
+// once again
 const TESTED_FILE = `${VAR_DIR}/tested.json`;
 
 // another binary (an upgrade, xray_bin changed or fixed in place) may judge otherwise
@@ -54,6 +55,18 @@ for (let k in [ 'GOMEMLIMIT', 'GOGC' ])
 // the last xray_ok was xray's own verdict on the config, so it may be kept: accepted, or
 // exit code 23 (config error); not hung, not killed (OOM), not a Go runtime error (2)
 let definite = false;
+// why xray rejected the config of the last xray_ok (exit code 23), for the log
+let reason = null;
+
+// "Failed to start: main: failed to load config files: [<path>] > infra/conf: failed to
+// build outbound config with tag srv-0 > infra/conf: vless without TLS…": the last part
+// says what is wrong with the server (a newer xray forbids what the link sets, #14)
+function xray_reason(text) {
+	let l = match(text ?? '', /Failed to start: ([^\n]*)/)?.[1];
+	if (!l)
+		return null;
+	return substr(replace(pop(split(l, ' > ')), /^[a-z\/]+: /, ''), 0, 300);
+}
 
 // write_json that checks the file is whole: on a full tmpfs xray would reject a truncated
 // config with the same 23
@@ -68,13 +81,14 @@ function put(path, obj) {
 // process as exit code 0: sh writes xray's own code.
 function xray_ok(path, limit, reserve) {
 	definite = false;
+	reason = null;
 	let left = GENERATE_BUDGET - (clock(true)[0] - STARTED) - (reserve ?? 0);
 	if (left <= 0)
 		return null;
-	let out = `${VAR_DIR}/xray-ok`, wait = min(limit, left), hung = false, t;
+	let out = `${VAR_DIR}/xray-ok`, said = `${VAR_DIR}/xray-ok.log`, wait = min(limit, left), hung = false, t;
 	unlink(out);
 	uloop.init();
-	let p = uloop.process('/bin/sh', [ '-c', `${shq(cfg.main.xray_bin)} run -test -c ${shq(path)} >/dev/null 2>&1; echo $? > ${shq(out)}` ],
+	let p = uloop.process('/bin/sh', [ '-c', `${shq(cfg.main.xray_bin)} run -test -c ${shq(path)} >${shq(said)} 2>&1; echo $? > ${shq(out)}` ],
 		XRAY_ENV, () => uloop.end());
 	if (!p)
 		return false;
@@ -84,13 +98,16 @@ function xray_ok(path, limit, reserve) {
 	});
 	uloop.run();
 	t.cancel();
-	let code = readfile(out);
+	let code = readfile(out), text = readfile(said);
 	unlink(out);
+	unlink(said);
 	if (hung && wait < limit)
 		return null;
 	if (hung)
 		log(`${cfg.main.xray_bin} run -test hung for ${limit} s, killed`);
 	definite = !hung && code != null && int(code) in [ 0, 23 ];
+	if (definite && int(code) == 23)
+		reason = xray_reason(text);
 	return !hung && code != null && int(code) == 0;
 }
 
@@ -209,10 +226,14 @@ case 'generate': {
 	let sig = bin_sig(), frame = conf_key([ cfg.main, cfg.access, env.ipv6 ]), tested = read_json(TESTED_FILE);
 	if (type(tested?.ok) != 'object' || tested.bin != sig || tested.frame != frame)
 		tested = { bin: sig, frame, full: null, ok: {} };
+	tested.why ??= {};
 	let verdict = (s) => tested.ok[s.key ??= conf_key(s.outbound)];
 	let set_key = (list) => conf_key(sort(map(list, (s) => s.key ?? conf_key(s.outbound))));
 	// rejected before: dropped without a test
-	let skipped = map(filter(servers, (s) => verdict(s) === false), (s) => s.name);
+	// each reason in full went to the log when the server was tested
+	let brief = (r) => (length(r) > 80) ? `${substr(r, 0, 79)}…` : r;
+	let skipped = map(filter(servers, (s) => verdict(s) === false),
+		(s) => tested.why[s.key] ? `${s.name} (${brief(tested.why[s.key])})` : s.name);
 	if (length(skipped)) {
 		log(`xray rejected ${length(skipped)} server(s) earlier: ${join(', ', skipped)}`);
 		servers = filter(servers, (s) => verdict(s) !== false);
@@ -240,11 +261,15 @@ case 'generate': {
 				tested.ok[s.key] = true;
 		}
 		// the servers gone from the subscriptions go from the file too
-		let ok = {};
+		let ok = {}, why = {};
 		for (let s in all)
-			if (verdict(s) != null)
+			if (verdict(s) != null) {
 				ok[s.key] = verdict(s);
+				if (!ok[s.key] && tested.why[s.key])
+					why[s.key] = tested.why[s.key];
+			}
 		tested.ok = ok;
+		tested.why = why;
 		write_json(TESTED_FILE, tested);
 	}
 	function commit(code) {
@@ -311,14 +336,21 @@ case 'generate': {
 			definite = false;
 			if (put(tmp, generate(cfg, [ s ], build_index(cfg, [ s ], s.id, null, env))))
 				ok = xray_ok(tmp, TEST_ONE, TEST_FULL);
-			if (definite)
+			if (definite) {
 				tested.ok[s.key] = ok;
+				if (!ok && reason)
+					tested.why[s.key] = reason;
+			}
 			if (ok == null)
 				untested++;
 			else if (ok)
 				push(good, s);
-			else
+			else {
 				push(bad, s.name);
+				// a newer xray forbids what the link sets (vless without TLS, allowInsecure…)
+				if (definite && reason)
+					log(`xray rejected server "${s.name}": ${reason}`);
+			}
 		}
 		log(`xray rejected ${length(bad)} server(s): ${join(', ', bad)}`);
 		if (untested && !length(good))
