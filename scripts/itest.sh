@@ -9,7 +9,8 @@
 # procd lock held) does not stop the health checks, a slow generate is not killed and a
 # killed one leaves the running config; before NTP sets the clock no server goes to quarantine;
 # the status tab and a reload of the same servers start no xray; a test port taken by another
-# program is skipped, a main one is an error, xray starts with IPv6 off.
+# program is skipped, a main one is an error, xray starts with IPv6 off; UDP sessions of a
+# torrent client are let go after conn_idle, BitTorrent is dropped when blocked.
 set -e
 cd "$(dirname "$0")/.."
 DOCKER="${DOCKER:-docker}"
@@ -69,7 +70,7 @@ sleep 3
 # downloads.openwrt.org may fail right after the network restart or on a busy host
 # (wget returned 4): opkg update and install are tried again
 for i in 1 2 3 4 5; do opkg update >/dev/null && break; sleep 5; done
-for i in 1 2 3 4 5; do opkg install ucode-mod-uloop xray-core curl ip-full >/dev/null && break; sleep 5; done
+for i in 1 2 3 4 5; do opkg install ucode-mod-uloop ucode-mod-socket xray-core curl ip-full >/dev/null && break; sleep 5; done
 cp -a /src/luci-app-xvpn/root/. /
 /etc/uci-defaults/80_luci-xvpn
 /etc/init.d/rpcd restart
@@ -896,6 +897,59 @@ logread | grep -q "main.gomemlimit '80MB'" && tr '\0' '\n' < /proc/$(xray_pid)/e
 echo "OK: a bad gomemlimit falls back to 80MiB"
 uci delete xvpn.main.gomemlimit
 uci set xvpn.main.xray_bin=/usr/bin/xray; uci commit xvpn
+/etc/init.d/xvpn reload
+wait_for @.state connected 40
+
+# a torrent client (#15): many UDP sessions through TPROXY are let go after conn_idle, each
+# holds a socket of xray; buffer_size 4 as on arm64. BitTorrent is dropped when blocked.
+uci set xvpn.main.conn_idle=10; uci set xvpn.main.buffer_size=4; uci set xvpn.main.block_bittorrent=1; uci commit xvpn
+/etc/init.d/xvpn reload
+wait_for @.state connected 40
+[ "$(jsonfilter -i /var/etc/xvpn/config.json -e '@.policy.levels["0"].connIdle')" = 10 ] \
+	&& [ "$(jsonfilter -i /var/etc/xvpn/config.json -e '@.policy.levels["0"].bufferSize')" = 4 ] \
+	|| { echo "FAIL: policy not in the config: $(jsonfilter -i /var/etc/xvpn/config.json -e '@.policy')"; exit 1; }
+cat > /tmp/udp-sink.uc <<'UC'
+import * as socket from 'socket';
+let u = socket.create(socket.AF_INET, socket.SOCK_DGRAM);
+u.bind({ address: '45.0.0.2', port: 7000 });
+while (true) u.recv(2048);
+UC
+cat > /tmp/udp-many.uc <<'UC'
+import * as socket from 'socket';
+let ss = [];
+for (let i = 0; i < +ARGV[0]; i++) {
+	let s = socket.create(socket.AF_INET, socket.SOCK_DGRAM);
+	s.connect({ address: '45.0.0.2', port: 7000 });
+	s.send('x');
+	push(ss, s);
+}
+for (let s in ss) s.close();
+UC
+cat > /tmp/bt.uc <<'UC'
+import * as socket from 'socket';
+let s = socket.create(socket.AF_INET, socket.SOCK_STREAM);
+s.connect({ address: '45.0.0.2', port: 80 });
+s.send(ARGV[0] == 'bt' ? '\x13BitTorrent protocol\0\0\0\0\0\0\0\0aaaaaaaaaaaaaaaaaaaabbbbbbbbbbbbbbbbbbbb'
+	: 'GET / HTTP/1.0\r\n\r\n');
+print(socket.poll(5000, [ s, socket.POLLIN ])?.[0]?.[1] ? (s.recv(12) ?? '') : '');
+UC
+ip netns exec wan ucode /tmp/udp-sink.uc &
+sink=$!
+sleep 1
+xfds() { ls /proc/$(xray_pid)/fd | wc -l; }
+base=$(xfds)
+ip netns exec cl ucode /tmp/udp-many.uc 300
+sleep 2
+peak=$(xfds)
+[ $((peak - base)) -ge 250 ] || { echo "FAIL: 300 UDP sessions hold $((peak - base)) sockets of xray"; kill $sink; exit 1; }
+few() { [ $(xfds) -le $((base + 20)) ]; }
+wait_cmd 40 few
+kill $sink
+echo "OK: 300 UDP sessions let go after conn_idle (xray fds $base -> $peak -> $(xfds), $(grep VmRSS /proc/$(xray_pid)/status | tr -s ' \t' ' '))"
+ip netns exec cl ucode /tmp/bt.uc http | grep -q '^HTTP/1\.. 200' || { echo "FAIL: HTTP blocked with block_bittorrent"; exit 1; }
+[ -z "$(ip netns exec cl ucode /tmp/bt.uc bt)" ] || { echo "FAIL: BitTorrent handshake reached the server"; exit 1; }
+echo "OK: BitTorrent dropped, HTTP goes through"
+uci delete xvpn.main.conn_idle; uci delete xvpn.main.buffer_size; uci delete xvpn.main.block_bittorrent; uci commit xvpn
 /etc/init.d/xvpn reload
 wait_for @.state connected 40
 
