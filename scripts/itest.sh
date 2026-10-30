@@ -975,8 +975,10 @@ r=$(ubus call luci.xvpn update '{"sid":"s2"}')
 [ "$(echo "$r" | jsonfilter -e @.ok)" = true ] || { echo "FAIL: fresh subscription: $r"; exit 1; }
 wait_cmd 20 test -s /etc/xvpn/subs/s2.json
 [ ! -e /var/run/xvpn/updating ] || { echo "FAIL: lock left after update"; exit 1; }
-# its reload restarts xvpnd (the new section changes XVPN_CONF): the next steps need the new one
-wait_cmd 60 xvpnd_restarted "$dp"
+# the new section changes XVPN_CONF: the next reload restarts xvpnd. Here, not in the middle
+# of the next steps (xray_down: the restart of xray reloads the service)
+/etc/init.d/xvpn reload
+wait_cmd 30 xvpnd_restarted "$dp"
 wait_for @.state connected 30
 echo "OK: fresh subscription updated"
 
