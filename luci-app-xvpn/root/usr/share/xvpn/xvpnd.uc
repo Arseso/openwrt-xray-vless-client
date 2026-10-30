@@ -73,7 +73,7 @@ let probe_seq = 0;
 let no_auto_sig = null, no_auto_set = {};
 let conn;
 // ucode does not hoist functions: these call each other in a cycle, defined below
-let reload_service, reindex, choose_best, check;
+let reload_service, reindex, choose_best, check, reload_failed;
 
 // The daemon must not wait for logd (logger and logread do): messages go to one logger
 // at a time in the background, at most LOG_QUEUE wait meanwhile. A logger stuck with logd
@@ -734,7 +734,7 @@ function after_reload() {
 // new one at the end), so the checks, failover and passthrough go on. The status shows
 // error until a reload goes through: another try every RELOAD_RETRY, select and updates
 // try at once, a reload past the daemon (reindex) counts too.
-function reload_failed(why) {
+reload_failed = function(why) {
 	log(`${why}, next try in ${RELOAD_RETRY} s`);
 	st.reload_error = why;
 	st.reloading = st.reload_pending = false;
@@ -758,7 +758,7 @@ function reload_failed(why) {
 	// e.g. failover at stale addresses (choose_best): choose with the config xray runs
 	if (pending)
 		choose_best(pending);
-}
+};
 
 // What a working reload changes: its processes and their CPU time, and those of another
 // `init.d/xvpn` (rpcd, UCI triggers) that holds procd's service lock meanwhile. One waiting
