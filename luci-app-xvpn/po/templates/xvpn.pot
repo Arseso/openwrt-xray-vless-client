@@ -8,7 +8,7 @@ msgid ""
 "(xn--p1ai for .рф)."
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:407
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:410
 #: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/subscriptions.js:321
 msgid "%d day left"
 msgid_plural "%d days left"
@@ -32,7 +32,7 @@ msgid "%d min ago"
 msgstr ""
 
 #: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:367
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:444
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:447
 msgid "%d ms"
 msgstr ""
 
@@ -46,7 +46,7 @@ msgid_plural "%d servers"
 msgstr[0] ""
 msgstr[1] ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:215
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:228
 msgid "%d servers need ports up to %d"
 msgstr ""
 
@@ -81,7 +81,7 @@ msgid ""
 "is not chosen automatically while there are other servers."
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:420
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:423
 #: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/subscriptions.js:273
 msgid "(%d skipped)"
 msgstr ""
@@ -90,7 +90,7 @@ msgstr ""
 msgid "(directly)"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:375
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:378
 msgid "(pause %s)"
 msgstr ""
 
@@ -129,7 +129,7 @@ msgid ""
 "SSIDs of a Wi-Fi-only network selected above get the name too."
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:127
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:139
 msgid "A server that failed is not chosen again for this time."
 msgstr ""
 
@@ -140,7 +140,7 @@ msgid ""
 "of the provider."
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:181
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:193
 msgid "API port"
 msgstr ""
 
@@ -161,7 +161,7 @@ msgstr ""
 msgid "Add subscription"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:437
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:440
 #: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/subscriptions.js:186
 msgid "Address"
 msgstr ""
@@ -170,7 +170,7 @@ msgstr ""
 msgid "Addresses and networks"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:176
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:188
 msgid "Advanced"
 msgstr ""
 
@@ -178,23 +178,23 @@ msgstr ""
 msgid "An update is already running"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:73
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:74
 msgid ""
 "Any fast URL that answers with HTTP 2xx or 3xx. The time to the first byte "
 "is the ping of the server."
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:437
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:440
 msgid "Auto"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:122
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:134
 msgid ""
 "Background test of all servers: their pings in the status tab and the choice "
 "of the next server."
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:173
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:185
 msgid ""
 "BitTorrent connections of the clients are dropped: a torrent client opens "
 "thousands of sessions, which may run the router out of memory."
@@ -204,7 +204,7 @@ msgstr ""
 msgid "Block"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:172
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:184
 msgid "Block BitTorrent"
 msgstr ""
 
@@ -235,7 +235,7 @@ msgstr ""
 msgid "Cancel"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:177
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:189
 msgid "Change only on a conflict with other services of the router."
 msgstr ""
 
@@ -243,11 +243,11 @@ msgstr ""
 msgid "Check"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:72
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:73
 msgid "Check URL"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:98
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:110
 msgid "Check interval, s"
 msgstr ""
 
@@ -255,7 +255,7 @@ msgstr ""
 msgid "Checked %s (%s)."
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:219
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:232
 msgid "Client mark"
 msgstr ""
 
@@ -281,6 +281,10 @@ msgid ""
 "they are blocked like everything else."
 msgstr ""
 
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:193
+msgid "Control port"
+msgstr ""
+
 #: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/subscriptions.js:143
 msgid "Could not check the links: %s"
 msgstr ""
@@ -289,7 +293,7 @@ msgstr ""
 msgid "Could not start the download: %s"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:181
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:193
 msgid "DNS port"
 msgstr ""
 
@@ -303,7 +307,7 @@ msgstr ""
 msgid "DNS server"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:160
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:172
 msgid "Debug"
 msgstr ""
 
@@ -336,6 +340,10 @@ msgstr ""
 msgid "Download all enabled subscriptions now"
 msgstr ""
 
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:100
+msgid "Download check URL"
+msgstr ""
+
 #: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/subscriptions.js:334
 msgid "Download this subscription now"
 msgstr ""
@@ -344,11 +352,18 @@ msgstr ""
 msgid "Download through the active server; if that fails, directly."
 msgstr ""
 
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:101
+msgid ""
+"Downloaded through the active server every 5 minutes: a download that stalls "
+"or does not finish in 15 s counts as a failed check, like a server that does "
+"not answer. Use a file of 64–128 KB. \"off\" turns this check off."
+msgstr ""
+
 #: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/split.js:91
 msgid "Downloading…"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:65
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:66
 msgid ""
 "Empty fields use the defaults. Changes take effect after \"Save & Apply\": "
 "the service is reloaded, and if the config of xray changed, xray restarts "
@@ -383,11 +398,11 @@ msgstr ""
 msgid "Enter a name"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:231
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:244
 msgid "Enter a number from 0x1 to 0xffffffff (hex) or from 1 to 4294967295"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:37
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:38
 #: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/split.js:121
 msgid "Enter a whole number from %d to %d"
 msgstr ""
@@ -400,11 +415,11 @@ msgstr ""
 msgid "Enter an IPv4 or IPv6 address or network"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:155
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:167
 msgid "Enter an absolute path"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:163
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:175
 msgid "Error"
 msgstr ""
 
@@ -416,7 +431,7 @@ msgstr ""
 msgid "Errors only"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:207
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:220
 msgid ""
 "Every server gets a local SOCKS port on 127.0.0.1 for its health checks: "
 "this port and the following ones, %d now."
@@ -426,19 +441,19 @@ msgstr ""
 msgid "Exclude"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:384
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:387
 msgid "Expires"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:369
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:372
 msgid "Failed checks in a row"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:117
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:129
 msgid "Failed checks in a row after which the server is switched."
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:116
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:128
 msgid "Failures before switching"
 msgstr ""
 
@@ -459,19 +474,19 @@ msgstr ""
 msgid "Firewall error: VPN clients go to the internet directly"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:223
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:236
 msgid ""
 "Firewall mark (hex) of the traffic going to xray; an ip rule sends it to the "
 "routing table below."
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:222
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:235
 msgid ""
 "Firewall mark (hex) of the traffic of the VPN clients. It must not share "
 "bits with the marks of mwan3 (0x3f00) and pbr (0x00ff0000)."
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:378
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:381
 msgid "Firewall rules"
 msgstr ""
 
@@ -489,7 +504,7 @@ msgstr ""
 msgid "Firewall rules are not applied:"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:206
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:219
 msgid "First test port"
 msgstr ""
 
@@ -505,23 +520,23 @@ msgstr ""
 msgid "Hardware flow offloading is enabled in the firewall."
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:67
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:68
 msgid "Health checks"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:132
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:144
 msgid "How many servers are tested at the same time."
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:142
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:154
 msgid "How much faster another server must be to switch to it."
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:99
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:111
 msgid "How often the active server is checked."
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:141
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:153
 msgid "Hysteresis, ms"
 msgstr ""
 
@@ -543,7 +558,7 @@ msgstr ""
 msgid "Include"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:161
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:173
 msgid "Info"
 msgstr ""
 
@@ -585,20 +600,20 @@ msgstr ""
 msgid "Last download failed: %s"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:377
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:380
 msgid "Last error"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:370
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:373
 msgid "Last switch"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:372
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:375
 msgid "Last test of all servers"
 msgstr ""
 
 #: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:365
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:437
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:440
 msgid "Latency"
 msgstr ""
 
@@ -618,7 +633,7 @@ msgstr ""
 msgid "Log"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:158
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:170
 msgid "Log level of xray"
 msgstr ""
 
@@ -626,7 +641,7 @@ msgstr ""
 msgid "Manual links"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:159
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:171
 msgid "Messages of xray go to the system log (the Log tab)."
 msgstr ""
 
@@ -634,8 +649,8 @@ msgstr ""
 msgid "Minimal block: bridge rules were not applied"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:384
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:437
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:387
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:440
 #: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/subscriptions.js:186
 #: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/subscriptions.js:423
 msgid "Name"
@@ -661,11 +676,11 @@ msgid ""
 "of a selected network is covered by the network anyway."
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:374
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:377
 msgid "Next test of all servers"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:384
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:387
 msgid "Next update"
 msgstr ""
 
@@ -681,16 +696,16 @@ msgstr ""
 msgid "No live servers"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:473
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:476
 msgid ""
 "No servers yet. Add a subscription or a link on the \"Subscriptions\" tab."
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:434
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:437
 msgid "No subscriptions. Add one on the \"Subscriptions\" tab."
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:164
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:176
 msgid "None"
 msgstr ""
 
@@ -704,21 +719,27 @@ msgid ""
 "applied yet"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:240
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:253
 msgid ""
 "Number of the routing table for the TPROXY mark: it must not be used by "
 "anything else."
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:428
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:431
 #: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/subscriptions.js:205
 msgid "OK"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:137
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:149
 msgid ""
 "Off: the server is switched only when it fails. On: also when the background "
 "test finds a server that is faster by the hysteresis below."
+msgstr ""
+
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:213
+msgid ""
+"On 127.0.0.1: the xray API over TCP, to switch servers without a restart, "
+"and the UDP check over UDP."
 msgstr ""
 
 #: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/subscriptions.js:493
@@ -734,7 +755,7 @@ msgid ""
 "lower case"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:83
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:84
 msgid ""
 "Opened through every server that answers the check URL when all servers are "
 "tested and a server is chosen. A server that fails it is marked limited and "
@@ -743,7 +764,7 @@ msgid ""
 "turns this check off."
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:131
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:143
 msgid "Parallel tests"
 msgstr ""
 
@@ -751,7 +772,7 @@ msgstr ""
 msgid "Passthrough: VPN clients go directly"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:152
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:164
 msgid "Path to xray"
 msgstr ""
 
@@ -759,7 +780,7 @@ msgstr ""
 msgid "Protection"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:437
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:440
 #: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/subscriptions.js:186
 msgid "Protocol"
 msgstr ""
@@ -770,7 +791,7 @@ msgid ""
 "Clash and sing-box formats are not supported."
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:126
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:138
 msgid "Quarantine, s"
 msgstr ""
 
@@ -814,7 +835,7 @@ msgstr ""
 msgid "Restarting the service…"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:239
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:252
 msgid "Routing table"
 msgstr ""
 
@@ -826,12 +847,12 @@ msgstr ""
 msgid "Russian networks directly"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:82
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:83
 msgid "Second check URL"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:384
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:472
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:387
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:475
 msgid "Servers"
 msgstr ""
 
@@ -850,7 +871,7 @@ msgstr ""
 msgid "Settings"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:234
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:247
 msgid "Shares bits with \"%s\""
 msgstr ""
 
@@ -860,7 +881,7 @@ msgid ""
 "through the VPN, the rest of the bridge does not."
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:167
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:179
 msgid "Sniffing"
 msgstr ""
 
@@ -885,7 +906,7 @@ msgid "State"
 msgstr ""
 
 #: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:356
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:384
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:387
 #: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/subscriptions.js:449
 #: luci-app-xvpn/root/usr/share/luci/menu.d/luci-app-xvpn.json:15
 msgid "Status"
@@ -895,22 +916,22 @@ msgstr ""
 msgid "Stopping the service…"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:437
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:440
 #: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/subscriptions.js:415
 msgid "Subscription"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:433
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:436
 #: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/subscriptions.js:407
 #: luci-app-xvpn/root/usr/share/luci/menu.d/luci-app-xvpn.json:20
 msgid "Subscriptions"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:136
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:148
 msgid "Switch to a faster server"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:467
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:470
 msgid "Switching to %s…"
 msgstr ""
 
@@ -918,19 +939,19 @@ msgstr ""
 msgid "Switching to another server"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:219
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:232
 msgid "TPROXY mark"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:181
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:193
 msgid "TPROXY port"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:247
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:260
 msgid "Tables 253–255 are default, main and local"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:464
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:467
 msgid ""
 "Takes part in auto selection: at start, on failover and when switching to a "
 "faster server"
@@ -940,7 +961,7 @@ msgstr ""
 msgid "Test all"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:121
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:133
 msgid "Test all servers every, s"
 msgstr ""
 
@@ -956,7 +977,7 @@ msgstr ""
 msgid "The URL is longer than %d characters"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:68
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:69
 msgid ""
 "The active server is checked by an HTTP request through it. After several "
 "failures in a row the best working server is chosen."
@@ -990,11 +1011,11 @@ msgstr ""
 msgid "The log has no lines of xvpn or xray"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:192
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:204
 msgid "The port is in the range of the test ports %d–%d"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:190
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:202
 msgid "The same port as \"%s\""
 msgstr ""
 
@@ -1010,7 +1031,7 @@ msgstr ""
 msgid "The service is disabled: VPN clients are not routed through xray."
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:102
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:114
 msgid "The timeout must be shorter than the check interval"
 msgstr ""
 
@@ -1020,7 +1041,7 @@ msgid ""
 "internet directly until the service is enabled again."
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:153
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:165
 msgid "The xray-core binary (25.x)."
 msgstr ""
 
@@ -1040,16 +1061,16 @@ msgstr ""
 msgid "Through the tunnel"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:109
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:121
 msgid "Time limit of one check."
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:108
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:120
 msgid "Timeout, s"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:384
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:437
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:387
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:440
 msgid "Traffic"
 msgstr ""
 
@@ -1064,7 +1085,7 @@ msgid ""
 "they end. Reconnect the clients or restart the router after enabling the VPN."
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:379
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:382
 msgid "Traffic through xray"
 msgstr ""
 
@@ -1074,6 +1095,16 @@ msgstr ""
 
 #: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/split.js:152
 msgid "Turning the list on or off takes effect after \"Save & Apply\"."
+msgstr ""
+
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:369
+msgid "UDP"
+msgstr ""
+
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:370
+msgid ""
+"UDP does not pass through this server: QUIC, voice calls and games of the "
+"clients may not work."
 msgstr ""
 
 #: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/subscriptions.js:427
@@ -1104,7 +1135,7 @@ msgstr ""
 msgid "Update the list every, h"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:384
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:387
 msgid "Updated"
 msgstr ""
 
@@ -1117,11 +1148,11 @@ msgstr ""
 msgid "Updating subscriptions…"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:466
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:469
 msgid "Use"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:93
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:94
 msgid "Use another URL than the check URL, preferably on another CDN"
 msgstr ""
 
@@ -1129,7 +1160,7 @@ msgstr ""
 msgid "User-Agent"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:499
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:502
 msgid ""
 "VPN client on xray-core with subscriptions and automatic failover between "
 "servers."
@@ -1139,7 +1170,7 @@ msgstr ""
 msgid "Waiting for NTP time sync"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:162
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:174
 msgid "Warning"
 msgstr ""
 
@@ -1161,7 +1192,7 @@ msgstr ""
 msgid "Wi-Fi (SSID)"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:497
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:500
 #: luci-app-xvpn/root/usr/share/luci/menu.d/luci-app-xvpn.json:3
 msgid "XVPN"
 msgstr ""
@@ -1174,7 +1205,7 @@ msgstr ""
 msgid "XVPN: log"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:64
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:65
 msgid "XVPN: settings"
 msgstr ""
 
@@ -1186,7 +1217,7 @@ msgstr ""
 msgid "XVPN: subscriptions"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:451
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:454
 msgid "active"
 msgstr ""
 
@@ -1204,12 +1235,16 @@ msgid "directly"
 msgstr ""
 
 #: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/access.js:190
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:424
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:427
 msgid "disabled"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:374
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:426
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:369
+msgid "does not pass"
+msgstr ""
+
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:377
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:429
 #: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/subscriptions.js:290
 msgid "due"
 msgstr ""
@@ -1218,23 +1253,23 @@ msgstr ""
 msgid "duplicate of line %d, skipped"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:408
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:411
 #: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/subscriptions.js:322
 msgid "expired %s"
 msgstr ""
 
 #: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:366
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:443
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:446
 msgid "failed"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:375
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:426
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:378
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:429
 #: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/subscriptions.js:290
 msgid "in %s"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:407
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:410
 #: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/subscriptions.js:321
 msgid "less than a day left"
 msgstr ""
@@ -1247,7 +1282,7 @@ msgstr ""
 msgid "list changed %s"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:459
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:462
 msgid "manual"
 msgstr ""
 
@@ -1256,7 +1291,7 @@ msgid "network %s"
 msgstr ""
 
 #: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:111
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:412
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:415
 #: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/subscriptions.js:64
 msgid "never"
 msgstr ""
@@ -1293,11 +1328,12 @@ msgstr ""
 msgid "not found"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:86
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:87
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:103
 msgid "off"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:453
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/status.js:456
 msgid "quarantine"
 msgstr ""
 
@@ -1330,7 +1366,7 @@ msgstr ""
 msgid "updating…"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:149
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:161
 msgid "xray"
 msgstr ""
 
@@ -1353,22 +1389,22 @@ msgstr ""
 msgid "xray is not running"
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:168
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:180
 msgid ""
 "xray takes the domain from HTTP, TLS and QUIC and sends it to the server "
 "instead of the IP: many servers do not let clients connect to bare IP "
 "addresses."
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:199
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:211
 msgid "xray takes the intercepted DNS queries on this port."
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:198
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:210
 msgid "xray takes the traffic of the VPN clients on this port."
 msgstr ""
 
-#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:200
+#: luci-app-xvpn/htdocs/luci-static/resources/view/xvpn/settings.js:212
 msgid "xray traffic statistics (metrics over HTTP), on 127.0.0.1."
 msgstr ""
 

@@ -50,8 +50,10 @@ start_service() {
 	if [ "$have_servers" = 1 ]; then
 		procd_open_instance xray
 		procd_set_param command "$xray_bin" run -c "$CONF"
-		procd_set_param env GOMEMLIMIT="$gomemlimit" GOGC="$gogc"
-		procd_set_param file "$CONF"
+		# XVPN_XRAY: the key of the config, without the server the balancer points at: the daemon
+		# switches servers without a restart (#13), procd restarts xray for anything else
+		procd_set_param env GOMEMLIMIT="$gomemlimit" GOGC="$gogc" \
+			XVPN_XRAY="$(jsonfilter -i /var/etc/xvpn/index.json -e @.xray_key 2>/dev/null)"
 		procd_set_param limits nofile="65535 65535"
 		procd_set_param stdout 1
 		procd_set_param stderr 1

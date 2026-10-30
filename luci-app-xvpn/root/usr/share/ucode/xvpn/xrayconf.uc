@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Builds the xray config: one outbound per server with its own loopback SOCKS
-// test inbound; tproxy and DNS inbounds are routed to the active server.
+// test inbound; tproxy and DNS inbounds are routed to the active server through the
+// balancer "active", which the daemon points at another server without a restart (#13).
 
 'use strict';
 
@@ -17,14 +18,15 @@ import { direct_domains } from 'xvpn.split';
 // without IPv6 refuses ::); with ipv6 = tunnel that is a config error the status shows.
 export function build_index(cfg, servers, active_id, prev, env) {
 	let m = cfg.main, busy = env?.busy?.tcp ?? {}, port = m.test_port_base, index = [];
-	let main = { [m.tproxy_port]: true, [m.dns_port]: true, [m.api_port]: true };
+	let main = { [m.tproxy_port]: true, [m.dns_port]: true, [m.api_port]: true, [m.control_port]: true };
 	for (let i, s in servers) {
 		while (busy[port] || main[port])
 			port++;
 		push(index, {
 			id: s.id, hash: s.hash, name: s.name, proto: s.proto, address: s.address, port: s.port,
 			sub: s.sub, sub_name: s.sub_name,
-			tag: `srv-${i}`, test_port: port++,
+			// the balancer selects by prefix: "srv-1." is no prefix of "srv-10."
+			tag: `srv-${i}.`, test_port: port++,
 		});
 	}
 
@@ -39,7 +41,7 @@ export function build_index(cfg, servers, active_id, prev, env) {
 	// the rules (fw-apply), the daemon and rpcd go by the ports and IPv6 of the config xray runs
 	let r = {
 		active: active?.id, moved_from, servers: index, ipv6: env?.ipv6 ?? true,
-		ports: { tproxy: m.tproxy_port, dns: m.dns_port, api: m.api_port },
+		ports: { tproxy: m.tproxy_port, dns: m.dns_port, api: m.api_port, control: m.control_port },
 	};
 	if (!r.ipv6 && cfg.access.ipv6 == 'tunnel')
 		r.config_error = 'ipv6 is set to tunnel, but IPv6 is off on the router (disable_ipv6 or no IPv6 address): set ipv6 to block or turn IPv6 on';
@@ -50,7 +52,7 @@ export function build_index(cfg, servers, active_id, prev, env) {
 // (xray could not start with them), null when they are free.
 export function ports_error(cfg, env) {
 	let m = cfg.main, tcp = env?.busy?.tcp ?? {}, udp = env?.busy?.udp ?? {}, taken = [];
-	for (let p in [ [ 'tproxy_port', true ], [ 'dns_port', true ], [ 'api_port', false ] ]) {
+	for (let p in [ [ 'tproxy_port', true ], [ 'dns_port', true ], [ 'api_port', false ], [ 'control_port', true ] ]) {
 		let n = m[p[0]];
 		if (tcp[n] || (p[1] && udp[n]))
 			push(taken, `${p[0]} ${n}`);
@@ -65,6 +67,32 @@ export function ports_error(cfg, env) {
 // IP destinations
 export function dns_via_module(cfg) {
 	return index(cfg.access.dns_server, '://') > 0;
+};
+
+// Where the UDP check sends its DNS query (#10): the DNS server of the clients when it is
+// an IP (their queries go there over UDP through the tunnel), else a public one
+export function udp_target(cfg) {
+	return dns_via_module(cfg) ? '1.1.1.1' : cfg.access.dns_server;
+};
+
+// Points the balancer at the server with tag: generate, and the daemon on a switch
+// without a restart (it changes the running xray with `xray api bo` and the file for the
+// next start). The config key (see config_key()) leaves this out.
+export function set_active(conf, tag) {
+	for (let b in conf.routing?.balancers ?? [])
+		if (b.tag == 'active')
+			b.selector = [ tag ];
+};
+
+// What a restart of xray depends on: the config without the server the balancer points at
+export function config_key(conf) {
+	let b = filter(conf.routing?.balancers ?? [], (b) => b.tag == 'active')[0], sel = b?.selector;
+	if (b)
+		b.selector = [];
+	let s = sprintf('%J', conf);
+	if (b)
+		b.selector = sel;
+	return s;
 };
 
 export function generate(cfg, servers, idx) {
@@ -94,6 +122,12 @@ export function generate(cfg, servers, idx) {
 			tag: 'metrics', listen: '127.0.0.1', port: m.api_port, protocol: 'dokodemo-door',
 			settings: { address: '127.0.0.1' },
 		},
+		// the UDP check of the daemon (#10): a DNS query over UDP through the active server;
+		// the same number as the gRPC API (TCP) below
+		{
+			tag: 'udp-test', listen: '127.0.0.1', port: m.control_port, protocol: 'dokodemo-door',
+			settings: { address: udp_target(cfg), port: 53, network: 'udp' },
+		},
 	];
 
 	let outbounds = [];
@@ -108,8 +142,8 @@ export function generate(cfg, servers, idx) {
 		push(rules, { type: 'field', inboundTag: [ `test-${i}` ], outboundTag: e.tag });
 	}
 
-	// unmatched traffic never leaves directly
-	push(outbounds, { tag: 'block', protocol: 'blackhole' });
+	// unmatched traffic never leaves directly: blackhole is the first outbound, the default
+	unshift(outbounds, { tag: 'block', protocol: 'blackhole' });
 	if (doh) {
 		// other query types (TXT, HTTPS…) would go to an IP: drop them; never 'skip' —
 		// dns-out would send them to the placeholder address itself, around the tunnel
@@ -127,12 +161,13 @@ export function generate(cfg, servers, idx) {
 		push(outbounds, { tag: 'direct', protocol: 'freedom' });
 		push(rules, { type: 'field', inboundTag: [ 'tproxy' ], domain: direct, outboundTag: 'direct' });
 	}
+	let balancers = [];
 	if (active) {
-		push(rules, { type: 'field', inboundTag: doh ? [ 'tproxy', 'dns-module' ] : [ 'tproxy', 'dns-in' ],
-			outboundTag: active.tag });
-		// the first outbound is the default one
-		let pos = filter(outbounds, (o) => o.tag == active.tag)[0];
-		outbounds = [ pos, ...filter(outbounds, (o) => o.tag != active.tag) ];
+		// "active" selects that one server; the daemon overrides the choice (`xray api bo`), and
+		// the connections already open go on through the server they went to (#13)
+		push(balancers, { tag: 'active', selector: [ active.tag ] });
+		push(rules, { type: 'field', inboundTag: doh ? [ 'tproxy', 'dns-module', 'udp-test' ] : [ 'tproxy', 'dns-in', 'udp-test' ],
+			balancerTag: 'active' });
 	}
 
 	// all inbounds are of level 0 (xray's default userLevel); a torrent client behind the
@@ -148,9 +183,11 @@ export function generate(cfg, servers, idx) {
 		metrics: { tag: 'metrics' },
 		stats: {},
 		policy: { levels: { '0': level }, system: { statsOutboundUplink: true, statsOutboundDownlink: true } },
+		// RoutingService for the balancer override, only on 127.0.0.1
+		api: { tag: 'api', listen: `127.0.0.1:${m.control_port}`, services: [ 'RoutingService' ] },
 		inbounds,
 		outbounds,
-		routing: { domainStrategy: 'AsIs', rules },
+		routing: { domainStrategy: 'AsIs', rules, balancers },
 	};
 	if (doh)
 		conf.dns = {

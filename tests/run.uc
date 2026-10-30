@@ -7,7 +7,7 @@ import { readfile, writefile, mkdir, stat } from 'fs';
 import { parse_link, parse_subscription } from 'xvpn.links';
 import { parse_userinfo, assign_ids, list_change, known_ids, prune_no_auto, NO_AUTO_GRACE } from 'xvpn.subscription';
 import { load_config, fastest, auto_pick, retry_delay, no_auto_ids, set_no_auto, mkdir_p, read_json, SUBS_DIR } from 'xvpn.util';
-import { build_index, generate, ports_error } from 'xvpn.xrayconf';
+import { build_index, generate, ports_error, config_key, set_active } from 'xvpn.xrayconf';
 import { render, resolve, fix_ifnames, ifnames_applied, table_names, rule_prefs, stale_routes } from 'xvpn.firewall';
 import { ipv6_up, busy_ports } from 'xvpn.host';
 import { cidr, parse_nets, domain_rule, direct_domains, direct_nets, lists_due_in } from 'xvpn.split';
@@ -129,7 +129,7 @@ eq('new order: no reload', list_change(v2, [ v2[1], v2[0], v2[2], v2[3] ], [ v2[
 
 // config generation
 let cfg = {
-	main: { tproxy_port: 12345, dns_port: 10853, api_port: 10085, test_port_base: 20000, loglevel: 'warning', sniffing: false,
+	main: { tproxy_port: 12345, dns_port: 10853, api_port: 10085, control_port: 10086, test_port_base: 20000, loglevel: 'warning', sniffing: false,
 		client_mark: 0x01000000, tproxy_mark: 0x02000000, route_table: 100,
 		block_bittorrent: false, handshake: 4, conn_idle: 120, uplink_only: 2, downlink_only: 5, buffer_size: null },
 	access: { dns_server: '1.1.1.1', killswitch: true, ipv6: 'block', dns_hijack: true },
@@ -150,13 +150,29 @@ eq('index entries carry the hash', idx.servers[2].hash, servers[2].hash);
 eq('index ports', [ idx.servers[0].test_port, idx.servers[9].test_port ], [ 20000, 20009 ]);
 eq('index fallback active', build_index(cfg, servers, 'nope').active, servers[0].id);
 let conf = generate(cfg, servers, idx);
-eq('default outbound is active', conf.outbounds[0].tag, 'srv-2');
-eq('tproxy route', conf.routing.rules[-1] ?? conf.routing.rules[length(conf.routing.rules) - 1],
-	{ type: 'field', inboundTag: [ 'tproxy', 'dns-in' ], outboundTag: 'srv-2' });
-eq('inbounds', length(conf.inbounds), 3 + length(servers));
+// unmatched traffic goes nowhere; the clients reach the active server through the balancer,
+// which the daemon points at another one without a restart (#13)
+eq('default outbound is blackhole', conf.outbounds[0].tag, 'block');
+eq('tags: no prefix of another', [ idx.servers[1].tag, idx.servers[2].tag ], [ 'srv-1.', 'srv-2.' ]);
+eq('balancer of the active server', conf.routing.balancers, [ { tag: 'active', selector: [ 'srv-2.' ] } ]);
+eq('tproxy route', conf.routing.rules[length(conf.routing.rules) - 1],
+	{ type: 'field', inboundTag: [ 'tproxy', 'dns-in', 'udp-test' ], balancerTag: 'active' });
+eq('inbounds', length(conf.inbounds), 4 + length(servers));
 ok('no dns module for an IP', conf.dns == null);
-// stats come from the metrics section over loopback HTTP, there is no gRPC API (#7)
-eq('metrics', [ conf.metrics, conf.api ], [ { tag: 'metrics' }, null ]);
+// stats come from the metrics section over loopback HTTP (#7); the gRPC API only for the balancer
+eq('metrics', conf.metrics, { tag: 'metrics' });
+eq('api', conf.api, { tag: 'api', listen: '127.0.0.1:10086', services: [ 'RoutingService' ] });
+// the UDP check (#10): the DNS server of the clients when it is an IP
+eq('udp-test inbound', filter(conf.inbounds, (i) => i.tag == 'udp-test')[0],
+	{ tag: 'udp-test', listen: '127.0.0.1', port: 10086, protocol: 'dokodemo-door', settings: { address: '1.1.1.1', port: 53, network: 'udp' } });
+// another active server: the same key, no restart of xray; anything else: another key
+let conf3 = generate(cfg, servers, build_index(cfg, servers, servers[3].id));
+eq('balancer of another active server', conf3.routing.balancers[0].selector, [ 'srv-3.' ]);
+eq('config key without the active server', config_key(conf3), config_key(conf));
+ok('config key: the selector is kept', conf3.routing.balancers[0].selector[0] == 'srv-3.');
+ok('config key with another server list', config_key(generate(cfg, slice(servers, 1), build_index(cfg, slice(servers, 1), servers[3].id))) != config_key(conf));
+set_active(conf3, 'srv-2.');
+eq('set_active', conf3, conf);
 eq('metrics inbound', filter(conf.inbounds, (i) => i.tag == 'metrics')[0],
 	{ tag: 'metrics', listen: '127.0.0.1', port: 10085, protocol: 'dokodemo-door', settings: { address: '127.0.0.1' } });
 eq('metrics route', conf.routing.rules[0], { type: 'field', inboundTag: [ 'metrics' ], outboundTag: 'metrics' });
@@ -174,7 +190,7 @@ cfg.main.buffer_size = 4;
 let bt = generate(cfg, servers, idx);
 eq('bittorrent rule', bt.routing.rules[length(bt.routing.rules) - 2],
 	{ type: 'field', inboundTag: [ 'tproxy' ], protocol: [ 'bittorrent' ], outboundTag: 'block' });
-eq('bittorrent: route to the server last', bt.routing.rules[length(bt.routing.rules) - 1].outboundTag, 'srv-2');
+eq('bittorrent: route to the server last', bt.routing.rules[length(bt.routing.rules) - 1].balancerTag, 'active');
 eq('bittorrent without sniffing: protocol only', bt.inbounds[0].sniffing, { enabled: true, destOverride: [] });
 eq('buffer_size', bt.policy.levels['0'].bufferSize, 4);
 cfg.main.sniffing = true;
@@ -191,14 +207,16 @@ let dconf = generate(cfg, servers, idx);
 eq('doh module', dconf.dns, { tag: 'dns-module', servers: [ 'https://cloudflare-dns.com/dns-query' ], queryStrategy: 'UseIPv4' });
 ok('dns-in to dns-out', length(filter(dconf.routing.rules, (r) => r.inboundTag[0] == 'dns-in' && r.outboundTag == 'dns-out')) == 1);
 eq('doh route', dconf.routing.rules[length(dconf.routing.rules) - 1],
-	{ type: 'field', inboundTag: [ 'tproxy', 'dns-module' ], outboundTag: 'srv-2' });
-eq('default outbound with doh', dconf.outbounds[0].tag, 'srv-2');
+	{ type: 'field', inboundTag: [ 'tproxy', 'dns-module', 'udp-test' ], balancerTag: 'active' });
+eq('default outbound with doh', dconf.outbounds[0].tag, 'block');
+eq('doh: udp-test to a public DNS server', filter(dconf.inbounds, (i) => i.tag == 'udp-test')[0].settings.address, '1.1.1.1');
 writefile(`${OUT}/config-doh.json`, sprintf('%J', dconf));
 cfg.access.ipv6 = 'tunnel';
 eq('doh UseIP with ipv6 tunnel', generate(cfg, servers, idx).dns.queryStrategy, 'UseIP');
 cfg.access.ipv6 = 'block';
 let nosrv = generate(cfg, [], build_index(cfg, [], null));
 eq('doh without servers: blackhole by default', nosrv.outbounds[0].tag, 'block');
+eq('without servers: no balancer', nosrv.routing.balancers, []);
 ok('doh without servers: no dns-module rule', length(filter(nosrv.routing.rules, (r) => r.inboundTag[0] == 'tproxy')) == 0);
 cfg.access.dns_server = '1.1.1.1';
 
@@ -231,13 +249,14 @@ let taken = { tcp: { '20000': true, '20002': true }, udp: { '20001': true } };
 let pidx = build_index(cfg, servers, null, null, { ipv6: true, busy: taken });
 eq('busy test ports skipped', map(slice(pidx.servers, 0, 3), (e) => e.test_port), [ 20001, 20003, 20004 ]);
 eq('ports stay unique', length(uniq(map(pidx.servers, (e) => e.test_port))), length(servers));
-eq('index keeps the main ports for the rules', pidx.ports, { tproxy: 12345, dns: 10853, api: 10085 });
+eq('index keeps the main ports for the rules', pidx.ports, { tproxy: 12345, dns: 10853, api: 10085, control: 10086 });
 eq('generate uses the index ports', map(filter(generate(cfg, servers, pidx).inbounds, (i) => i.tag == 'test-0'), (i) => i.port), [ 20001 ]);
 let low = { ...cfg, main: { ...cfg.main, test_port_base: 10084 } };
-eq('main ports skipped', map(slice(build_index(low, servers, null, null).servers, 0, 3), (e) => e.test_port), [ 10084, 10086, 10087 ]);
+eq('main ports skipped', map(slice(build_index(low, servers, null, null).servers, 0, 3), (e) => e.test_port), [ 10084, 10087, 10088 ]);
 ok('main ports free', ports_error(cfg, { busy: taken }) == null);
 ok('tproxy port taken (udp)', match(ports_error(cfg, { busy: { tcp: {}, udp: { '12345': true } } }) ?? '', /tproxy_port 12345/));
 eq('api port: udp does not count', ports_error(cfg, { busy: { tcp: {}, udp: { '10085': true } } }), null);
+ok('control port taken (udp)', match(ports_error(cfg, { busy: { tcp: {}, udp: { '10086': true } } }) ?? '', /control_port 10086/));
 ok('api and dns taken', match(ports_error(cfg, { busy: { tcp: { '10085': true, '10853': true }, udp: {} } }) ?? '', /dns_port 10853, api_port 10085/));
 
 // /proc as host.uc reads it
@@ -492,6 +511,17 @@ for (let v in [ [ null, 'https://cp.cloudflare.com/generate_204' ], [ 'off', nul
 	eq(`url2 ${v[0]}`, load_config(`${OUT}/dnscfg`).health.url2, v[1]);
 }
 eq('url2_cdn by default', load_config(`${OUT}/dnscfg`).health.url2_cdn, 3);
+// #11: the download check and the direct internet by several URLs
+let hd = load_config(`${OUT}/dnscfg`).health;
+eq('dl_url by default', [ hd.dl_url, hd.dl_interval, hd.dl_timeout ], [ 'https://speed.cloudflare.com/__down?bytes=65536', 300, 15 ]);
+eq('wan_url by default: the check URL first', hd.wan_url,
+	[ 'https://www.gstatic.com/generate_204', 'https://cp.cloudflare.com/generate_204', 'http://detectportal.firefox.com/success.txt' ]);
+writefile(`${OUT}/dnscfg/xvpn`, "config health 'health'\n\toption dl_url 'off'\n\toption url 'https://cp.cloudflare.com/generate_204'\n\tlist wan_url 'http://a.test/'\n");
+hd = load_config(`${OUT}/dnscfg`).health;
+eq('dl_url off, wan_url set', [ hd.dl_url, hd.wan_url ], [ null, [ 'http://a.test/' ] ]);
+writefile(`${OUT}/dnscfg/xvpn`, "config health 'health'\n\toption url 'https://cp.cloudflare.com/generate_204'\n");
+eq('wan_url: no duplicates', length(load_config(`${OUT}/dnscfg`).health.wan_url), 2);
+writefile(`${OUT}/dnscfg/xvpn`, "config health 'health'\n");
 // policy (#15): hidden options, defaults without them
 writefile(`${OUT}/dnscfg/xvpn`, "config general 'main'\n");
 let pm = load_config(`${OUT}/dnscfg`).main;
@@ -626,7 +656,7 @@ let srule = filter(sconf.routing.rules, (r) => r.outboundTag == 'direct');
 eq('split xray: domain rule', srule, [ { type: 'field', inboundTag: [ 'tproxy' ], domain: [ 'domain:example.ru', 'full:www.ya.ru' ], outboundTag: 'direct' } ]);
 eq('split xray: freedom AsIs', filter(sconf.outbounds, (o) => o.tag == 'direct'), [ { tag: 'direct', protocol: 'freedom' } ]);
 let rtags = map(sconf.routing.rules, (r) => r.outboundTag);
-ok('split xray: before the rule of the active server', index(rtags, 'direct') == length(rtags) - 2 && rtags[-1] == 'srv-2' && sconf.outbounds[0].tag == 'srv-2');
+ok('split xray: before the rule of the active server', index(rtags, 'direct') == length(rtags) - 2 && sconf.routing.rules[-1].balancerTag == 'active');
 writefile(`${OUT}/config-split.json`, sprintf('%J', sconf));
 let nodom = generate({ ...scfg, split: { ...scfg.split, domain: [] } }, servers, idx);
 ok('split xray: no domains, no direct outbound', !length(filter(nodom.outbounds, (o) => o.tag == 'direct')));

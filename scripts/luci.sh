@@ -62,7 +62,7 @@ UCI
 /etc/init.d/firewall restart
 sleep 3
 opkg update >/dev/null
-opkg install luci ucode-mod-uloop xray-core curl >/dev/null
+opkg install luci ucode-mod-uloop ucode-mod-socket xray-core curl >/dev/null
 printf '%s\n%s\n' "$PASS" "$PASS" | passwd root >/dev/null 2>&1
 IN
 sync

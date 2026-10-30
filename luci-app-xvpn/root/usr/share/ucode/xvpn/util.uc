@@ -199,6 +199,8 @@ export function load_config(confdir) {
 			tproxy_port: num(m.tproxy_port, 12345),
 			dns_port: num(m.dns_port, 10853),
 			api_port: num(m.api_port, 10085),
+			// gRPC API of xray (TCP: the switch without a restart, #13) and the UDP check (#10)
+			control_port: num(m.control_port, 10086),
 			test_port_base: num(m.test_port_base, 20000),
 			client_mark: num(m.client_mark, 0x01000000),
 			tproxy_mark: num(m.tproxy_mark, 0x02000000),
@@ -246,6 +248,17 @@ export function load_config(confdir) {
 			// live servers in a row that fail url2 before it is asked directly (#61)
 			url2_cdn: max(1, num(h.url2_cdn, 3)),
 			retry_max: num(h.retry_max, 600),
+			// the active server: a download that must not stall (#11, DPI lets the handshake
+			// through and freezes the stream after ~16-20 KB); 'off' turns it off
+			dl_url: (h.dl_url == 'off' || h.dl_url == '0') ? null : (h.dl_url || 'https://speed.cloudflare.com/__down?bytes=65536'),
+			dl_interval: num(h.dl_interval, 300),
+			dl_timeout: num(h.dl_timeout, 15),
+			// direct internet: down only when none of them answers (#11)
+			wan_url: length(list(h.wan_url)) ? list(h.wan_url)
+				: uniq([ h.url || 'https://www.gstatic.com/generate_204', 'https://cp.cloudflare.com/generate_204', 'http://detectportal.firefox.com/success.txt' ]),
+			// DNS of the clients through the active server (#10): DoH through its test port,
+			// a DNS server given as an IP over UDP; the UDP check runs with the DNS one
+			dns_check: bool(h.dns_check, true),
 		},
 		// split tunneling (#67): checked and normalized by split.uc
 		split: {
