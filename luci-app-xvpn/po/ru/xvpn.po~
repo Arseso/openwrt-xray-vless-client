@@ -1,0 +1,815 @@
+msgid ""
+msgstr ""
+"Content-Type: text/plain; charset=UTF-8\n"
+"Project-Id-Version: luci-app-xvpn\n"
+"Language: ru\n"
+"MIME-Version: 1.0\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=3; plural=n%10==1 && n%100!=11 ? 0 : n%10>=2 && n%10<=4 && (n%100<10 || n%100>=20) ? 1 : 2;\n"
+
+msgid "%d day left"
+msgid_plural "%d days left"
+msgstr[0] "остался %d день"
+msgstr[1] "осталось %d дня"
+msgstr[2] "осталось %d дней"
+
+msgid "%d h"
+msgstr "%d ч"
+
+msgid "%d ms"
+msgstr "%d мс"
+
+msgid "%d of %d lines"
+msgstr "%d из %d строк"
+
+msgid "%d server"
+msgid_plural "%d servers"
+msgstr[0] "%d сервер"
+msgstr[1] "%d сервера"
+msgstr[2] "%d серверов"
+
+msgid "%d servers need ports up to %d"
+msgstr "Серверов: %d, нужны порты до %d"
+
+msgid "%dd %dh"
+msgstr "%d д %d ч"
+
+msgid "%dh %dm"
+msgstr "%d ч %d мин"
+
+msgid "%dm %ds"
+msgstr "%d мин %d с"
+
+msgid "%ds"
+msgstr "%d с"
+
+msgid "%s ago"
+msgstr "%s назад"
+
+msgid "%s does not open through this server: it may let through only some sites. It is not chosen automatically while there are other servers."
+msgstr "%s не открывается через этот сервер: возможно, он пропускает только часть сайтов. Пока есть другие серверы, он не выбирается автоматически."
+
+msgid "(%d skipped)"
+msgstr "(пропущено: %d)"
+
+msgid "(directly)"
+msgstr "(напрямую)"
+
+msgid "(pause %s)"
+msgstr "(пауза %s)"
+
+msgid "(requested: %s)"
+msgstr "(запрошено: %s)"
+
+msgid "(through the tunnel)"
+msgstr "(через туннель)"
+
+msgid "/etc/config/xvpn has uncommitted changes (uci set without uci commit)"
+msgstr "В /etc/config/xvpn есть незафиксированные изменения (uci set без uci commit)"
+
+msgid "0 or empty: the interval from the profile-update-interval header of the provider, otherwise 12 hours."
+msgstr "0 или пусто: интервал из заголовка profile-update-interval провайдера, без него — 12 часов."
+
+msgid "A URL is DoH (https://) or DNS over TCP (tcp://) through the DNS module of xray: it answers only A and AAAA queries. An IP address or a host name: queries are forwarded to it, port 53, through the tunnel. Other schemes (+local) would query around the tunnel and are not accepted."
+msgstr "URL — это DoH (https://) или DNS поверх TCP (tcp://) через DNS-модуль xray: он отвечает только на запросы A и AAAA. IP-адрес или имя хоста: запросы пересылаются на него, порт 53, через туннель. Другие схемы (+local) отправляли бы запросы мимо туннеля и не принимаются."
+
+msgid "A selected SSID gets the fixed interface name xvpn-apN in /etc/config/wireless (an ifname set by you is kept), so the rules know it before Wi-Fi is up; the name is removed when the SSID is deselected. Selecting or deselecting an SSID runs \"network reload\": Wi-Fi clients may reconnect. SSIDs of a Wi-Fi-only network selected above get the name too."
+msgstr "Выбранный SSID получает в /etc/config/wireless постоянное имя интерфейса xvpn-apN (заданный вами ifname сохраняется), чтобы правила знали его до запуска Wi-Fi; при снятии отметки имя удаляется. Выбор или снятие SSID выполняет «network reload»: Wi-Fi-клиенты могут переподключиться. SSID сети из одного Wi-Fi, выбранной выше, тоже получают такое имя."
+
+msgid "A server that failed is not chosen again for this time."
+msgstr "Отказавший сервер не выбирается повторно в течение этого времени."
+
+msgid "A subscription is a URL with a base64 or plain list of links, or with xray JSON. Traffic and the expiry date come from the subscription-userinfo header of the provider."
+msgstr "Подписка — это URL со списком ссылок (base64 или обычным текстом) или с JSON xray. Трафик и срок действия берутся из заголовка subscription-userinfo провайдера."
+
+msgid "API port"
+msgstr "Порт API"
+
+msgid "Access points"
+msgstr "Точки доступа"
+
+msgid "Active for"
+msgstr "Время работы"
+
+msgid "Active server"
+msgstr "Активный сервер"
+
+msgid "Add subscription"
+msgstr "Добавить подписку"
+
+msgid "Address"
+msgstr "Адрес"
+
+msgid "Advanced"
+msgstr "Дополнительно"
+
+msgid "An update is already running"
+msgstr "Обновление уже идёт"
+
+msgid "Any fast URL that answers with HTTP 2xx or 3xx. The time to the first byte is the ping of the server."
+msgstr "Любой быстрый URL, отвечающий HTTP 2xx или 3xx. Время до первого байта — это пинг сервера."
+
+msgid "Auto"
+msgstr "Авто"
+
+msgid "Background test of all servers: their pings in the status tab and the choice of the next server."
+msgstr "Фоновая проверка всех серверов: их пинги на вкладке «Статус» и выбор следующего сервера."
+
+msgid "Block"
+msgstr "Блокировать"
+
+msgid "Block: IPv6 of the VPN clients is rejected, they fall back to IPv4. Tunnel: IPv6 TCP/UDP goes through the tunnel too; the server must have IPv6."
+msgstr "Блокировать: IPv6 VPN-клиентов отклоняется, они переходят на IPv4. Туннель: IPv6 TCP/UDP тоже идёт через туннель; у сервера должен быть IPv6."
+
+msgid "Block: VPN clients have no internet"
+msgstr "Блокировка: у VPN-клиентов нет интернета"
+
+msgid "Busy, try again later"
+msgstr "Занято, повторите позже"
+
+msgid "Cancel"
+msgstr "Отмена"
+
+msgid "Change only on a conflict with other services of the router."
+msgstr "Меняйте только при конфликте с другими службами роутера."
+
+msgid "Check"
+msgstr "Проверка"
+
+msgid "Check URL"
+msgstr "URL проверки"
+
+msgid "Check interval, s"
+msgstr "Интервал проверки, с"
+
+msgid "Client mark"
+msgstr "Метка клиентов"
+
+msgid "Clients of the selected access points go to the internet only through the VPN (full tunnel). Other clients of the router are not affected. Changes take effect after \"Save & Apply\"."
+msgstr "Клиенты выбранных точек доступа выходят в интернет только через VPN (полный туннель). Остальных клиентов роутера это не касается. Изменения вступают в силу после «Сохранить и применить»."
+
+msgid "Connected"
+msgstr "Подключено"
+
+msgid "Connected for"
+msgstr "Время подключения"
+
+msgid "Could not check the links: %s"
+msgstr "Не удалось проверить ссылки: %s"
+
+msgid "DNS port"
+msgstr "Порт DNS"
+
+msgid "DNS queries of the VPN clients to any server go to the DNS server below through the tunnel."
+msgstr "DNS-запросы VPN-клиентов к любому серверу уходят через туннель на DNS-сервер, указанный ниже."
+
+msgid "DNS server"
+msgstr "DNS-сервер"
+
+msgid "Debug"
+msgstr "Отладка"
+
+msgid "Disable"
+msgstr "Выключить"
+
+msgid "Disable XVPN"
+msgstr "Выключить XVPN"
+
+msgid "Disabled"
+msgstr "Выключено"
+
+msgid "Download all enabled subscriptions now"
+msgstr "Скачать все включённые подписки сейчас"
+
+msgid "Download this subscription now"
+msgstr "Скачать эту подписку сейчас"
+
+msgid "Download through the active server; if that fails, directly."
+msgstr "Скачивать через активный сервер, при неудаче — напрямую."
+
+msgid "Empty fields use the defaults. Changes take effect after \"Save & Apply\": the service is reloaded, and if the config of xray changed, xray restarts and the VPN clients lose their connections for a moment."
+msgstr "Для пустых полей берутся значения по умолчанию. Изменения вступают в силу после «Сохранить и применить»: служба перезагружается, а если изменился конфиг xray, xray перезапускается и VPN-клиенты на мгновение теряют соединения."
+
+msgid "Enable"
+msgstr "Включить"
+
+msgid "Enabled"
+msgstr "Включено"
+
+msgid "Enabled, daemon not answering"
+msgstr "Включено, демон не отвечает"
+
+msgid "Enabled, daemon not running"
+msgstr "Включено, демон не запущен"
+
+msgid "Enabled, running"
+msgstr "Включено, работает"
+
+msgid "Enter a name"
+msgstr "Введите название"
+
+msgid "Enter a number from 0x1 to 0xffffffff (hex) or from 1 to 4294967295"
+msgstr "Введите число от 0x1 до 0xffffffff (hex) или от 1 до 4294967295"
+
+msgid "Enter a whole number from %d to %d"
+msgstr "Введите целое число от %d до %d"
+
+msgid "Enter an IP address, a host name, an https:// (DoH) or a tcp:// URL"
+msgstr "Введите IP-адрес, имя хоста, URL https:// (DoH) или tcp://"
+
+msgid "Enter an absolute path"
+msgstr "Введите абсолютный путь"
+
+msgid "Error"
+msgstr "Ошибка"
+
+msgid "Error: %s"
+msgstr "Ошибка: %s"
+
+msgid "Errors only"
+msgstr "Только ошибки"
+
+msgid "Every server gets a local SOCKS port on 127.0.0.1 for its health checks: this port and the following ones, %d now."
+msgstr "Каждый сервер получает для проверок локальный SOCKS-порт на 127.0.0.1: этот порт и следующие, сейчас их %d."
+
+msgid "Exclude"
+msgstr "Исключить"
+
+msgid "Expires"
+msgstr "Истекает"
+
+msgid "Failed checks in a row"
+msgstr "Неудачных проверок подряд"
+
+msgid "Failed checks in a row after which the server is switched."
+msgstr "Число неудачных проверок подряд, после которого сервер переключается."
+
+msgid "Failures before switching"
+msgstr "Отказов до переключения"
+
+msgid "Filter, or /regex/"
+msgstr "Фильтр или /regex/"
+
+msgid "Firewall error"
+msgstr "Ошибка файрвола"
+
+msgid "Firewall error: VPN clients are blocked"
+msgstr "Ошибка файрвола: VPN-клиенты заблокированы"
+
+msgid "Firewall error: VPN clients go to the internet directly"
+msgstr "Ошибка файрвола: VPN-клиенты выходят в интернет напрямую"
+
+msgid "Firewall mark (hex) of the traffic going to xray; an ip rule sends it to the routing table below."
+msgstr "Метка файрвола (hex) трафика, идущего в xray; правило ip rule направляет его в таблицу маршрутизации ниже."
+
+msgid "Firewall mark (hex) of the traffic of the VPN clients. It must not share bits with the marks of mwan3 (0x3f00) and pbr (0x00ff0000)."
+msgstr "Метка файрвола (hex) трафика VPN-клиентов. Не должна пересекаться по битам с метками mwan3 (0x3f00) и pbr (0x00ff0000)."
+
+msgid "Firewall rules"
+msgstr "Правила файрвола"
+
+msgid "Firewall rules are not applied, VPN clients are blocked:"
+msgstr "Правила файрвола не применены, VPN-клиенты заблокированы:"
+
+msgid "Firewall rules are not applied, VPN clients go to the internet directly:"
+msgstr "Правила файрвола не применены, VPN-клиенты выходят в интернет напрямую:"
+
+msgid "Firewall rules are not applied:"
+msgstr "Правила файрвола не применены:"
+
+msgid "First test port"
+msgstr "Первый порт проверок"
+
+msgid "Full: VPN clients go through the tunnel"
+msgstr "Полный: VPN-клиенты идут через туннель"
+
+msgid "Grant access to XVPN"
+msgstr "Доступ к XVPN"
+
+msgid "Hardware flow offloading is enabled in the firewall."
+msgstr "В файрволе включено аппаратное ускорение (flow offloading)."
+
+msgid "Health checks"
+msgstr "Проверки серверов"
+
+msgid "How many servers are tested at the same time."
+msgstr "Сколько серверов проверяется одновременно."
+
+msgid "How much faster another server must be to switch to it."
+msgstr "Насколько другой сервер должен быть быстрее, чтобы переключиться на него."
+
+msgid "How often the active server is checked."
+msgstr "Как часто проверяется активный сервер."
+
+msgid "Hysteresis, ms"
+msgstr "Гистерезис, мс"
+
+msgid "IPv6"
+msgstr "IPv6"
+
+msgid "Include"
+msgstr "Включить только"
+
+msgid "Info"
+msgstr "Информация"
+
+msgid "Intercept DNS"
+msgstr "Перехватывать DNS"
+
+msgid "Interval, h"
+msgstr "Интервал, ч"
+
+msgid "Invalid IPv4 address"
+msgstr "Неверный адрес IPv4"
+
+msgid "Invalid IPv6 address"
+msgstr "Неверный адрес IPv6"
+
+msgid "Invalid regular expression: %s"
+msgstr "Неверное регулярное выражение: %s"
+
+msgid "Kill switch"
+msgstr "Kill switch"
+
+msgid "Kill switch is off and there are no live servers: VPN clients go to the internet directly."
+msgstr "Kill switch выключен и работающих серверов нет: VPN-клиенты выходят в интернет напрямую."
+
+msgid "LAN ports"
+msgstr "Порты LAN"
+
+msgid "Last error"
+msgstr "Последняя ошибка"
+
+msgid "Last switch"
+msgstr "Последнее переключение"
+
+msgid "Last test of all servers"
+msgstr "Последняя проверка всех серверов"
+
+msgid "Latency"
+msgstr "Задержка"
+
+msgid "Line %d: %s"
+msgstr "Строка %d: %s"
+
+msgid "Line %d: not a vless://, vmess://, trojan:// or ss:// link"
+msgstr "Строка %d: не ссылка vless://, vmess://, trojan:// или ss://"
+
+msgid "Links"
+msgstr "Ссылки"
+
+msgid "Log"
+msgstr "Журнал"
+
+msgid "Log level of xray"
+msgstr "Уровень журнала xray"
+
+msgid "Manual links"
+msgstr "Ссылки вручную"
+
+msgid "Messages of xray go to the system log (the Log tab)."
+msgstr "Сообщения xray пишутся в системный журнал (вкладка «Журнал»)."
+
+msgid "Minimal block: bridge rules were not applied"
+msgstr "Минимальная блокировка: правила моста не применены"
+
+msgid "Name"
+msgstr "Название"
+
+msgid "Networks"
+msgstr "Сети"
+
+msgid "Networks, LAN ports and SSIDs can be combined. A port or SSID that is part of a selected network is covered by the network anyway."
+msgstr "Сети, порты LAN и SSID можно сочетать. Порт или SSID, входящий в выбранную сеть, и так охвачен этой сетью."
+
+msgid "Next test of all servers"
+msgstr "Следующая проверка всех серверов"
+
+msgid "Next update"
+msgstr "Следующее обновление"
+
+msgid "Next update: %s"
+msgstr "Следующее обновление: %s"
+
+msgid "No internet on WAN"
+msgstr "Нет интернета на WAN"
+
+msgid "No live servers"
+msgstr "Нет работающих серверов"
+
+msgid "No servers yet. Add a subscription or a link on the \"Subscriptions\" tab."
+msgstr "Серверов пока нет. Добавьте подписку или ссылку на вкладке «Подписки»."
+
+msgid "No subscriptions. Add one on the \"Subscriptions\" tab."
+msgstr "Подписок нет. Добавьте подписку на вкладке «Подписки»."
+
+msgid "None"
+msgstr "Нет"
+
+msgid "Nothing to update: the subscription is disabled, has no URL or is not applied yet"
+msgstr "Нечего обновлять: подписка выключена, без URL или ещё не применена"
+
+msgid "Number of the routing table for the TPROXY mark: it must not be used by anything else."
+msgstr "Номер таблицы маршрутизации для метки TPROXY: она не должна использоваться ничем другим."
+
+msgid "OK"
+msgstr "OK"
+
+msgid "Off: the server is switched only when it fails. On: also when the background test finds a server that is faster by the hysteresis below."
+msgstr "Выключено: сервер переключается только при отказе. Включено: также когда фоновая проверка находит сервер быстрее на величину гистерезиса ниже."
+
+msgid "One vless://, vmess://, trojan:// or ss:// link per line. Each line is checked by the parser of the router; links it cannot use block saving. A server that is also in a subscription is used once."
+msgstr "По одной ссылке vless://, vmess://, trojan:// или ss:// в строке. Каждая строка проверяется разборщиком роутера; непригодные ссылки не дают сохранить. Сервер, который есть и в подписке, используется один раз."
+
+msgid "Only https:// (DoH) and tcp:// URLs go through the tunnel, the scheme in lower case"
+msgstr "Через туннель идут только URL https:// (DoH) и tcp://, схема строчными буквами"
+
+msgid "Opened through every server that answers the check URL when all servers are tested and a server is chosen. A server that fails it is marked limited and is not chosen automatically while there are others; you can still choose it by hand. Use a URL by domain on another CDN than the check URL. \"off\" turns this check off."
+msgstr "Открывается через каждый сервер, ответивший на URL проверки, при проверке всех серверов и выборе сервера. Сервер, на котором он не открылся, помечается как ограниченный и не выбирается автоматически, пока есть другие; вручную его выбрать можно. Укажите URL с доменом на другом CDN, чем URL проверки. Значение «off» отключает эту проверку."
+
+msgid "Parallel tests"
+msgstr "Параллельных проверок"
+
+msgid "Passthrough: VPN clients go directly"
+msgstr "Напрямую: VPN-клиенты идут мимо туннеля"
+
+msgid "Path to xray"
+msgstr "Путь к xray"
+
+msgid "Protection"
+msgstr "Защита"
+
+msgid "Protocol"
+msgstr "Протокол"
+
+msgid "Providers (Marzban, Remnawave, 3x-ui) choose the format by the User-Agent. Clash and sing-box formats are not supported."
+msgstr "Провайдеры (Marzban, Remnawave, 3x-ui) выбирают формат по User-Agent. Форматы Clash и sing-box не поддерживаются."
+
+msgid "Quarantine, s"
+msgstr "Карантин, с"
+
+msgid "Refresh"
+msgstr "Обновить"
+
+msgid "Refresh every %d s"
+msgstr "Обновлять каждые %d с"
+
+msgid "Regular expression: only servers with a matching name are used. Case-insensitive."
+msgstr "Регулярное выражение: используются только серверы с подходящим названием. Без учёта регистра."
+
+msgid "Regular expression: servers with a matching name are skipped. Case-insensitive."
+msgstr "Регулярное выражение: серверы с подходящим названием пропускаются. Без учёта регистра."
+
+msgid "Request failed: %s"
+msgstr "Запрос не выполнен: %s"
+
+msgid "Restart"
+msgstr "Перезапустить"
+
+msgid "Restart XVPN"
+msgstr "Перезапустить XVPN"
+
+msgid "Restarting the service…"
+msgstr "Служба перезапускается…"
+
+msgid "Routing table"
+msgstr "Таблица маршрутизации"
+
+msgid "Second check URL"
+msgstr "Второй URL проверки"
+
+msgid "Servers"
+msgstr "Серверы"
+
+msgid "Servers come from subscriptions and manual links. Changes take effect after \"Save & Apply\"; a new subscription is downloaded within 5 minutes after that, or press \"Update\"."
+msgstr "Серверы берутся из подписок и ссылок, добавленных вручную. Изменения вступают в силу после «Сохранить и применить»; новая подписка скачивается в течение 5 минут после этого, или нажмите «Обновить»."
+
+msgid "Service"
+msgstr "Служба"
+
+msgid "Settings"
+msgstr "Настройки"
+
+msgid "Shares bits with \"%s\""
+msgstr "Пересекается по битам с «%s»"
+
+msgid "Single ports of a bridge (DSA), e.g. lan2: devices plugged into them go through the VPN, the rest of the bridge does not."
+msgstr "Отдельные порты моста (DSA), например lan2: подключённые к ним устройства идут через VPN, остальной мост — нет."
+
+msgid "Sniffing"
+msgstr "Sniffing"
+
+msgid "Software flow offloading is enabled in the firewall."
+msgstr "В файрволе включено программное ускорение (flow offloading)."
+
+msgid "Starting"
+msgstr "Запуск"
+
+msgid "Starting the service…"
+msgstr "Служба запускается…"
+
+msgid "State"
+msgstr "Состояние"
+
+msgid "Status"
+msgstr "Статус"
+
+msgid "Stopping the service…"
+msgstr "Служба останавливается…"
+
+msgid "Subscription"
+msgstr "Подписка"
+
+msgid "Subscriptions"
+msgstr "Подписки"
+
+msgid "Switch to a faster server"
+msgstr "Переключаться на более быстрый сервер"
+
+msgid "Switching to %s…"
+msgstr "Переключение на %s…"
+
+msgid "Switching to another server"
+msgstr "Переключение на другой сервер"
+
+msgid "TPROXY mark"
+msgstr "Метка TPROXY"
+
+msgid "TPROXY port"
+msgstr "Порт TPROXY"
+
+msgid "Tables 253–255 are default, main and local"
+msgstr "Таблицы 253–255 — это default, main и local"
+
+msgid "Takes part in auto selection: at start, on failover and when switching to a faster server"
+msgstr "Участвует в автовыборе: при запуске, при отказе и при переходе на более быстрый сервер"
+
+msgid "Test all"
+msgstr "Проверить все"
+
+msgid "Test all servers every, s"
+msgstr "Проверять все серверы каждые, с"
+
+msgid "Testing all servers…"
+msgstr "Проверка всех серверов…"
+
+msgid "Testing servers"
+msgstr "Проверка серверов"
+
+msgid "The URL is longer than %d characters"
+msgstr "URL длиннее %d символов"
+
+msgid "The active server is checked by an HTTP request through it. After several failures in a row the best working server is chosen."
+msgstr "Активный сервер проверяется HTTP-запросом через него. После нескольких отказов подряд выбирается лучший работающий сервер."
+
+msgid "The daemon did not answer in time, the request may still be carried out"
+msgstr "Демон не ответил вовремя, запрос ещё может выполниться"
+
+msgid "The daemon is not running"
+msgstr "Демон не запущен"
+
+msgid "The last lines of the system log from the xvpn service, its daemon and xray. The log level of xray is set in the Settings tab."
+msgstr "Последние строки системного журнала службы xvpn, её демона и xray. Уровень журнала xray задаётся на вкладке «Настройки»."
+
+msgid "The links are being checked…"
+msgstr "Ссылки проверяются…"
+
+msgid "The log has no lines of xvpn or xray"
+msgstr "В журнале нет строк xvpn и xray"
+
+msgid "The port is in the range of the test ports %d–%d"
+msgstr "Порт попадает в диапазон портов проверок %d–%d"
+
+msgid "The same port as \"%s\""
+msgstr "Тот же порт, что у «%s»"
+
+msgid "The second check URL"
+msgstr "Второй URL проверки"
+
+msgid "The server is no longer in the list, reload the page"
+msgstr "Сервера уже нет в списке, перезагрузите страницу"
+
+msgid "The service is disabled: VPN clients are not routed through xray."
+msgstr "Служба выключена: VPN-клиенты не направляются через xray."
+
+msgid "The timeout must be shorter than the check interval"
+msgstr "Тайм-аут должен быть меньше интервала проверки"
+
+msgid "The tunnel is stopped and its rules are removed: VPN clients go to the internet directly until the service is enabled again."
+msgstr "Туннель останавливается, его правила удаляются: VPN-клиенты выходят в интернет напрямую, пока служба не будет снова включена."
+
+msgid "The xray-core binary (25.x)."
+msgstr "Исполняемый файл xray-core (25.x)."
+
+msgid "The xvpnd daemon does not answer: it is busy or hung. If this message stays, restart the service."
+msgstr "Демон xvpnd не отвечает: он занят или завис. Если сообщение не исчезает, перезапустите службу."
+
+msgid "The xvpnd daemon is not running. It is restarted by procd within seconds; if this message stays, check the log."
+msgstr "Демон xvpnd не запущен. procd перезапускает его за несколько секунд; если сообщение не исчезает, посмотрите журнал."
+
+msgid "Through the tunnel"
+msgstr "Через туннель"
+
+msgid "Time limit of one check."
+msgstr "Ограничение времени одной проверки."
+
+msgid "Timeout, s"
+msgstr "Тайм-аут, с"
+
+msgid "Traffic"
+msgstr "Трафик"
+
+msgid "Traffic and expiry"
+msgstr "Трафик и срок"
+
+msgid "Traffic of the VPN clients is redirected to xray and is not offloaded, but connections opened before the VPN started are offloaded and bypass it until they end. Reconnect the clients or restart the router after enabling the VPN."
+msgstr "Трафик VPN-клиентов перенаправляется в xray и не ускоряется, но соединения, открытые до запуска VPN, ускоряются и идут мимо него, пока не завершатся. После включения VPN переподключите клиентов или перезагрузите роутер."
+
+msgid "Traffic through xray"
+msgstr "Трафик через xray"
+
+msgid "Tunnel"
+msgstr "Туннель"
+
+msgid "URL"
+msgstr "URL"
+
+msgid "Unstable: health checks fail"
+msgstr "Нестабильно: проверки не проходят"
+
+msgid "Update"
+msgstr "Обновить"
+
+msgid "Update all"
+msgstr "Обновить все"
+
+msgid "Update subscriptions"
+msgstr "Обновить подписки"
+
+msgid "Updated"
+msgstr "Обновлена"
+
+msgid "Updated: %s"
+msgstr "Обновлена: %s"
+
+msgid "Updating subscriptions…"
+msgstr "Подписки обновляются…"
+
+msgid "Use"
+msgstr "Выбрать"
+
+msgid "Use another URL than the check URL, preferably on another CDN"
+msgstr "Укажите URL, отличный от URL проверки, лучше на другом CDN"
+
+msgid "User-Agent"
+msgstr "User-Agent"
+
+msgid "VPN client on xray-core with subscriptions and automatic failover between servers."
+msgstr "VPN-клиент на xray-core с подписками и автоматическим переключением между серверами."
+
+msgid "Waiting for NTP time sync"
+msgstr "Ожидание синхронизации времени по NTP"
+
+msgid "Warning"
+msgstr "Предупреждение"
+
+msgid "When no server works, the VPN clients have no internet. Off: they go to the internet directly until a server works again. Only TCP and UDP go through the tunnel: ICMP (ping) and other protocols are rejected with the kill switch on and go directly with it off."
+msgstr "Когда ни один сервер не работает, у VPN-клиентов нет интернета. Выключено: они выходят в интернет напрямую, пока сервер снова не заработает. Через туннель идут только TCP и UDP: ICMP (ping) и другие протоколы при включённом kill switch отклоняются, при выключенном идут напрямую."
+
+msgid "Whole OpenWrt networks (interfaces), with every port and SSID in them. WAN networks are not listed."
+msgstr "Сети OpenWrt (интерфейсы) целиком, со всеми их портами и SSID. Сети WAN не показываются."
+
+msgid "Wi-Fi (SSID)"
+msgstr "Wi-Fi (SSID)"
+
+msgid "XVPN"
+msgstr "XVPN"
+
+msgid "XVPN: access points"
+msgstr "XVPN: точки доступа"
+
+msgid "XVPN: log"
+msgstr "XVPN: журнал"
+
+msgid "XVPN: settings"
+msgstr "XVPN: настройки"
+
+msgid "XVPN: subscriptions"
+msgstr "XVPN: подписки"
+
+msgid "active"
+msgstr "активен"
+
+msgid "auto"
+msgstr "авто"
+
+msgid "checking…"
+msgstr "проверка…"
+
+msgid "disabled"
+msgstr "выключено"
+
+msgid "due"
+msgstr "сейчас"
+
+msgid "duplicate of line %d, skipped"
+msgstr "повтор строки %d, пропущена"
+
+msgid "expired %s"
+msgstr "истекла %s"
+
+msgid "failed"
+msgstr "отказ"
+
+msgid "in %s"
+msgstr "через %s"
+
+msgid "less than a day left"
+msgstr "осталось меньше суток"
+
+msgid "limited"
+msgstr "ограничен"
+
+msgid "list changed %s"
+msgstr "список изменён %s"
+
+msgid "manual"
+msgstr "вручную"
+
+msgid "network %s"
+msgstr "сеть %s"
+
+msgid "never"
+msgstr "никогда"
+
+msgid "no expiry date"
+msgstr "без срока"
+
+msgid "none"
+msgstr "нет"
+
+msgid "none found"
+msgstr "не найдено"
+
+msgid "not a vless://, vmess://, trojan:// or ss:// link"
+msgstr "не ссылка vless://, vmess://, trojan:// или ss://"
+
+msgid "not applied"
+msgstr "не применены"
+
+msgid "not applied yet"
+msgstr "ещё не применена"
+
+msgid "not checked: %s"
+msgstr "не проверено: %s"
+
+msgid "not found"
+msgstr "не найдено"
+
+msgid "off"
+msgstr "выкл."
+
+msgid "quarantine"
+msgstr "карантин"
+
+msgid "testing servers"
+msgstr "проверка серверов"
+
+msgid "unexpected answer"
+msgstr "неожиданный ответ"
+
+msgid "unknown error"
+msgstr "неизвестная ошибка"
+
+msgid "until %s"
+msgstr "до %s"
+
+msgid "updating subscriptions"
+msgstr "обновление подписок"
+
+msgid "updating…"
+msgstr "обновление…"
+
+msgid "xray"
+msgstr "xray"
+
+msgid "xray and the daemon restart: VPN clients lose their connections for a few seconds."
+msgstr "xray и демон перезапускаются: VPN-клиенты на несколько секунд теряют соединения."
+
+msgid "xray is not running"
+msgstr "xray не запущен"
+
+msgid "xray takes the domain from HTTP, TLS and QUIC and sends it to the server instead of the IP: many servers do not let clients connect to bare IP addresses."
+msgstr "xray берёт домен из HTTP, TLS и QUIC и передаёт серверу вместо IP: многие серверы не пускают клиентов на голые IP-адреса."
+
+msgid "xray takes the intercepted DNS queries on this port."
+msgstr "На этом порту xray принимает перехваченные DNS-запросы."
+
+msgid "xray takes the traffic of the VPN clients on this port."
+msgstr "На этом порту xray принимает трафик VPN-клиентов."
+
+msgid "xray traffic statistics (metrics over HTTP), on 127.0.0.1."
+msgstr "Статистика трафика xray (метрики по HTTP) на 127.0.0.1."
+
+msgid "xvpn and xray"
+msgstr "xvpn и xray"
