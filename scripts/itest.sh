@@ -323,17 +323,17 @@ via() { # what url [curl args]: the request goes as what (direct | tunnel | none
 ping_ok() { ip netns exec cl ping -c1 -W1 "$1" >/dev/null 2>&1; }
 # by lookup: auto-merge prints 45.0.0.4 and 45.0.0.5 as 45.0.0.4/31
 in_direct() { nft get element inet xvpn direct4 "{ $1 }" >/dev/null 2>&1; }
-sleep 1
 via tunnel http://45.0.0.4/cgi-bin/ip
 # the active remote drops direct.test (a whitelist without it): it opens only around the tunnel
+# (checked at the end, with the domain off); the Russian list from 45.0.0.2, not there yet
 active_is first || { echo "FAIL: split tests expect first active, got $(active_name)"; exit 1; }
 kill $(cat /tmp/remote-18443.pid); sleep 1; remote 18443 '' direct.test
-wait_for @.state connected 40
-via none http://45.0.0.5/cgi-bin/ip -H 'Host: direct.test'
 uci batch <<UCI
 add_list xvpn.split.ip=45.0.0.4
 add_list xvpn.split.ip=not-an-address
 add_list xvpn.split.domain=direct.test
+set xvpn.split.ru=1
+add_list xvpn.split.ru_url=http://45.0.0.2/ru.zone
 commit xvpn
 UCI
 /etc/init.d/xvpn reload
@@ -345,13 +345,12 @@ ping_ok 45.0.0.4 || { echo "FAIL: kill switch blocks an address of the direct li
 via tunnel http://45.0.0.5/cgi-bin/ip
 blocked "split on, an address out of the list"
 echo "OK: split: the listed address goes around xray (ICMP too), the rest through the tunnel"
-via tunnel http://45.0.0.5/cgi-bin/ip -H 'Host: direct.test'
 # the freedom outbound connects from the router: the remote never sees direct.test
 [ "$(from http://45.0.0.5/ -H 'Host: direct.test')" = hello ] || { echo "FAIL: direct.test is not sent out directly"; diag; exit 1; }
 # other domains still go to the remote (it resolves check2.test itself)
 [ "$(from http://45.0.0.3/ -H 'Host: check2.test')" = hello ] || { echo "FAIL: other domains broke"; exit 1; }
-echo "OK: split: a listed domain goes out directly through xray (freedom), the remote dropping it is not asked"
 logread | grep -q '"not-an-address" is not an IP address' || { echo "FAIL: bad entry not logged"; exit 1; }
+echo "OK: split: a listed domain goes out of xray directly (freedom), a bad address is skipped"
 # flow offload (fw4 flowtable) on: the direct connections still work, the tunnel too
 if uci set firewall.@defaults[0].flow_offloading=1 && uci commit firewall && /etc/init.d/firewall restart >/dev/null 2>&1 \
 	&& nft list flowtables 2>/dev/null | grep -q flowtable; then
@@ -363,27 +362,18 @@ else
 fi
 uci -q delete firewall.@defaults[0].flow_offloading || true; uci commit firewall; /etc/init.d/firewall restart >/dev/null 2>&1
 full_rules "flow offloading off"
-# kill switch: stopped (guard, block) the direct list is closed too
-/etc/init.d/xvpn stop
-no_tproxy "split, stopped"
-ping_ok 45.0.0.4 && { echo "FAIL: direct list open while stopped"; exit 1; }
+# kill switch: the guard (block: stop, boot, failed rules) closes the direct list too
+ucode /usr/share/xvpn/cli.uc fw-guard
+no_tproxy "split, guard"
+ping_ok 45.0.0.4 && { echo "FAIL: direct list open in the guard"; exit 1; }
 via none http://45.0.0.4/cgi-bin/ip
 nft list table inet xvpn | grep -q direct && { echo "FAIL: lists in the guard table"; exit 1; }
-echo "OK: split: stopped (kill switch) the direct list is blocked too"
-/etc/init.d/xvpn start
-sleep 2
-wait_for @.state connected 40
+ucode /usr/share/xvpn/cli.uc fw-apply
+via direct http://45.0.0.4/cgi-bin/ip
+echo "OK: split: the guard (kill switch) blocks the direct list too"
 # the Russian list: downloaded (here from 45.0.0.2 through the tunnel), cached on the flash,
 # applied to the rules without a restart of xray
 echo '45.0.0.5/32 # x' > /tmp/www/ru.zone
-uci batch <<UCI
-set xvpn.split.ru=1
-add_list xvpn.split.ru_url=http://45.0.0.2/ru.zone
-commit xvpn
-UCI
-/etc/init.d/xvpn reload
-sleep 2
-wait_for @.state connected 40
 x=$(xray_pid)
 r=$(ubus call luci.xvpn split_update)
 echo "$r" | grep -Eq '"ok": true|busy' || { echo "FAIL: split_update: $r"; exit 1; }
@@ -413,6 +403,8 @@ wait_for @.state connected 40
 [ ! -e /etc/xvpn/lists/ru.txt ] || { echo "FAIL: cache of the list left on the flash"; exit 1; }
 nft list table inet xvpn | grep -q '@direct' && { echo "FAIL: direct rules without lists"; exit 1; }
 via tunnel http://45.0.0.4/cgi-bin/ip
+# the remote drops direct.test: so above it went around the tunnel
+[ -z "$(from http://45.0.0.5/ -H 'Host: direct.test')" ] || { echo "FAIL: the remote does not drop direct.test"; exit 1; }
 echo "OK: split off: cache removed, all through the tunnel"
 kill $(cat /tmp/remote-18443.pid); sleep 1; remote 18443
 wait_for @.state connected 40
