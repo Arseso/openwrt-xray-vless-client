@@ -24,6 +24,8 @@ $DOCKER run --rm --init -v "$PWD:/src:ro" -e LUCI_RAW="$LUCI_RAW" "$IMAGE" sh -e
 	mkdir -p luci-app-xvpn/po/templates
 	perl i18n-scan.pl luci-app-xvpn > luci-app-xvpn/po/templates/xvpn.pot
 	perl i18n-update.pl luci-app-xvpn/po
+	# the backups of msgmerge -U
+	rm -f luci-app-xvpn/po/*/*.po~
 	echo
 	for po in luci-app-xvpn/po/*/xvpn.po; do
 		[ -f "$po" ] || continue
