@@ -748,11 +748,21 @@ JSON
 	echo $! > /tmp/remote-$1.pid
 }
 resolves() { ip netns exec cl nslookup a.test 10.77.0.1 2>/dev/null | grep -q 'Address.*45.0.0.2'; }
+# the download check of the #11 step below is on from here: it passes through both
+mkdir -p /tmp/www/cgi-bin /tmp/freeze/cgi-bin
+printf '#!/bin/sh\nprintf "Content-Type: application/octet-stream\\r\\n\\r\\n"\nhead -c 65536 /dev/zero\n' > /tmp/www/cgi-bin/dl
+printf '#!/bin/sh\nprintf "Content-Type: application/octet-stream\\r\\n\\r\\n"\nhead -c 20480 /dev/zero\nsleep 30\n' > /tmp/freeze/cgi-bin/dl
+chmod +x /tmp/www/cgi-bin/dl /tmp/freeze/cgi-bin/dl
+ip netns exec wan uhttpd -f -p 45.0.0.2:8098 -h /tmp/www -x /cgi-bin >/dev/null 2>&1 &
+ip netns exec wan uhttpd -f -p 45.0.0.2:8099 -h /tmp/freeze -x /cgi-bin >/dev/null 2>&1 &
 dp=$(xvpnd_pid)
 uci batch <<UCI
 set xvpn.access.dns_server=45.0.0.2
 set xvpn.health.dns_check=1
 set xvpn.health.quarantine=5
+set xvpn.health.dl_url=http://45.0.0.2:8098/cgi-bin/dl
+set xvpn.health.dl_interval=1
+set xvpn.health.dl_timeout=3
 commit xvpn
 UCI
 reload_config
@@ -773,12 +783,6 @@ echo "OK: DNS over UDP fails through second: failover to first, names resolve ag
 # health.url answers through it, the download stalls, the daemon goes to "second"; the same
 # download directly passes. A CGI on 8099 sends 20 KB and hangs; the remote of first sends
 # 45.0.0.2:8098 there
-mkdir -p /tmp/www/cgi-bin /tmp/freeze/cgi-bin
-printf '#!/bin/sh\nprintf "Content-Type: application/octet-stream\\r\\n\\r\\n"\nhead -c 65536 /dev/zero\n' > /tmp/www/cgi-bin/dl
-printf '#!/bin/sh\nprintf "Content-Type: application/octet-stream\\r\\n\\r\\n"\nhead -c 20480 /dev/zero\nsleep 30\n' > /tmp/freeze/cgi-bin/dl
-chmod +x /tmp/www/cgi-bin/dl /tmp/freeze/cgi-bin/dl
-ip netns exec wan uhttpd -f -p 45.0.0.2:8098 -h /tmp/www -x /cgi-bin >/dev/null 2>&1 &
-ip netns exec wan uhttpd -f -p 45.0.0.2:8099 -h /tmp/freeze -x /cgi-bin >/dev/null 2>&1 &
 freeze() { # port
 	kill $(cat /tmp/remote-$1.pid) 2>/dev/null || true
 	cat > /tmp/remote-$1.json <<JSON
@@ -791,18 +795,6 @@ JSON
 	echo $! > /tmp/remote-$1.pid
 }
 kill $(cat /tmp/remote-18444.pid); remote 18444
-dp=$(xvpnd_pid)
-uci batch <<UCI
-delete xvpn.access.dns_server
-set xvpn.health.dns_check=0
-set xvpn.health.dl_url=http://45.0.0.2:8098/cgi-bin/dl
-set xvpn.health.dl_interval=1
-set xvpn.health.dl_timeout=3
-commit xvpn
-UCI
-reload_config
-wait_cmd 30 xvpnd_restarted "$dp"
-wait_for @.state connected 30
 active_is first || { echo "FAIL: not on first before the DPI step"; diag; exit 1; }
 freeze 18443
 wait_cmd 40 active_is second
@@ -811,30 +803,26 @@ status @.last_switch.reason | grep -q 'stalls after 20 KB' && [ "$(latency first
 	|| { echo "FAIL: no failover for a stalled download: $(status @.last_switch.reason)"; diag; exit 1; }
 echo "OK: a server that freezes the stream after 20 KB is left, though health.url answers through it"
 
-# #11: none of health.wan_url answers directly: wan_down, no failover
+# #11: none of health.wan_url answers directly (the first refuses, check2.test is dropped
+# in wan): wan_down, no failover
 kill $(cat /tmp/remote-18443.pid); remote 18443
-dp=$(xvpnd_pid)
-uci batch <<UCI
-set xvpn.health.dl_url=off
-delete xvpn.health.wan_url
-add_list xvpn.health.wan_url=http://45.0.0.2:9/
-add_list xvpn.health.wan_url=http://45.0.0.2:8/
-commit xvpn
-UCI
-reload_config
-wait_cmd 30 xvpnd_restarted "$dp"
-wait_for @.state connected 30
+ip netns exec wan nft -f - <<NFT
+table inet dropwan {
+	chain input { type filter hook input priority 0; ip daddr 45.0.0.3 drop; }
+}
+NFT
 kill $(cat /tmp/remote-18444.pid)
 wait_for @.state wan_down 30
 active_is second || { echo "FAIL: wan_down switched the server"; diag; exit 1; }
+ip netns exec wan nft delete table inet dropwan
 remote 18444
 wait_for @.state connected 30
 echo "OK: no WAN URL answers: wan_down, the server stays"
 dp=$(xvpnd_pid)
 uci batch <<UCI
-delete xvpn.health.wan_url
-add_list xvpn.health.wan_url=http://45.0.0.2:9/
-add_list xvpn.health.wan_url=http://check2.test/
+delete xvpn.access.dns_server
+set xvpn.health.dns_check=0
+set xvpn.health.dl_url=off
 delete xvpn.health.quarantine
 delete xvpn.health.dl_interval
 delete xvpn.health.dl_timeout
