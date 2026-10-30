@@ -397,7 +397,7 @@ echo "OK: split: the Russian list is downloaded, cached and applied without rest
 # a broken source keeps the cached list
 echo '<html>error</html>' > /tmp/www/ru.zone
 ubus call xvpn lists >/dev/null
-wait_cmd 30 sh -c 'ubus call luci.xvpn split | grep -q "are not networks"'
+wait_cmd 30 sh -c 'ubus call luci.xvpn split | grep -q "no networks in the list"'
 in_direct 45.0.0.5 || { echo "FAIL: a failed download dropped the list"; exit 1; }
 echo "OK: split: a failed download keeps the cached list"
 uci batch <<UCI
