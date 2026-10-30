@@ -1231,15 +1231,17 @@ function failed(e, gen, kind, why) {
 	// no live servers: the pause was the wait, straight to failover
 	if (st.fails < H.fail_threshold && st.state != 'no_servers')
 		return set_state('degraded', `${st.fails} failed checks${why ? `: ${why}` : ''}`);
+	// a check passed meanwhile (up() resets fails): this verdict is old
+	let stale = () => !valid(gen) || st.active != e.id || st.fails == 0;
 	wan_probe((wan) => {
-		if (!valid(gen) || st.active != e.id || wan == null)
+		if (stale() || wan == null)
 			return;
 		if (!wan)
 			return set_state('wan_down', 'no direct internet access');
 		if (!kind)
 			return failover(`"${e.name}" is down`);
 		elsewhere_ok(kind, e, (ok) => {
-			if (!valid(gen) || st.active != e.id || ok == null)
+			if (stale() || ok == null)
 				return;
 			if (ok)
 				failover(`"${e.name}": ${why}`);
