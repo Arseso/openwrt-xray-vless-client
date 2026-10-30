@@ -40,7 +40,9 @@ diag() {
 	echo "--- xvpn status"; command ubus -t 3 call xvpn status || echo "(rc=$?)"
 	echo "--- service list"; command ubus -t 3 call service list '{"name":"xvpn"}' || echo "(rc=$?)"
 	[ ! -s /tmp/ubus-timeouts ] || { echo "--- ubus timeouts"; cat /tmp/ubus-timeouts; }
-	echo "--- logread"; logread | grep -E 'xvpn|xray|procd' | tail -30
+	echo "--- logread"; logread | grep -E 'xvpn|xray|procd' | grep -v 'daemon.info xray' | tail -30
+	# a runtime error of xvpnd: procd logs its stderr under the binary name
+	echo "--- ucode"; logread | grep 'ucode\[' | tail -20
 }
 i=0; until logread 2>/dev/null | grep -q 'init complete'; do [ $i -lt 30 ] || break; sleep 1; i=$((i+1)); done
 # netifd puts eth0 into br-lan and drops the docker address: give it back as wan
@@ -968,10 +970,14 @@ set xvpn.s2.url=http://127.0.0.1/sub.b64
 set xvpn.s2.via_tunnel=0
 commit xvpn
 UCI
+dp=$(xvpnd_pid)
 r=$(ubus call luci.xvpn update '{"sid":"s2"}')
 [ "$(echo "$r" | jsonfilter -e @.ok)" = true ] || { echo "FAIL: fresh subscription: $r"; exit 1; }
 wait_cmd 20 test -s /etc/xvpn/subs/s2.json
 [ ! -e /var/run/xvpn/updating ] || { echo "FAIL: lock left after update"; exit 1; }
+# its reload restarts xvpnd (the new section changes XVPN_CONF): the next steps need the new one
+wait_cmd 60 xvpnd_restarted "$dp"
+wait_for @.state connected 30
 echo "OK: fresh subscription updated"
 
 # xray hangs (killall -STOP xray, but the remotes are xray too): xray_down, no server
