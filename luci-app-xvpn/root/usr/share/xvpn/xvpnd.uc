@@ -48,6 +48,7 @@ let st = {
 	reload_pending: false,
 	reload_error: null,	// the last reload hung or failed: status shows error until one goes through
 	choose_pending: null,	// choose_best() decision put off until the reload settles
+	switches: 0,		// switch_to() calls: a choose_best() older than the last switch is dropped
 	passthrough: false,
 	last_error: null,
 	last_switch: prev.last_switch,
@@ -778,7 +779,10 @@ function switch_to(id, reason, manual) {
 	st.active = id;
 	st.since = time();
 	st.fails = 0;
-	st.xray_choose = null;	// a manual choice wins over a decision put off
+	st.switches++;
+	// a newer choice wins over decisions put off (#70): the choice by hand, or one of two
+	// choose_best() waiting for the same test of all, whose sibling switched first
+	st.xray_choose = st.choose_pending = null;
 	delete st.quarantine[id];
 	mkdir_p(ETC_DIR);
 	write_file(ACTIVE_FILE, id);
@@ -809,7 +813,12 @@ choose_best = function(reason) {
 		reload_service();
 		return;
 	}
+	let seq = st.switches;
 	test_all((problem, inst, refused) => {
+		// a switch since this decision began (by hand, or another choose_best() for the same
+		// test) is newer: it stands (#70)
+		if (st.switches != seq)
+			return;
 		// the test may end mid-reload with partial data: decide once it settles
 		if (st.reloading) {
 			st.choose_pending = reason;
