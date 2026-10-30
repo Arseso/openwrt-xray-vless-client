@@ -121,6 +121,12 @@ itest() {
 build() {
 	sh "$SRC/scripts/build.sh" || return 1
 	[ -f "$SRC/dist/$ipk" ] || { echo "no dist/$ipk: $(ls "$SRC/dist")"; return 1; }
+	# the translations (po/*/xvpn.po) come as luci-i18n-xvpn-<lang> packages
+	for po in "$SRC"/luci-app-xvpn/po/*/xvpn.po; do
+		lang=$(basename "$(dirname "$po")")
+		[ "$lang" = templates ] || ls "$SRC/dist"/luci-i18n-xvpn-"$lang"_*.ipk >/dev/null 2>&1 ||
+			{ echo "no dist/luci-i18n-xvpn-${lang}_*.ipk: $(ls "$SRC/dist")"; return 1; }
+	done
 	rm -rf dist && cp -r "$SRC/dist" dist
 }
 
