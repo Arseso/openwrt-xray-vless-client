@@ -814,9 +814,10 @@ NFT
 kill $(cat /tmp/remote-18444.pid)
 wait_for @.state wan_down 30
 active_is second || { echo "FAIL: wan_down switched the server"; diag; exit 1; }
-ip netns exec wan nft delete table inet dropwan
+# the server first: with WAN back and the server still down the daemon would fail over
 remote 18444
 wait_for @.state connected 30
+ip netns exec wan nft delete table inet dropwan
 echo "OK: no WAN URL answers: wan_down, the server stays"
 dp=$(xvpnd_pid)
 uci batch <<UCI
