@@ -347,7 +347,8 @@ echo "OK: split: the listed address goes around xray (ICMP too), the rest throug
 via tunnel http://45.0.0.5/cgi-bin/ip -H 'Host: direct.test'
 # the freedom outbound connects from the router: the remote never sees direct.test
 [ "$(from http://45.0.0.5/ -H 'Host: direct.test')" = hello ] || { echo "FAIL: direct.test is not sent out directly"; diag; exit 1; }
-[ "$(from http://45.0.0.2/ -H 'Host: other.test')" = hello ] || { echo "FAIL: other domains broke"; exit 1; }
+# other domains still go to the remote (it resolves check2.test itself)
+[ "$(from http://45.0.0.3/ -H 'Host: check2.test')" = hello ] || { echo "FAIL: other domains broke"; exit 1; }
 echo "OK: split: a listed domain goes out directly through xray (freedom), the remote dropping it is not asked"
 logread | grep -q '"not-an-address" is not an IP address' || { echo "FAIL: bad entry not logged"; exit 1; }
 # flow offload (fw4 flowtable) on: the direct connections still work, the tunnel too
