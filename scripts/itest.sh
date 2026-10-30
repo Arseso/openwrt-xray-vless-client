@@ -55,6 +55,13 @@ set network.wan.ipaddr=$1
 set network.wan.gateway=$2
 commit network
 UCI
+# DNS for wan: the host's resolvers, but not one in the router's own LAN (a home router at
+# 192.168.1.1 as the host's DNS: dnsmasq would ask itself and refuse), 1.1.1.1 as the fallback
+for ns in $(awk '/^nameserver/ { print $2 }' /etc/resolv.conf) 1.1.1.1; do
+	case $ns in 192.168.1.*|127.*|*:*) continue ;; esac
+	uci add_list network.wan.dns=$ns
+done
+uci commit network
 /etc/init.d/network restart
 sleep 3
 # downloads.openwrt.org may fail right after the network restart or on a busy host
@@ -174,6 +181,7 @@ set xvpn.health.timeout=4
 set xvpn.health.fail_threshold=2
 set xvpn.health.reload_idle=15
 set xvpn.health.reload_retry=5
+set xvpn.health.retry_max=12
 add_list xvpn.manual.link='$(link 18444 second)'
 add_list xvpn.manual.link='$(link 18443 first)'
 commit xvpn
@@ -566,6 +574,47 @@ wait_for @.state connected 60
 echo "OK: failover to the other server"
 logread | grep xvpn | grep -E 'switching|state' | tail -5
 
+# no live servers (#12): the test of all again after a pause, twice as long each time
+# (interval 3 s, retry_max 12 s: 3, 6, 12 …), once a run, the pause in the status; a test
+# by hand starts it over. Dead remotes answer at once (blackhole: HTTP 403), xray works.
+# The active one is probed meanwhile: back, it is connected by that probe, before the next
+# test and without a test run
+dead() { # port: kept in /tmp/remote-$1.pid for slow() or a kill before remote()
+	kill $(cat /tmp/remote-$1.pid) 2>/dev/null || true
+	cat > /tmp/remote-$1.json <<JSON
+{ "inbounds": [ { "listen": "127.0.0.1", "port": $1, "protocol": "vless",
+    "settings": { "clients": [ { "id": "$UUID" } ], "decryption": "none" } } ],
+  "outbounds": [ { "protocol": "blackhole", "settings": { "response": { "type": "http" } } } ] }
+JSON
+	xray run -c /tmp/remote-$1.json >/dev/null 2>&1 &
+	echo $! > /tmp/remote-$1.pid
+}
+retry_is() { # delay: one call, during a test the state is failover and there is no retry
+	_s=$(ubus call xvpn status); at=$(echo "$_s" | jsonfilter -e @.retry.at)
+	[ "$(echo "$_s" | jsonfilter -e @.retry.delay)" = "$1" ] && [ "$at" -ge "$(date +%s)" ]
+}
+connected_to() { active_is "$1" && [ "$(status @.state)" = connected ]; }
+tests_since() { echo $(($(status @.tests) - t0)); }
+s0=$(date +%s)
+dead 18443; dead 18444
+wait_for @.state no_servers 30
+t0=$(status @.tests)
+wait_cmd 15 retry_is 6
+[ "$(tests_since)" = 1 ] || { echo "FAIL: no live servers: $(tests_since) tests until the pause is 6 s"; diag; exit 1; }
+test_all
+wait_cmd 5 retry_is 3
+wait_cmd 20 retry_is 12
+# one doubling a run: 3 (by hand) → 6 → 12 is two more
+[ "$(tests_since)" = 4 ] || { echo "FAIL: no live servers: $(tests_since) tests until the pause is 12 s again"; diag; exit 1; }
+echo "OK: no live servers: the pause grows to retry_max, a test by hand starts it over"
+n=$(status @.tests)
+kill $(cat /tmp/remote-18444.pid)	# xray binds with reuseport: the blackhole would answer too
+remote 18444
+wait_cmd 12 connected_to second
+[ $((at - $(date +%s))) -ge 3 ] && [ "$(status @.tests)" = "$n" ] && [ -z "$(status @.retry)" ] \
+	|| { echo "FAIL: the active server back is not connected by the probe before the next test ($at, tests $n -> $(status @.tests))"; diag; exit 1; }
+echo "OK: the active server back is connected before the next test ($(($(date +%s) - s0)) s for #12)"
+
 # servers left out of auto selection (#60). "third" is the fastest: the remotes of the
 # others pass requests on in 20-byte pieces 30 ms apart (freedom fragment), ~0.1 s each.
 # auto_best with small rank_interval, hysteresis and quarantine for these steps
@@ -625,7 +674,9 @@ kill $(cat /tmp/remote-$(port_of $o).pid)
 wait_cmd 30 no_candidates
 not_third && [ "$(cat /etc/xvpn/active)" != "$id3" ] || { echo "FAIL: failover chose a server left out"; ubus call xvpn status; exit 1; }
 echo "OK: failover does not choose a live server left out of auto selection"
-# ...nor at start; the one in auto selection once it is back
+# ...nor at start; the one in auto selection once it is back: a test by hand in no_servers
+# chooses it at once (#12), not after the pause
+s1=$(date +%s)
 /etc/init.d/xvpn stop
 rm /etc/xvpn/active
 /etc/init.d/xvpn start
@@ -634,9 +685,11 @@ sleep 4
 [ "$(status @.state)" != connected ] && not_third && [ ! -e /etc/xvpn/active ] \
 	|| { echo "FAIL: chosen at start while left out"; ubus call xvpn status; exit 1; }
 slow 18443
+wait_for @.testing false 10
+ubus call xvpn test >/dev/null
 wait_cmd 30 active_is first
 wait_for @.state connected 30
-echo "OK: start does not choose a server left out of auto selection"
+echo "OK: start does not choose a server left out of auto selection, a test by hand takes the one back ($(($(date +%s) - s1)) s)"
 # chosen by hand and left out: auto_best does not leave it for second, fast again; reload_config
 # (apply in LuCI, /etc/config/xvpn changed by set_auto) restarts neither xray nor xvpnd;
 # back in auto selection it is left. A daemon restart keeps the choice: see "back in the list"
