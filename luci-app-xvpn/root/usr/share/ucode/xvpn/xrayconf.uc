@@ -76,9 +76,10 @@ export function generate(cfg, servers, idx) {
 			tag: 'tproxy', listen, port: m.tproxy_port, protocol: 'dokodemo-door',
 			settings: { network: 'tcp,udp', followRedirect: true },
 			streamSettings: { sockopt: { tproxy: 'tproxy' } },
+			// without sniffing a BitTorrent block still needs the protocol: detected, IP kept
 			sniffing: m.sniffing
 				? { enabled: true, destOverride: [ 'http', 'tls', 'quic' ], routeOnly: false }
-				: { enabled: false },
+				: (m.block_bittorrent ? { enabled: true, destOverride: [] } : { enabled: false }),
 		},
 		{
 			tag: 'dns-in', listen, port: m.dns_port, protocol: 'dokodemo-door',
@@ -113,6 +114,8 @@ export function generate(cfg, servers, idx) {
 		push(outbounds, { tag: 'dns-out', protocol: 'dns', settings: { nonIPQuery: 'drop' } });
 		push(rules, { type: 'field', inboundTag: [ 'dns-in' ], outboundTag: 'dns-out' });
 	}
+	if (m.block_bittorrent)
+		push(rules, { type: 'field', inboundTag: [ 'tproxy' ], protocol: [ 'bittorrent' ], outboundTag: 'block' });
 	if (active) {
 		push(rules, { type: 'field', inboundTag: doh ? [ 'tproxy', 'dns-module' ] : [ 'tproxy', 'dns-in' ],
 			outboundTag: active.tag });
@@ -121,11 +124,19 @@ export function generate(cfg, servers, idx) {
 		outbounds = [ pos, ...filter(outbounds, (o) => o.tag != active.tag) ];
 	}
 
+	// all inbounds are of level 0 (xray's default userLevel); a torrent client behind the
+	// router opens thousands of sessions, each held until connIdle (#15, DESIGN.md 6.4)
+	let level = {
+		handshake: m.handshake, connIdle: m.conn_idle, uplinkOnly: m.uplink_only, downlinkOnly: m.downlink_only,
+	};
+	if (m.buffer_size != null)
+		level.bufferSize = m.buffer_size;
+
 	let conf = {
 		log: { loglevel: m.loglevel, access: 'none' },
 		metrics: { tag: 'metrics' },
 		stats: {},
-		policy: { system: { statsOutboundUplink: true, statsOutboundDownlink: true } },
+		policy: { levels: { '0': level }, system: { statsOutboundUplink: true, statsOutboundDownlink: true } },
 		inbounds,
 		outbounds,
 		routing: { domainStrategy: 'AsIs', rules },
