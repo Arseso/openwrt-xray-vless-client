@@ -14,6 +14,7 @@ import {
 	no_auto_ids, set_no_auto, retry_delay, auto_pick, MANUAL_FILE, ETC_DIR, RUN_DIR, CONFIG_FILE, INDEX_FILE, ACTIVE_FILE, STATE_FILE, FW_ERROR_FILE, GENERATE_ERROR_FILE, STALE_FILE
 } from 'xvpn.util';
 import { due_in } from 'xvpn.subscription';
+import { lists_due_in } from 'xvpn.split';
 
 const CLI = '/usr/share/xvpn/cli.uc';
 const SUB_CHECK = 300;
@@ -66,6 +67,7 @@ let st = {
 	time_choose: null,	// choose_best() decision put off until the clock is set
 	dead: null,	// no live servers: { delay, next } (monotonic) of the next test of all, see check()
 	subs_force: false,	// the first update at start, see auto_update()
+	lists_updating: false,	// `cli.uc lists` runs (split tunneling, #67)
 };
 let test_waiters = [], testq = null, test_resume = null, test_abort = null;
 let timers = {}, settling = false, reload = null;
@@ -1163,6 +1165,24 @@ function update_subs(force, only) {
 	return null;
 }
 
+// Downloads the Russian list of split tunneling when due (or now when force) in a
+// `cli.uc lists` run: it applies a changed list to the rules itself, xray is not restarted.
+// Returns an error message or null.
+function update_lists(force) {
+	if (st.lists_updating)
+		return 'busy';
+	let c = load_config(), due = lists_due_in(c);
+	if (due == null)
+		return 'the Russian list is off';
+	if (!force && due > 0)
+		return null;
+	st.lists_updating = true;
+	spawn('/usr/bin/ucode', [ CLI, 'lists' ], () => {
+		st.lists_updating = false;
+	});
+	return null;
+}
+
 function status() {
 	reindex(false);
 	let off = no_auto();
@@ -1183,6 +1203,7 @@ function status() {
 	return {
 		state: error ? 'error' : st.state, active: st.active, since: st.since, fails: st.fails,
 		testing: st.testing, tests: st.tests, updating: st.updating || !!update_running(), passthrough: st.passthrough,
+		lists_updating: st.lists_updating,
 		last_error: error ?? st.last_error ?? limited_error, last_switch: st.last_switch, last_test: st.last_test,
 		xray_restarts: st.xray.restarts ?? 0, url2: URL2, servers,
 		// no live servers: the next test of all (router clock) and the pause before it
@@ -1316,6 +1337,12 @@ conn.publish('xvpn', {
 			return err ? { ok: false, error: err } : { ok: true };
 		},
 	},
+	lists: {
+		call: () => {
+			let err = update_lists(true);
+			return err ? { ok: false, error: err } : { ok: true };
+		},
+	},
 	reindex: {
 		call: () => {
 			reindex(true);
@@ -1331,6 +1358,7 @@ function auto_update() {
 	let force = st.subs_force;
 	st.subs_force = false;
 	update_subs(force);
+	update_lists(false);
 }
 
 every('check', H.interval, check);

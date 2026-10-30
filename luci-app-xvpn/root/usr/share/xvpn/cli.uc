@@ -1,6 +1,6 @@
 #!/usr/bin/ucode
 // SPDX-License-Identifier: MIT
-// xvpn command line: generate | ifnames | ifnames-wait | fw-apply [passthrough] | fw-guard | fw-refresh | fw-remove | update [sid...|all]
+// xvpn command line: generate | ifnames | ifnames-wait | fw-apply [passthrough] | fw-guard | fw-refresh | fw-remove | update [sid...|all] | lists
 
 'use strict';
 
@@ -16,6 +16,7 @@ import { all_servers, update, prune, list_change } from 'xvpn.subscription';
 import { build_index, generate, ports_error } from 'xvpn.xrayconf';
 import { host_env } from 'xvpn.host';
 import { resolve, apply, remove, fix_ifnames, ifnames_applied } from 'xvpn.firewall';
+import { direct_nets, direct_domains, update_lists, prune_lists } from 'xvpn.split';
 
 const cfg = load_config();
 
@@ -153,7 +154,19 @@ function fw(want) {
 			mode = 'block';
 	}
 
+	// split tunneling (#67): only full and passthrough carry the lists
+	if (mode in [ 'full', 'passthrough' ])
+		res.direct = direct_nets(cfg);
 	let err = apply(rc, res, MODES[mode]);
+	// a list nft does not take (out of kernel memory, say) must not block the clients:
+	// they go through the tunnel without it, the status shows the error
+	if (err != null && length([ ...(res.direct?.v4 ?? []), ...(res.direct?.v6 ?? []) ])) {
+		let e = `split tunneling list rejected, all traffic goes through the tunnel: ${err}`;
+		push(errs, e);
+		log(e);
+		res.direct = null;
+		err = apply(rc, res, MODES[mode]);
+	}
 	if (err != null) {
 		push(errs, `firewall rules failed: ${err}`);
 		let tried = mode;
@@ -218,12 +231,15 @@ case 'generate': {
 	// set it again meanwhile
 	let stale = readfile(STALE_FILE);
 	prune(cfg);
+	prune_lists(cfg);
 	let all = all_servers(cfg), servers = all;
 	let active = trim(readfile(ACTIVE_FILE) ?? ''), prev = read_json(INDEX_FILE);
 	// IPv6 and the ports held by others (not by our running xray), once for every index below
 	let env = host_env();
 	// everything but the servers that goes into the config (ports, DNS, sniffing, listen…)
-	let sig = bin_sig(), frame = conf_key([ cfg.main, cfg.access, env.ipv6 ]), tested = read_json(TESTED_FILE);
+	// the direct domains (#67) only when set: the key of the configs without them stays as it was
+	let domains = direct_domains(cfg);
+	let sig = bin_sig(), frame = conf_key(length(domains) ? [ cfg.main, cfg.access, env.ipv6, domains ] : [ cfg.main, cfg.access, env.ipv6 ]), tested = read_json(TESTED_FILE);
 	if (type(tested?.ok) != 'object' || tested.bin != sig || tested.frame != frame)
 		tested = { bin: sig, frame, full: null, ok: {} };
 	tested.why ??= {};
@@ -447,7 +463,22 @@ case 'update': {
 	exit((need == 'reload') ? 0 : 2);
 }
 
+// the Russian list of split tunneling (#67): downloaded through the active server, then
+// directly; a changed list goes into the rules at once, xray is not restarted.
+// 0: changed, 2: unchanged, 1: error
+case 'lists': {
+	let r = update_lists(cfg, active_port());
+	log(r.error ? `split tunneling list: ${r.error}`
+		: `split tunneling list: ${r.v4} IPv4 and ${r.v6} IPv6 networks${r.changed ? ' (changed)' : ''}`);
+	printf('%J\n', r);
+	if (r.error)
+		exit(1);
+	if (r.changed && readfile(FW_WANT_FILE))
+		fw(null);
+	exit(r.changed ? 0 : 2);
+}
+
 default:
-	warn('usage: cli.uc generate | ifnames | ifnames-wait | fw-apply [passthrough] | fw-guard | fw-refresh | fw-remove | update [sid...|all]\n');
+	warn('usage: cli.uc generate | ifnames | ifnames-wait | fw-apply [passthrough] | fw-guard | fw-refresh | fw-remove | update [sid...|all] | lists\n');
 	exit(1);
 }

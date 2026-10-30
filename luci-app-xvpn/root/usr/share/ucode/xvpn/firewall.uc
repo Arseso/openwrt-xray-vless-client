@@ -188,6 +188,9 @@ export function resolve(cfg, ubus_conn, uci) {
 
 // res.ipv6: false when IPv6 was off on the router at generate (from the index; apply()
 // checks it when there is no index).
+// res.direct (split.uc direct_nets()): { v4, v6 } networks that go around the tunnel before
+// TPROXY (#67), in full and passthrough only: block and minimal are the fallbacks and the boot
+// guard, a list nft would reject must not break them.
 // opts.passthrough: keep marking but do not intercept (kill switch off and no live server).
 // opts.block: no interception, clients get neither internet nor DNS (service not started
 // yet or stopped, failed fw-apply); needs no tproxy, fib or nat support.
@@ -215,6 +218,13 @@ export function render(cfg, res, opts) {
 	// IPv6 off on the router: there is no IPv6 to tunnel and xray listens on 0.0.0.0 only,
 	// so no tproxy ip6 (nor its ip -6 route, which the kernel refuses); tunnel is a config error then
 	let v6 = (a.ipv6 == 'tunnel' && res.ipv6 !== false) ? 'tunnel' : 'block';
+	let d4 = block ? [] : (res.direct?.v4 ?? []), d6 = block ? [] : (res.direct?.v6 ?? []);
+	// the direct connections are forwarded by the kernel (and fw4 flow offload), xray never sees them
+	let direct = [];
+	if (length(d4))
+		push(direct, '\t\tip daddr @direct4 return');
+	if (length(d6))
+		push(direct, '\t\tip6 daddr @direct6 return');
 	let r = [];
 
 	push(r,
@@ -223,7 +233,12 @@ export function render(cfg, res, opts) {
 		'table inet xvpn {',
 		`\tset nets { type ifname; flags interval; auto-merge; ${elements(res.nets, true)}}`,
 		`\tset bypass4 { type ipv4_addr; flags interval; auto-merge; ${elements(BYPASS4)}}`,
-		`\tset bypass6 { type ipv6_addr; flags interval; auto-merge; ${elements(BYPASS6)}}`,
+		`\tset bypass6 { type ipv6_addr; flags interval; auto-merge; ${elements(BYPASS6)}}`);
+	if (!block)
+		push(r,
+			`\tset direct4 { type ipv4_addr; flags interval; auto-merge; ${elements(d4)}}`,
+			`\tset direct6 { type ipv6_addr; flags interval; auto-merge; ${elements(d6)}}`);
+	push(r,
 		'',
 		'\tchain mark_clients {',
 		'\t\ttype filter hook prerouting priority mangle - 10; policy accept;',
@@ -239,7 +254,8 @@ export function render(cfg, res, opts) {
 			push(r, '\t\tmeta l4proto { tcp, udp } th dport 53 return');
 		push(r,
 			'\t\tip daddr @bypass4 return',
-			'\t\tip6 daddr @bypass6 return');
+			'\t\tip6 daddr @bypass6 return',
+			...direct);
 		if (intercept) {
 			push(r, `\t\tmeta nfproto ipv4 meta l4proto { tcp, udp } meta mark set meta mark | ${tm} tproxy ip to :${m.tproxy_port} accept`);
 			if (v6 == 'tunnel')
@@ -257,7 +273,8 @@ export function render(cfg, res, opts) {
 		'\t\ttype filter hook forward priority filter - 5; policy accept;',
 		`\t\tmeta mark & ${cm} != ${cm} return`,
 		'\t\tip daddr @bypass4 return',
-		'\t\tip6 daddr @bypass6 return');
+		'\t\tip6 daddr @bypass6 return',
+		...direct);
 	if (block || (intercept && a.killswitch))
 		push(r, '\t\treject with icmpx type admin-prohibited');
 	else if (v6 == 'block')

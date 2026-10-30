@@ -9,6 +9,7 @@ import { connect } from 'ubus';
 import { load_config, read_json, run, shq, update_running, no_auto_ids, INDEX_FILE, ACTIVE_FILE } from 'xvpn.util';
 import { all_servers, load_cache, load_status, due_in } from 'xvpn.subscription';
 import { parse_link } from 'xvpn.links';
+import { lists_status, lists_due_in, parse_nets, RU_FILE } from 'xvpn.split';
 
 const CLI = '/usr/share/xvpn/cli.uc';
 const INIT = '/etc/init.d/xvpn';
@@ -252,6 +253,28 @@ const methods = {
 				bg(`${INIT} enable; ${INIT} restart`);
 			}
 			return { ok: true };
+		}
+	},
+
+	// split tunneling (#67): the Russian list, its cache and the last download; updating
+	// from the daemon (null without it)
+	split: {
+		call: function() {
+			let cfg = load_config(), st = lists_status();
+			let text = readfile(RU_FILE), l = text ? parse_nets(text) : null;
+			let d = cfg.split.ru ? daemon('status') : null;
+			return {
+				ru: cfg.split.ru, cached: l ? { v4: length(l.v4), v6: length(l.v6) } : null,
+				last_ok: st.last_ok, last_attempt: st.last_attempt, error: st.error, via: st.via,
+				due_in: lists_due_in(cfg, st), updating: d ? !!d.lists_updating : null, time: time(),
+			};
+		}
+	},
+
+	// the daemon downloads it and applies it to the rules
+	split_update: {
+		call: function() {
+			return daemon('lists') ?? { ok: false, error: daemon_error };
 		}
 	},
 

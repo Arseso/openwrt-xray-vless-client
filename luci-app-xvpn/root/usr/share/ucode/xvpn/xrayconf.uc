@@ -4,6 +4,8 @@
 
 'use strict';
 
+import { direct_domains } from 'xvpn.split';
+
 // prev: the index of the running config. The chosen server keeps the choice when its id
 // changes but the connection (hash) does not: renamed, its subscription removed and added
 // again, or the subscription disabled while another lists the same server. active_id
@@ -112,6 +114,15 @@ export function generate(cfg, servers, idx) {
 		// dns-out would send them to the placeholder address itself, around the tunnel
 		push(outbounds, { tag: 'dns-out', protocol: 'dns', settings: { nonIPQuery: 'drop' } });
 		push(rules, { type: 'field', inboundTag: [ 'dns-in' ], outboundTag: 'dns-out' });
+	}
+	// split tunneling (#67): clients' connections to these domains (found by sniffing) go out
+	// from the router without the tunnel; freedom resolves them AsIs, with the router's
+	// resolver, like a router without VPN: the connection is direct anyway, and the provider's
+	// DNS gives its nearby CDN. The clients' own DNS still goes through the tunnel
+	let direct = direct_domains(cfg);
+	if (length(direct)) {
+		push(outbounds, { tag: 'direct', protocol: 'freedom' });
+		push(rules, { type: 'field', inboundTag: [ 'tproxy' ], domain: direct, outboundTag: 'direct' });
 	}
 	if (active) {
 		push(rules, { type: 'field', inboundTag: doh ? [ 'tproxy', 'dns-module' ] : [ 'tproxy', 'dns-in' ],

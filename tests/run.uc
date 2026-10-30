@@ -10,6 +10,7 @@ import { load_config, fastest, auto_pick, retry_delay, no_auto_ids, set_no_auto,
 import { build_index, generate, ports_error } from 'xvpn.xrayconf';
 import { render, resolve, fix_ifnames, ifnames_applied, table_names, rule_prefs, stale_routes } from 'xvpn.firewall';
 import { ipv6_up, busy_ports } from 'xvpn.host';
+import { cidr, parse_nets, domain_rule, direct_domains, direct_nets, lists_due_in } from 'xvpn.split';
 import { cursor } from 'uci';
 
 const FIX = ARGV[0] ?? 'tests/fixtures';
@@ -526,6 +527,75 @@ system([ 'rm', '-f', `${OUT}/delta/xvpn`, gone ]);	// the change is dropped
 eq('the last id goes: the option goes', [ set_no_auto(xcur(), []), xcur().get('xvpn', 'health', 'no_auto') ], [ null, null ]);
 writefile(`${confdir}/xvpn`, "config manual 'manual'\n");
 eq('no health section: it is made', [ set_no_auto(xcur(), [ 'x' ]), no_auto_ids(xcur()) ], [ null, [ 'x' ] ]);
+
+// split tunneling (#67)
+eq('cidr: host bits cleared', [ cidr('10.1.2.3/8'), cidr('203.0.113.7'), cidr(' 2001:db8::1/32 '), cidr('2001:db8::1') ],
+	[ { v6: false, net: '10.0.0.0/8' }, { v6: false, net: '203.0.113.7' }, { v6: true, net: '2001:db8::/32' }, { v6: true, net: '2001:db8::1' } ]);
+eq('cidr: odd prefix', cidr('192.168.255.255/17'), { v6: false, net: '192.168.128.0/17' });
+eq('cidr: bad ones', map([ '1.2.3', '1.2.3.4/33', '0.0.0.0/0', '::/0', '1.2.3.4/', 'example.ru', '1.2.3.256', '', null, 'fe80::1/129', '1.2.3.4/24/1' ], cidr),
+	[ null, null, null, null, null, null, null, null, null, null, null ]);
+eq('parse_nets: comments, blanks, CRLF, bad', parse_nets('# ipdeny\r\n2.60.0.0/16\r\n\n5.3.0.0/16 ; x\n2a00:1fa0::/29\n<html>\n'),
+	{ v4: [ '2.60.0.0/16', '5.3.0.0/16' ], v6: [ '2a00:1fa0::/29' ], bad: 1 });
+eq('domain_rule', map([ 'Example.RU', 'ru', 'full:www.example.ru', 'domain:ya.ru', '*.vk.com', '.ok.ru', 'xn--p1ai' ], domain_rule),
+	[ 'domain:example.ru', 'domain:ru', 'full:www.example.ru', 'domain:ya.ru', 'domain:vk.com', 'domain:ok.ru', 'domain:xn--p1ai' ]);
+eq('domain_rule: bad ones', map([ 'regexp:.*', 'keyword:ya', 'exa mple.ru', 'ex_ample.ru', '-a.ru', 'a..ru', 'пример.рф', '', 'full:' ], domain_rule),
+	[ null, null, null, null, null, null, null, null, null ]);
+let scfg = { ...cfg, access: { ...cfg.access, ipv6: 'block', killswitch: true, dns_server: '1.1.1.1' },
+	split: { ip: [ '45.0.0.4', '45.0.0.4/32', 'bad', '2001:db8::/32' ], domain: [ 'example.ru', 'EXAMPLE.ru', 'bad domain', 'full:www.ya.ru' ], ru: true, ru_interval: 168, ru_url: [] } };
+eq('direct_domains: normalized, no duplicates, bad skipped', direct_domains(scfg), [ 'domain:example.ru', 'full:www.ya.ru' ]);
+writefile(`${OUT}/ru.txt`, '2.60.0.0/16\n45.0.0.4\n2a00:1fa0::/29\n');
+eq('direct_nets: own list and the cache', direct_nets(scfg, `${OUT}/ru.txt`),
+	{ v4: [ '45.0.0.4', '2.60.0.0/16' ], v6: [ '2001:db8::/32', '2a00:1fa0::/29' ] });
+eq('direct_nets: list off, no cache read', direct_nets({ split: { ...scfg.split, ru: false } }, `${OUT}/ru.txt`),
+	{ v4: [ '45.0.0.4' ], v6: [ '2001:db8::/32' ] });
+eq('direct_nets: no cache yet', direct_nets({ split: { ip: [], ru: true } }, `${OUT}/none.txt`), { v4: [], v6: [] });
+eq('load_config: split defaults', load_config(`${OUT}/dnscfg`).split, { ip: [], domain: [], ru: false, ru_interval: 168, ru_url: [] });
+let T0 = time();
+ok('lists due: off', lists_due_in({ split: { ru: false } }, {}) == null);
+ok('lists due: never downloaded', lists_due_in(scfg, {}) <= 0);
+ok('lists due: fresh', lists_due_in(scfg, { last_ok: T0 - 3600 }) > 0);
+ok('lists due: old', lists_due_in(scfg, { last_ok: T0 - 169 * 3600 }) <= 0);
+ok('lists due: failed, retry later', lists_due_in(scfg, { last_ok: T0 - 169 * 3600, last_attempt: T0 - 60, error: 'x' }) > 0);
+ok('lists due: failed long ago', lists_due_in(scfg, { last_attempt: T0 - 3600, error: 'x' }) <= 0);
+
+let sres = { nets: [ 'br-guest' ], ports: [ 'lan2' ], ipv6: true, direct: direct_nets(scfg, `${OUT}/ru.txt`) };
+let snft = render(scfg, sres);
+let chain = (t, name) => {
+	let c = substr(t, index(t, `chain ${name} {`));
+	return substr(c, 0, index(c, '\n\t}'));
+};
+ok('split: sets filled', index(snft, 'set direct4 { type ipv4_addr; flags interval; auto-merge; elements = { 45.0.0.4, 2.60.0.0/16 }; }') >= 0
+	&& index(snft, 'elements = { 2001:db8::/32, 2a00:1fa0::/29 }') >= 0);
+let icp = chain(snft, 'intercept');
+ok('split: direct before tproxy', index(icp, 'ip daddr @direct4 return') > 0 && index(icp, 'ip daddr @direct4 return') < index(icp, 'tproxy ip to'));
+ok('split: dns hijack before direct', index(icp, 'th dport 53 return') < index(icp, '@direct4'));
+let gfw = chain(snft, 'guard_forward');
+ok('split: kill switch lets direct through', index(gfw, 'ip daddr @direct4 return') > 0 && index(gfw, 'ip6 daddr @direct6 return') > 0
+	&& index(gfw, '@direct6') < index(gfw, 'reject'));
+writefile(`${OUT}/split.nft`, snft);
+let spass = render(scfg, sres, { passthrough: true });
+ok('split passthrough: direct6 before the IPv6 reject', index(chain(spass, 'guard_forward'), '@direct6') < index(chain(spass, 'guard_forward'), 'meta nfproto ipv6 reject'));
+writefile(`${OUT}/split-passthrough.nft`, spass);
+let sblk = render(scfg, sres, { block: true });
+ok('split block: no lists', index(sblk, 'direct') < 0);
+ok('split minimal: no lists', index(render(scfg, sres, { minimal: true }), 'direct') < 0);
+let snone = render(scfg, { ...sres, direct: { v4: [], v6: [] } });
+ok('split: empty lists, sets but no rules', index(snone, 'set direct4') >= 0 && index(snone, '@direct') < 0);
+// a country-sized list: nft -c takes it and the time it needs is seen in the test log
+let big = [];
+for (let i = 0; i < 12000; i++)
+	push(big, sprintf('%d.%d.%d.0/24', 1 + (i >> 16), (i >> 8) & 255, i & 255));
+writefile(`${OUT}/split-big.nft`, render(scfg, { ...sres, direct: { v4: big, v6: [ '2a00::/12' ] } }));
+
+let sconf = generate(scfg, servers, idx);
+let srule = filter(sconf.routing.rules, (r) => r.outboundTag == 'direct');
+eq('split xray: domain rule', srule, [ { type: 'field', inboundTag: [ 'tproxy' ], domain: [ 'domain:example.ru', 'full:www.ya.ru' ], outboundTag: 'direct' } ]);
+eq('split xray: freedom AsIs', filter(sconf.outbounds, (o) => o.tag == 'direct'), [ { tag: 'direct', protocol: 'freedom' } ]);
+let rtags = map(sconf.routing.rules, (r) => r.outboundTag);
+ok('split xray: before the rule of the active server', index(rtags, 'direct') == length(rtags) - 2 && rtags[-1] == 'srv-2' && sconf.outbounds[0].tag == 'srv-2');
+writefile(`${OUT}/config-split.json`, sprintf('%J', sconf));
+let nodom = generate({ ...scfg, split: { ...scfg.split, domain: [] } }, servers, idx);
+ok('split xray: no domains, no direct outbound', !length(filter(nodom.outbounds, (o) => o.tag == 'direct')));
 
 print(`${passed} passed, ${failed} failed\n`);
 exit(failed ? 1 : 0);
