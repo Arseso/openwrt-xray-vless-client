@@ -4,7 +4,7 @@
 'use strict';
 
 import { cursor } from 'uci';
-import { readfile, unlink } from 'fs';
+import { readfile, lsdir, unlink } from 'fs';
 import { NFT_FILE, VAR_DIR, RUN_DIR, FW_ROUTE_FILE, mkdir_p, write_file, write_json, read_json, run, log } from 'xvpn.util';
 import { ipv6_up } from 'xvpn.host';
 
@@ -293,7 +293,7 @@ export function render(cfg, res, opts) {
 };
 
 // The names `ip rule list` prints for the table: its number, or its name when
-// /etc/iproute2/rt_tables has one (pbr and users name their tables there); names that
+// rt (rt_tables()) has one (pbr and users name their tables there); names that
 // are not [A-Za-z0-9_.-] are skipped.
 export function table_names(rt, table) {
 	let r = [ `${table}` ];
@@ -343,6 +343,15 @@ export function stale_routes(applied, cur, add) {
 // tmpfs, as are the rules: without it (boot, an upgrade from before it) only cur is ours.
 // The rules are deleted by pref: `ip rule del fwmark X/X table T` could take someone's rule
 // that has one more selector.
+// table names: rt_tables, and rt_tables.d/*.conf that ip-full 6.x reads too
+function rt_tables() {
+	let rt = readfile('/etc/iproute2/rt_tables') ?? '';
+	for (let f in sort(lsdir('/etc/iproute2/rt_tables.d') ?? []))
+		if (match(f, /\.conf$/))
+			rt += '\n' + (readfile(`/etc/iproute2/rt_tables.d/${f}`) ?? '');
+	return rt;
+}
+
 function cur_route(cfg) {
 	return { mark: cfg.main.tproxy_mark, table: cfg.main.route_table };
 }
@@ -357,7 +366,7 @@ function del_rules(fam, out, p, rt) {
 // stop); the stale ones stay until the new nft rules are in: the old ones still set their mark.
 // v6: false skips IPv6 (it is off, ip -6 would fail).
 function route_add(cfg, v6) {
-	let cur = cur_route(cfg), rt = readfile('/etc/iproute2/rt_tables');
+	let cur = cur_route(cfg), rt = rt_tables();
 	mkdir_p(RUN_DIR);
 	write_json(FW_ROUTE_FILE, [ cur, ...map(stale_routes(read_json(FW_ROUTE_FILE), cur, true),
 		(p) => ({ mark: p.mark, table: p.table })) ]);
@@ -374,7 +383,7 @@ function route_add(cfg, v6) {
 
 // Takes down the stale pairs (keep: the current one stays, as after route_add()) or all.
 function route_prune(cfg, keep) {
-	let cur = cur_route(cfg), rt = readfile('/etc/iproute2/rt_tables');
+	let cur = cur_route(cfg), rt = rt_tables();
 	let stale = stale_routes(read_json(FW_ROUTE_FILE), cur, keep);
 	for (let fam in [ '-4', '-6' ]) {
 		let out = length(stale) ? run(`ip ${fam} rule list 2>/dev/null`).out : '';
