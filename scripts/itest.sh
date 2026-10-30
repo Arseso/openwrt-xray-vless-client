@@ -375,8 +375,8 @@ echo "OK: split: the guard (kill switch) blocks the direct list too"
 # applied to the rules without a restart of xray
 echo '45.0.0.5/32 # x' > /tmp/www/ru.zone
 x=$(xray_pid)
-r=$(ubus call luci.xvpn split_update)
-echo "$r" | grep -Eq '"ok": true|busy' || { echo "FAIL: split_update: $r"; exit 1; }
+# the daemon's own first download (15 s after its start, the file was not there) may be running
+wait_cmd 20 sh -c 'ubus call luci.xvpn split_update | grep -q "\"ok\": true"'
 wait_cmd 30 in_direct 45.0.0.5
 grep -qx 45.0.0.5 /etc/xvpn/lists/ru.txt || { echo "FAIL: list not cached: $(cat /etc/xvpn/lists/ru.txt)"; exit 1; }
 [ "$(ubus call luci.xvpn split | jsonfilter -e @.cached.v4)" = 1 ] || { echo "FAIL: luci.xvpn split: $(ubus call luci.xvpn split)"; exit 1; }
