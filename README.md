@@ -281,8 +281,13 @@ xray перезапускается (а соединения клиентов р
 | xray | Статус |
 |---|---|
 | 25.1.30 (фид 24.10) | по умолчанию; CI, шаг `test`, и интеграционный тест |
-| последний релиз с GitHub (на 2026-10-28 — 26.10.21) | CI, шаг `test-latest`: конфиг принимается, серверы из таблицы ниже отвергаются по одному |
-| промежуточные версии | не проверялись |
+| 26.10.29 (закреплён в `scripts/ci.sh`, `XRAY_PINNED`) | CI, шаг `test-xray`: конфиг принимается, серверы из таблицы ниже отвергаются по одному |
+| 26.10.21 | проверен вручную так же, результат тот же |
+| остальные | не проверялись; о релизе новее закреплённого `ci.sh` предупреждает |
+
+> **Внимание.** На xray 26 серверы с `allowInsecure=1` (или `insecure=1`) в ссылке и vless/trojan
+> без TLS к публичному адресу **отвергаются и пропадают из списка**. Если подписка состоит из
+> таких серверов, со свежим бинарём VPN останется без серверов — проверьте журнал после подмены.
 
 Конфиг один для всех версий, по версии xray генератор ничего не меняет. Зато xray 26 запрещает
 то, что может прийти в подписке:
@@ -298,15 +303,17 @@ xray перезапускается (а соединения клиентов р
 `xray rejected server "<имя>": <причина xray>`. Вердикт запоминается до смены бинаря, настроек или
 самого сервера, при следующих reload — строка `xray rejected N server(s) earlier: <имя> (<причина>)`.
 
-Как подменить бинарь (AX3000T и другие aarch64 — `Xray-linux-arm64-v8a.zip`; бинарь 26.x весит
-~33 МБ, проверьте место: `df -h /overlay`):
+Как подменить бинарь (AX3000T и другие aarch64 — `Xray-linux-arm64-v8a.zip`). Бинарь 26.x
+весит ~33 МБ на флеше, zip — ~14 МБ в `/tmp` (это RAM): сначала проверьте место —
+`df -h /overlay` (нужно больше 35 МБ свободных) и `free`. Нужен `unzip`:
 
 ```bash
+opkg update && opkg install unzip
 cd /tmp
-wget https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-arm64-v8a.zip
-wget https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-arm64-v8a.zip.dgst
-grep SHA2-256 Xray-linux-arm64-v8a.zip.dgst; sha256sum Xray-linux-arm64-v8a.zip   # суммы должны совпасть
-mkdir -p /usr/local/bin && unzip -o Xray-linux-arm64-v8a.zip xray -d /usr/local/bin && rm Xray-linux-arm64-v8a.zip*
+z=Xray-linux-arm64-v8a.zip; u=https://github.com/XTLS/Xray-core/releases/download/v26.10.29
+wget $u/$z $u/$z.dgst
+echo "$(sed -n 's/^SHA2-256= *//p' $z.dgst)  $z" | sha256sum -c -   # должно быть «OK»
+mkdir -p /usr/local/bin && unzip -o $z xray -d /usr/local/bin && rm $z $z.dgst
 /usr/local/bin/xray version
 uci set xvpn.main.xray_bin=/usr/local/bin/xray
 uci commit xvpn
@@ -490,7 +497,7 @@ sh scripts/ci.sh
 ```
 
 Скрипт проверяет закоммиченный HEAD (незакоммиченные изменения не проверяются): `test.sh` с
-xray из фида и с последним релизом xray с GitHub (обязательный шаг, [#14](https://github.com/Arseso/openwrt-xray-vless-client/issues/14)), `itest.sh`
+xray из фида и с закреплённым релизом xray с GitHub (`test-xray`, обязательный шаг, [#14](https://github.com/Arseso/openwrt-xray-vless-client/issues/14); о более новом релизе — предупреждение), `itest.sh`
 (не дольше 12 мин) и `build.sh`; ipk — в `dist/`, логи шагов — в `.ci/`. Занимает около
 15 минут.
 

@@ -65,7 +65,7 @@ function xray_reason(text) {
 	let l = match(text ?? '', /Failed to start: ([^\n]*)/)?.[1];
 	if (!l)
 		return null;
-	return substr(replace(split(l, ' > ')[-1], /^[a-z\/]+: /, ''), 0, 300);
+	return substr(replace(pop(split(l, ' > ')), /^[a-z\/]+: /, ''), 0, 300);
 }
 
 // write_json that checks the file is whole: on a full tmpfs xray would reject a truncated
@@ -230,8 +230,10 @@ case 'generate': {
 	let verdict = (s) => tested.ok[s.key ??= conf_key(s.outbound)];
 	let set_key = (list) => conf_key(sort(map(list, (s) => s.key ?? conf_key(s.outbound))));
 	// rejected before: dropped without a test
+	// each reason in full went to the log when the server was tested
+	let brief = (r) => (length(r) > 80) ? `${substr(r, 0, 79)}…` : r;
 	let skipped = map(filter(servers, (s) => verdict(s) === false),
-		(s) => tested.why[s.key] ? `${s.name} (${tested.why[s.key]})` : s.name);
+		(s) => tested.why[s.key] ? `${s.name} (${brief(tested.why[s.key])})` : s.name);
 	if (length(skipped)) {
 		log(`xray rejected ${length(skipped)} server(s) earlier: ${join(', ', skipped)}`);
 		servers = filter(servers, (s) => verdict(s) !== false);

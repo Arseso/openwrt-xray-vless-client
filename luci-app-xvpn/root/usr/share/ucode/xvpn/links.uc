@@ -236,6 +236,7 @@ function parse_vmess(link) {
 		headerType: (net in [ 'tcp', 'kcp' ]) ? v.type : null,
 		mode: (net == 'grpc' && v.type == 'multi') ? 'multi' : ((net == 'xhttp') ? v.type : null),
 		allowInsecure: v.allowInsecure ? '1' : null,
+		pcs: v.pcs, vcn: v.vcn,
 	};
 	if (net == 'grpc')
 		p.serviceName = v.path;
