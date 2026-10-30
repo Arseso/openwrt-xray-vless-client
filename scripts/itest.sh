@@ -1025,12 +1025,41 @@ kill -9 $g
 echo "OK: a killed generate leaves the running config"
 uci set xvpn.main.xray_bin=/usr/bin/xray
 uci del_list xvpn.manual.link="vless://$UUID@127.0.0.9:18449?type=tcp&security=none#bad"
+# another table and mark (#56): the rules and routes with the previous ones go, IPv4 and IPv6;
+# someone's rules (the same mark or table, one more selector) and routes stay. The new table
+# has a name in rt_tables: ip prints it instead of the number
+ours() { (ip rule; ip -6 rule) | grep -E '^[0-9]+:[[:space:]]+from all fwmark ' | grep -vE 'lookup 300 ?$|0x8000000/'; }
+theirs() {
+	ip rule | grep -q 'from all fwmark 0x2000000/0x2000000 lookup 300' && ip -6 rule | grep -q 'fwmark 0x2000000/0x2000000 lookup 300' \
+		&& ip rule | grep -q 'from 10.99.0.1 fwmark 0x2000000/0x2000000 lookup 100' && ip rule | grep -q 'fwmark 0x8000000/0x8000000 lookup 100' \
+		&& ip route show table 100 | grep -q 10.77.0.0 || { echo "FAIL: someone's rule or route removed ($1)"; ip rule; ip -6 rule; ip route show table 100; exit 1; }
+}
+for f in -4 -6; do ip $f rule add fwmark 0x2000000/0x2000000 table 300; done
+ip rule add from 10.99.0.1 fwmark 0x2000000/0x2000000 table 100
+ip rule add fwmark 0x8000000/0x8000000 table 100
+ip route add 10.77.0.0/16 dev lo table 100
+echo '200 xvtest' >> /etc/iproute2/rt_tables
+uci set xvpn.main.route_table=200
+uci set xvpn.main.tproxy_mark=0x04000000
 uci commit xvpn
 /etc/init.d/xvpn reload
 wait_for @.state connected 40
+for f in -4 -6; do
+	r=$(ip $f rule | grep -E '^[0-9]+:[[:space:]]+from all fwmark ' | grep -vE 'lookup 300 ?$|0x8000000/')
+	[ "$(echo "$r" | grep -cE 'fwmark 0x4000000/0x4000000 lookup xvtest ?$')" = 1 ] && [ "$(echo "$r" | wc -l)" = 1 ] \
+		&& ip $f route show table 200 | grep -q '^local default' && ! ip $f route show table 100 | grep -q '^local' \
+		|| { echo "FAIL: ip $f rules after a change of route_table and tproxy_mark:"; ip $f rule; ip $f route show table all | grep table; exit 1; }
+done
+theirs reload
+tunnel || { echo "FAIL: no tunnel with route_table 200 and tproxy_mark 0x04000000"; exit 1; }
+echo "OK: a new route_table and tproxy_mark: the previous rules and routes are gone, someone's stay, the tunnel works"
 
 /etc/init.d/xvpn stop
 no_tproxy "stop with the service enabled"
+[ -z "$(ours)" ] && [ -z "$(ip route show table 200; ip -6 route show table 200)" ] \
+	|| { echo "FAIL: ip rules or routes left after stop"; ip rule; ip -6 rule; exit 1; }
+theirs stop
+echo "OK: no ip rules or routes after stop, someone's stay"
 in_set inet nets xvpn-ap1 && in_set bridge ports myvpn0 || { echo "FAIL: guard without the SSIDs"; exit 1; }
 blocked "stopped, service enabled"
 
@@ -1043,8 +1072,18 @@ echo "OK: rules removed when the service is turned off"
 # package removal: default_prerm disables, then stops
 uci set xvpn.main.enabled=1; uci commit xvpn
 /etc/init.d/xvpn start; sleep 2
+[ "$(ours | wc -l)" = 2 ] || { echo "FAIL: no ip rules in full before package removal"; ip rule; ip -6 rule; exit 1; }
 /etc/init.d/xvpn disable; /etc/init.d/xvpn stop
 nft list table inet xvpn >/dev/null 2>&1 && { echo "FAIL: table left after disable + stop"; exit 1; }
+# fw-remove from full: the rules and routes go, IPv4 and IPv6, someone's stay
+[ -z "$(ours)" ] && [ -z "$(ip route show table 200; ip -6 route show table 200)" ] && [ ! -e /var/run/xvpn/fw_route ] \
+	|| { echo "FAIL: ip rules or routes left after fw-remove"; ip rule; ip -6 rule; exit 1; }
+theirs fw-remove
+for f in -4 -6; do ip $f rule del fwmark 0x2000000/0x2000000 table 300; done
+ip rule del from 10.99.0.1 fwmark 0x2000000/0x2000000 table 100
+ip rule del fwmark 0x8000000/0x8000000 table 100
+ip route flush table 100
+sed -i '/xvtest/d' /etc/iproute2/rt_tables
 echo "OK: rules removed on package removal"
 sed -n '/^define Package\/luci-app-xvpn\/postrm/,/^endef/p' /src/luci-app-xvpn/Makefile | sed '1d;$d; s/\$\$/$/g' > /tmp/postrm
 uci set wireless.homeap.ssid=Staged
