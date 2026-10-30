@@ -50,6 +50,12 @@ function domain(v) {
 	return d.length <= 253 && DOMAIN.test(d);
 }
 
+// E() and dom.content put a string in as HTML: text from the router (curl's error, the URL
+// of split.ru_url) goes in as a text node
+function text(s) {
+	return document.createTextNode(s);
+}
+
 function ago(now, t) {
 	const s = Math.max(0, now - t);
 	if (s < 3600)
@@ -67,20 +73,20 @@ return view.extend({
 		]);
 	},
 
-	// text nodes only: the error comes from curl and the server
+	// strings with values as text nodes: the error comes from curl and holds the URL
 	listStatus(st) {
 		const r = [];
 		if (!st.ru)
 			return E('em', {}, _('The list is off.'));
 		if (st.cached)
-			r.push(E('div', {}, _('In the rules: %d IPv4 and %d IPv6 networks.').format(st.cached.v4, st.cached.v6)));
+			r.push(E('div', {}, [ text(_('In the rules: %d IPv4 and %d IPv6 networks.').format(st.cached.v4, st.cached.v6)) ]));
 		else
 			r.push(E('div', {}, _('Not downloaded yet: until it is, this traffic goes through the tunnel.')));
 		if (st.last_ok)
-			r.push(E('div', {}, _('Checked %s (%s).').format(ago(st.time, st.last_ok),
-				st.via == 'tunnel' ? _('through the tunnel') : _('directly'))));
+			r.push(E('div', {}, [ text(_('Checked %s (%s).').format(ago(st.time, st.last_ok),
+				st.via == 'tunnel' ? _('through the tunnel') : _('directly'))) ]));
 		if (st.error)
-			r.push(E('div', { 'class': 'alert-message warning' }, _('Last download failed: %s').format(st.error)));
+			r.push(E('div', { 'class': 'alert-message warning' }, [ text(_('Last download failed: %s').format(st.error)) ]));
 		if (st.updating)
 			r.push(E('div', {}, E('em', {}, _('Downloading…'))));
 		return E('div', {}, r);
@@ -136,7 +142,7 @@ return view.extend({
 				'class': 'cbi-button cbi-button-action',
 				'click': ui.createHandlerFn(this, () => callSplitUpdate().then((r) => {
 					if (!r?.ok)
-						ui.addNotification(null, E('p', {}, _('Could not start the download: %s').format(r?.error ?? '?')), 'warning');
+						ui.addNotification(null, E('p', {}, [ text(_('Could not start the download: %s').format(r?.error ?? '?')) ]), 'warning');
 				})),
 			}, _('Update the Russian list now'));
 			node.appendChild(E('div', { 'class': 'cbi-section' }, [
