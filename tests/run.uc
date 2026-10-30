@@ -6,7 +6,7 @@
 import { readfile, writefile, mkdir, stat } from 'fs';
 import { parse_link, parse_subscription } from 'xvpn.links';
 import { parse_userinfo, assign_ids, list_change, known_ids, prune_no_auto, NO_AUTO_GRACE } from 'xvpn.subscription';
-import { load_config, fastest, retry_delay, no_auto_ids, set_no_auto, mkdir_p, read_json, SUBS_DIR } from 'xvpn.util';
+import { load_config, fastest, auto_pick, retry_delay, no_auto_ids, set_no_auto, mkdir_p, read_json, SUBS_DIR } from 'xvpn.util';
 import { build_index, generate, ports_error } from 'xvpn.xrayconf';
 import { render, resolve, fix_ifnames, ifnames_applied, table_names, rule_prefs, stale_routes } from 'xvpn.firewall';
 import { ipv6_up, busy_ports } from 'xvpn.host';
@@ -452,6 +452,21 @@ let skip = (off) => (e) => off[e.id];
 eq('fastest', fastest(five, lat)?.id, 'b');
 eq('fastest skips no_auto', fastest(five, lat, skip({ b: true }))?.id, 'c');
 eq('fastest: dead and unmeasured are no candidates', fastest(five, lat, skip({ a: true, b: true, c: true })), null);
+
+// limited servers (#61): left while there are others, quarantine weighs more than limited
+let pk = (off, q, lim) => { let r = auto_pick(five, lat, off, q, lim); return r ? [ r.server.id, r.limited ] : null; };
+eq('auto_pick: the fastest', pk({}, {}, {}), [ 'b', false ]);
+eq('auto_pick skips limited', pk({}, {}, { b: 1 }), [ 'c', false ]);
+eq('auto_pick: quarantined before limited', pk({}, { c: true }, { b: 1, a: 1 }), [ 'c', false ]);
+eq('auto_pick: only limited ones answer: the fastest of them', pk({}, {}, { a: 1, b: 1, c: 1 }), [ 'b', true ]);
+eq('auto_pick: limited out of quarantine first', pk({}, { b: true }, { a: 1, b: 1, c: 1 }), [ 'c', true ]);
+eq('auto_pick: no_auto stays out', pk({ b: true, c: true }, {}, { a: 1 }), [ 'a', true ]);
+eq('auto_pick: none', pk({ a: true, b: true, c: true }, {}, {}), null);
+for (let v in [ [ null, 'https://cp.cloudflare.com/generate_204' ], [ 'off', null ], [ 'http://check2.test/', 'http://check2.test/' ] ]) {
+	writefile(`${OUT}/dnscfg/xvpn`, "config health 'health'\n" + (v[0] ? `\toption url2 '${v[0]}'\n` : ''));
+	eq(`url2 ${v[0]}`, load_config(`${OUT}/dnscfg`).health.url2, v[1]);
+}
+eq('url2_cdn by default', load_config(`${OUT}/dnscfg`).health.url2_cdn, 3);
 
 // no live servers (#12): the pause between tests of all servers doubles up to retry_max
 let pauses = [], d = null;
