@@ -321,7 +321,8 @@ via() { # what url [curl args]: the request goes as what (direct | tunnel | none
 	[ "$_g" = "$_w" ] || { echo "FAIL: $* went $_g ('$_a'), expected $_w"; nft list table inet xvpn | head -40; diag; exit 1; }
 }
 ping_ok() { ip netns exec cl ping -c1 -W1 "$1" >/dev/null 2>&1; }
-in_direct() { nft list set inet xvpn direct4 2>/dev/null | grep -q "$1"; }
+# by lookup: auto-merge prints 45.0.0.4 and 45.0.0.5 as 45.0.0.4/31
+in_direct() { nft get element inet xvpn direct4 "{ $1 }" >/dev/null 2>&1; }
 sleep 1
 via tunnel http://45.0.0.4/cgi-bin/ip
 # the active remote drops direct.test (a whitelist without it): it opens only around the tunnel
