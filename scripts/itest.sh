@@ -1131,7 +1131,8 @@ wait_for @.state connected 40
 wait_for @.state connected 40
 tunnel || { echo "FAIL: no tunnel with the counting xray"; exit 1; }
 for i in 1 2 3; do s=$(ubus call luci.xvpn stats); ubus call luci.xvpn status >/dev/null; done
-[ ! -s /tmp/xray-runs ] || { echo "FAIL: xray started by a reload or the status tab: $(cat /tmp/xray-runs)"; exit 1; }
+# but `api bo` of service_started(): the balancer of the running xray follows the config (#13)
+! grep -v '^api bo ' /tmp/xray-runs | grep -q . || { echo "FAIL: xray started by a reload or the status tab: $(cat /tmp/xray-runs)"; exit 1; }
 [ "$(echo "$s" | jsonfilter -e "@.traffic['$(status @.active)'].down")" -gt 0 ] \
 	|| { echo "FAIL: no traffic of the active server in stats: $s"; exit 1; }
 echo "OK: stats from the metrics section, a reload of the same servers runs no xray -test"
