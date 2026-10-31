@@ -16,7 +16,8 @@ export type ErrorCode =
   | 'invalid_url'
   // ubus
   | 'wrong_password'
-  | 'acl' // access denied with a fresh session: the user has no rights for the call
+  | 'acl' // access denied with a live session: the user has no rights for the call
+  | 'session_lost' // a new login dropped staged UCI changes / the pending confirm
   | 'no_package' // there is no luci.xvpn object: luci-app-xvpn is not installed
   | 'old_package' // luci-app-xvpn without the method version: too old for this app
   | 'incompatible' // luci.xvpn version answers another api (detail.api)

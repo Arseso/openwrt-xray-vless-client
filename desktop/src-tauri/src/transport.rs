@@ -11,7 +11,7 @@ use std::time::Duration;
 use serde_json::Value;
 
 use crate::error::{Result, TransportError};
-use crate::pin::{PinFailure, PinVerifier};
+use crate::pin::{failure_of, PinFailure, PinVerifier};
 
 /// connecting longer than this is "unreachable", however long the call may take
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -22,7 +22,6 @@ struct Client {
     url: String,
     pin: Option<String>,
     http: reqwest::Client,
-    verifier: Arc<PinVerifier>,
 }
 
 #[derive(Default)]
@@ -34,7 +33,7 @@ impl Http {
     /// POST body to <url>/ubus; key: the profile the client is kept for
     pub async fn post(&self, key: &str, url: &str, pin: Option<&str>, body: &Value, timeout_ms: u64) -> Result<Value> {
         let c = self.client(key, url, pin)?;
-        post(&c.http, &c.verifier, &c.url, body, timeout_ms).await
+        post(&c.http, &c.url, body, timeout_ms).await
     }
 
     /// after the address or pin of the profile changed
@@ -49,21 +48,21 @@ impl Http {
                 return Ok(c.clone());
             }
         }
-        let (http, verifier) = build(pin.map(str::to_string))?;
-        let c = Client { url: url.to_string(), pin: pin.map(str::to_string), http, verifier };
+        let http = build(pin.map(str::to_string))?;
+        let c = Client { url: url.to_string(), pin: pin.map(str::to_string), http };
         clients.insert(key.to_string(), c.clone());
         Ok(c)
     }
 }
 
-pub fn build(pin: Option<String>) -> Result<(reqwest::Client, Arc<PinVerifier>)> {
+pub fn build(pin: Option<String>) -> Result<reqwest::Client> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let verifier = Arc::new(PinVerifier::new(pin, provider.clone()));
     let tls = rustls::ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .map_err(|e| TransportError::new("tls", e.to_string()))?
         .dangerous()
-        .with_custom_certificate_verifier(verifier.clone())
+        .with_custom_certificate_verifier(verifier)
         .with_no_client_auth();
     let http = reqwest::Client::builder()
         .use_preconfigured_tls(tls)
@@ -74,15 +73,15 @@ pub fn build(pin: Option<String>) -> Result<(reqwest::Client, Arc<PinVerifier>)>
         .user_agent(concat!("xvpn-desktop/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|e| TransportError::new("tls", e.to_string()))?;
-    Ok((http, verifier))
+    Ok(http)
 }
 
-pub async fn post(http: &reqwest::Client, verifier: &PinVerifier, url: &str, body: &Value, timeout_ms: u64) -> Result<Value> {
+pub async fn post(http: &reqwest::Client, url: &str, body: &Value, timeout_ms: u64) -> Result<Value> {
     let timeout = Duration::from_millis(timeout_ms.clamp(100, MAX_TIMEOUT_MS));
     let res = http.post(format!("{url}/ubus")).timeout(timeout).json(body).send().await;
     let res = match res {
         Ok(r) => r,
-        Err(e) => return Err(request_error(e, verifier)),
+        Err(e) => return Err(request_error(e)),
     };
     let status = res.status();
     if !status.is_success() {
@@ -100,8 +99,9 @@ pub async fn post(http: &reqwest::Client, verifier: &PinVerifier, url: &str, bod
     }
 }
 
-fn request_error(e: reqwest::Error, verifier: &PinVerifier) -> TransportError {
-    match verifier.take_failure() {
+fn request_error(e: reqwest::Error) -> TransportError {
+    let tls = tls_error(&e);
+    match tls.and_then(failure_of).cloned() {
         Some(PinFailure::Unknown { seen }) => {
             let mut err = TransportError::new("tls_unknown", "the router certificate is not pinned yet");
             err.fingerprint = Some(seen);
@@ -118,7 +118,7 @@ fn request_error(e: reqwest::Error, verifier: &PinVerifier) -> TransportError {
     let msg = chain(&e);
     if e.is_timeout() {
         TransportError::new("timeout", msg)
-    } else if is_tls(&e) {
+    } else if tls.is_some() {
         TransportError::new("tls", msg)
     } else if e.is_connect() || e.is_request() {
         TransportError::new("unreachable", msg)
@@ -138,21 +138,25 @@ fn chain(e: &reqwest::Error) -> String {
     msg
 }
 
-fn is_tls(e: &reqwest::Error) -> bool {
+/// the rustls error somewhere in the chain of a failed request
+fn tls_error(e: &reqwest::Error) -> Option<&rustls::Error> {
     let mut src = e.source();
     while let Some(s) = src {
-        if s.downcast_ref::<rustls::Error>().is_some() {
-            return true;
-        }
-        // io::Error::source() skips the error it wraps
-        if let Some(inner) = s.downcast_ref::<std::io::Error>().and_then(|io| io.get_ref()) {
-            if inner.downcast_ref::<rustls::Error>().is_some() {
-                return true;
-            }
+        if let Some(t) = find_rustls(s) {
+            return Some(t);
         }
         src = s.source();
     }
-    false
+    None
+}
+
+/// tokio-rustls and hyper wrap it in io::Error (twice): io::Error::source() skips the
+/// error it wraps, so look inside
+fn find_rustls<'a>(e: &'a (dyn std::error::Error + 'static)) -> Option<&'a rustls::Error> {
+    if let Some(t) = e.downcast_ref::<rustls::Error>() {
+        return Some(t);
+    }
+    e.downcast_ref::<std::io::Error>().and_then(|io| io.get_ref()).and_then(|i| find_rustls(i))
 }
 
 #[cfg(test)]
@@ -232,6 +236,29 @@ mod tests {
         assert_eq!(err.kind, "tls_changed", "{err}");
         assert_eq!(err.fingerprint.as_deref(), Some(fp.as_str()));
         assert_eq!(err.pinned.as_deref(), Some(other.as_str()));
+    }
+
+    #[tokio::test]
+    async fn concurrent_requests_each_get_the_pin_failure() {
+        let (url, fp) = https_server();
+        let http = Http::default();
+        let all = futures_join(&http, &url).await;
+        for err in all {
+            let err = err.unwrap_err();
+            assert_eq!(err.kind, "tls_unknown", "{err}");
+            assert_eq!(err.fingerprint.as_deref(), Some(fp.as_str()));
+        }
+    }
+
+    async fn futures_join(http: &Http, url: &str) -> Vec<Result<Value>> {
+        let b = body();
+        let (a, b2, c, d) = tokio::join!(
+            http.post("p", url, None, &b, 5000),
+            http.post("p", url, None, &b, 5000),
+            http.post("p", url, None, &b, 5000),
+            http.post("p", url, None, &b, 5000),
+        );
+        vec![a, b2, c, d]
     }
 
     #[tokio::test]

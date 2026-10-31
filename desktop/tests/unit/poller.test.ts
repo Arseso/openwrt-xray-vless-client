@@ -65,6 +65,56 @@ describe('StatusPoller', () => {
     expect(poller.down).toBe(false);
   });
 
+  it('a poll still running at stop() emits nothing', async () => {
+    const bus = new Bus<PollerEvents>();
+    const events: string[] = [];
+    for (const k of ['status', 'state-change', 'poll-error', 'router-down'] as const)
+      bus.on(k, () => events.push(k));
+    let release!: (s: Status) => void;
+    let fail!: (e: unknown) => void;
+    const source = { status: vi.fn(() => new Promise<Status>((res, rej) => { release = res; fail = rej; })) };
+    const poller = new StatusPoller(source, bus, { intervalMs: 1000, downAfter: 1 });
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    poller.stop();
+    release(up());
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(events).toEqual([]);
+    // and a late failure (the timeout of the old router) neither
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    poller.stop();
+    fail(new XvpnError('timeout'));
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(events).toEqual([]);
+    expect(source.status).toHaveBeenCalledTimes(2);
+  });
+
+  it('refresh calls during a poll share one more poll, never two at a time', async () => {
+    const bus = new Bus<PollerEvents>();
+    let active = 0, maxActive = 0;
+    const source = {
+      status: vi.fn(async () => {
+        maxActive = Math.max(maxActive, ++active);
+        await new Promise((r) => setTimeout(r, 100));
+        active--;
+        return up();
+      }),
+    };
+    const poller = new StatusPoller(source, bus, { intervalMs: 1000 });
+    poller.start();
+    await vi.advanceTimersByTimeAsync(10);
+    const all = Promise.all([poller.refresh(), poller.refresh(), poller.refresh()]);
+    await vi.advanceTimersByTimeAsync(300);
+    await all;
+    expect(maxActive).toBe(1);
+    expect(source.status).toHaveBeenCalledTimes(2);
+    // the interval goes on after the refresh poll, once
+    await vi.advanceTimersByTimeAsync(1100);
+    expect(source.status).toHaveBeenCalledTimes(3);
+    poller.stop();
+  });
+
   it('refresh polls at once and restarts the interval', async () => {
     const { poller, source } = setup([up()]);
     poller.start();

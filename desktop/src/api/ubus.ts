@@ -1,8 +1,15 @@
 // JSON-RPC client of uhttpd /ubus: session login, the call itself and a new login when
 // the session is gone (expired, or rpcd restarted with the router). uhttpd answers a
 // call with a dead session as JSON-RPC -32002 "Access denied", the same as a call the
-// ACL does not allow, and rpcd answers some calls with ubus status 6: both get one new
-// login and a second try, still denied with a fresh session means no rights (acl).
+// ACL does not allow, and rpcd answers a call it does not allow with ubus status 6.
+// So a denied call first asks whether the session is alive (session access): alive,
+// the denial is the ACL (acl, the session and what it staged stay); dead, one new
+// login and a second try. uci answers 6 for a config without rights: acl at once.
+//
+// rpcd keeps staged UCI changes and the pending confirm of apply in the session: a new
+// login loses them. UciApi marks them (staged); after a new login with staged changes
+// the next uci call other than get fails with session_lost instead of going on with
+// nothing staged (an apply of nothing, a confirm the router no longer waits for).
 
 import { XvpnError } from './errors';
 import { RpcRequest, RpcResponse, Transport } from './transport';
@@ -39,6 +46,10 @@ export class UbusClient {
   private sid: string | null = null;
   private loginPromise: Promise<string> | null = null;
   private seq = 0;
+  /** the session has staged UCI changes or an apply waiting for confirm */
+  private staged = false;
+  /** a new login dropped them; reported by the next uci call */
+  private lost = false;
   readonly timeoutMs: number;
 
   constructor(private readonly transport: Transport, opts: UbusOptions = {}) {
@@ -60,6 +71,10 @@ export class UbusClient {
   }
 
   private async doLogin(): Promise<string> {
+    if (this.sid && this.staged) {
+      this.lost = true;
+      this.staged = false;
+    }
     this.sid = null;
     const r = await this.transport.login(this.timeoutMs);
     if (r.error)
@@ -76,28 +91,73 @@ export class UbusClient {
     return sid;
   }
 
-  /** drops the session, the next call logs in */
+  /** drops the session (and what it staged), the next call logs in */
   logout(): void {
     this.sid = null;
+    this.staged = this.lost = false;
+  }
+
+  /** UciApi: the session holds staged changes (true) or nothing to lose any more */
+  setStaged(staged: boolean): void {
+    this.staged = staged;
+    if (staged)
+      this.lost = false;
+  }
+
+  get hasStaged(): boolean {
+    return this.staged;
   }
 
   async call<T = Record<string, unknown>>(object: string, method: string, args: Record<string, unknown> = {}, opts: CallOptions = {}): Promise<T> {
+    this.checkLost(object, method);
     const sid = this.sid ?? await this.login();
+    let denied: Denied;
     try {
       return await this.callWith<T>(sid, object, method, args, opts);
     }
     catch (e) {
       if (!(e instanceof Denied))
         throw e;
+      denied = e;
     }
-    // another call may have logged in meanwhile: take its session
-    const fresh = (this.sid && this.sid !== sid) ? this.sid : await this.login();
+    const acl = () => new XvpnError('acl', `access denied: ${object}.${method}`, denied.detail);
+    // rpcd uci: no rights for this config
+    if (object === 'uci' && denied.detail.ubusStatus === UBUS_PERMISSION_DENIED)
+      throw acl();
+    let fresh: string;
+    if (this.sid && this.sid !== sid)
+      fresh = this.sid; // another call logged in meanwhile
+    else if (await this.alive(sid))
+      throw acl();
+    else
+      fresh = await this.login();
+    this.checkLost(object, method);
     try {
       return await this.callWith<T>(fresh, object, method, args, opts);
     }
     catch (e) {
       if (e instanceof Denied)
-        throw new XvpnError('acl', `access denied: ${object}.${method}`, e.detail);
+        throw acl();
+      throw e;
+    }
+  }
+
+  private checkLost(object: string, method: string): void {
+    if (object === 'uci' && method !== 'get' && this.lost) {
+      this.lost = false;
+      throw new XvpnError('session_lost', 'the router session changed, staged changes are lost', { object, method });
+    }
+  }
+
+  /** whether rpcd still knows the session; a transport error propagates */
+  private async alive(sid: string): Promise<boolean> {
+    try {
+      await this.callWith(sid, 'session', 'access', {}, {});
+      return true;
+    }
+    catch (e) {
+      if (e instanceof Denied)
+        return false;
       throw e;
     }
   }

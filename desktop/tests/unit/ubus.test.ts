@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { XvpnError } from '../../src/api/errors';
 import { UbusClient } from '../../src/api/ubus';
+import { UciApi } from '../../src/api/uci';
 import { XvpnApi } from '../../src/api/xvpn';
 import { FakeRouter } from './fake';
 
@@ -9,6 +10,62 @@ function setup() {
   const ubus = new UbusClient(router);
   return { router, ubus, xvpn: new XvpnApi(ubus) };
 }
+
+describe('UCI and the session', () => {
+  function uciSetup() {
+    const { router, ubus } = setup();
+    router.on('uci.set', () => ({})).on('uci.apply', () => ({})).on('uci.confirm', () => ({}))
+      .on('uci.get', () => ({ value: '1' }));
+    return { router, ubus, uci: new UciApi(ubus) };
+  }
+
+  it('uci status 6 (no rights for that config) is acl and keeps the session and staged changes', async () => {
+    const { router, ubus, uci } = uciSetup();
+    router.rpcDenied = false;
+    await uci.set('xvpn', 'main', { a: '1' });
+    router.denied.add('uci.set');
+    await expect(uci.set('network', 'lan', { a: '1' })).rejects.toMatchObject({ code: 'acl' });
+    expect(router.logins).toBe(1);
+    expect(ubus.hasStaged).toBe(true);
+    await expect(uci.apply()).resolves.toBeUndefined();
+  });
+
+  it('a new login with staged changes: the next write fails with session_lost, not an apply of nothing', async () => {
+    const { router, uci, ubus } = uciSetup();
+    await uci.set('xvpn', 'main', { a: '1' });
+    router.expireSessions();
+    await expect(uci.get('xvpn', 'main', 'a')).resolves.toBe('1'); // reads go on
+    await expect(uci.apply()).rejects.toMatchObject({ code: 'session_lost' });
+    expect(router.calls.filter((c) => c.method === 'apply')).toEqual([]);
+    expect(ubus.hasStaged).toBe(false);
+    // reported once: the user stages again
+    await uci.set('xvpn', 'main', { a: '1' });
+    await expect(uci.apply()).resolves.toBeUndefined();
+  });
+
+  it('the relogin of the failing write itself reports session_lost', async () => {
+    const { router, uci } = uciSetup();
+    await uci.set('xvpn', 'main', { a: '1' });
+    router.expireSessions();
+    await expect(uci.set('xvpn', 'main', { b: '2' })).rejects.toMatchObject({ code: 'session_lost' });
+  });
+
+  it('the confirm of an apply with rollback after the session changed: session_lost', async () => {
+    const { router, uci } = uciSetup();
+    await uci.set('xvpn', 'main', { a: '1' });
+    await uci.apply({ rollback: true });
+    router.expireSessions();
+    await expect(uci.confirm()).rejects.toMatchObject({ code: 'session_lost' });
+  });
+
+  it('nothing staged: a new login is silent', async () => {
+    const { router, uci } = uciSetup();
+    await uci.set('xvpn', 'main', { a: '1' });
+    await uci.apply({ rollback: false });
+    router.expireSessions();
+    await expect(uci.set('xvpn', 'main', { a: '2' })).resolves.toBeUndefined();
+  });
+});
 
 describe('UbusClient', () => {
   it('logs in on the first call and keeps the session', async () => {
@@ -36,12 +93,22 @@ describe('UbusClient', () => {
     expect(router.logins).toBe(2);
   });
 
-  it('reports acl when a fresh session is denied too', async () => {
-    const { router, xvpn } = setup();
+  it('a denial with a live session is acl, without a new login', async () => {
+    const { router, xvpn, ubus } = setup();
     router.denied.add('luci.xvpn.servers');
     const e = await xvpn.servers().catch((x) => x);
     expect(e).toBeInstanceOf(XvpnError);
     expect(e.code).toBe('acl');
+    expect(router.logins).toBe(1);
+    expect(ubus.session).toMatch(/^sid1/);
+  });
+
+  it('reports acl when a fresh session is denied too', async () => {
+    const { router, xvpn } = setup();
+    await xvpn.servers();
+    router.expireSessions();
+    router.denied.add('luci.xvpn.servers');
+    await expect(xvpn.servers()).rejects.toMatchObject({ code: 'acl' });
     expect(router.logins).toBe(2);
   });
 

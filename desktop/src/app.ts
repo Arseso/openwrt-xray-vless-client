@@ -88,10 +88,12 @@ export function startApp(root: HTMLElement, conn: Connection): void {
   onLangChange(() => render(true));
   render();
 
-  // the last router at startup
+  // the last router at startup: HTTPS only. The pinned certificate proves it is that
+  // router; over HTTP the stored password would go to any host with its address (a
+  // laptop in another network with the same gateway IP), so that takes a click.
   void listProfiles().then((ps) => {
     const p = ps.find((x) => x.id === lastProfileId()) ?? (ps.length === 1 ? ps[0] : undefined);
-    if (p && conn.state.get().phase === 'disconnected')
+    if (p && p.url.startsWith('https://') && conn.state.get().phase === 'disconnected')
       void conn.connect(p);
   }, () => {});
 }

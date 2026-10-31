@@ -2,6 +2,7 @@
 // take effect with apply: with rollback the router reverts them unless confirm() comes
 // within timeout seconds — the safe way for settings that may cut the PC off (LuCI does
 // the same). rpcd keeps the staged changes per session: a new login loses them.
+// A new login loses them: the next call then fails with session_lost (src/api/ubus.ts).
 // The ACL of luci-base (and so of a LuCI user) allows get, changes, set, add, delete,
 // apply, confirm, rollback, but not revert and commit: a dedicated rpcd user of the app
 // needs them in its ACL, or drops the staged changes with a new login instead.
@@ -65,17 +66,20 @@ export class UciApi {
 
   async set(config: string, section: string, values: Record<string, UciValue>): Promise<void> {
     await this.ubus.call('uci', 'set', { config, section, values });
+    this.ubus.setStaged(true);
   }
 
   /** new section, returns its name */
   async add(config: string, type: string, values: Record<string, UciValue> = {}, name?: string): Promise<string> {
     const r = await this.ubus.call<{ section: string }>('uci', 'add', { config, type, values, ...(name ? { name } : {}) });
+    this.ubus.setStaged(true);
     return r.section;
   }
 
   /** the section, or only options of it */
   async delete(config: string, section: string, options?: string[]): Promise<void> {
     await this.ubus.call('uci', 'delete', { config, section, ...(options ? { options } : {}) });
+    this.ubus.setStaged(true);
   }
 
   async changes(config: string): Promise<UciChange[]> {
@@ -85,25 +89,32 @@ export class UciApi {
 
   async revert(config: string): Promise<void> {
     await this.ubus.call('uci', 'revert', { config });
+    this.ubus.setStaged(false);
   }
 
   /** commits without the rollback timer and without reloading services */
   async commit(config: string): Promise<void> {
     await this.ubus.call('uci', 'commit', { config });
+    this.ubus.setStaged(false);
   }
 
   /** commits the staged changes of the session and reloads the services */
   async apply(opts: { rollback?: boolean; timeout?: number } = {}): Promise<void> {
-    await this.ubus.call('uci', 'apply', { rollback: opts.rollback ?? true, timeout: opts.timeout ?? 30 });
+    const rollback = opts.rollback ?? true;
+    await this.ubus.call('uci', 'apply', { rollback, timeout: opts.timeout ?? 30 });
+    // with rollback the router waits for confirm from this very session
+    this.ubus.setStaged(rollback);
   }
 
   /** keeps the changes of apply({ rollback: true }) */
   async confirm(): Promise<void> {
     await this.ubus.call('uci', 'confirm', {});
+    this.ubus.setStaged(false);
   }
 
   /** reverts apply({ rollback: true }) at once */
   async rollback(): Promise<void> {
     await this.ubus.call('uci', 'rollback', {});
+    this.ubus.setStaged(false);
   }
 }

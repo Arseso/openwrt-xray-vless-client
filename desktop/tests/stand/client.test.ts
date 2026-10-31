@@ -109,6 +109,22 @@ describe(`client against ${URL}`, () => {
     await expect(client('wrong-password').xvpn.status()).rejects.toMatchObject({ code: 'wrong_password' });
   });
 
+  it('rpcd tells a live session from a dead one (session access)', async () => {
+    const { ubus, xvpn } = client();
+    await xvpn.status();
+    const alive = (sid: string) => (ubus as unknown as { alive(s: string): Promise<boolean> }).alive(sid);
+    expect(await alive(ubus.session!)).toBe(true);
+    expect(await alive('ffffffffffffffffffffffffffffffff')).toBe(false);
+  });
+
+  it('staged uci changes lost with the session: session_lost, not an empty apply', async () => {
+    const { ubus, uci } = client();
+    await uci.set('xvpn', 'main', { desktop_itest: '1' });
+    (ubus as unknown as { sid: string }).sid = 'ffffffffffffffffffffffffffffffff';
+    await expect(uci.apply()).rejects.toMatchObject({ code: 'session_lost' });
+    ubus.logout();
+  });
+
   it('logs in again when the session is gone', async () => {
     const { ubus, xvpn } = client();
     await xvpn.status();

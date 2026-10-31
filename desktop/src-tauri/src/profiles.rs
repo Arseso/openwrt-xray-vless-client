@@ -38,11 +38,12 @@ pub struct Profiles {
     session: Mutex<HashMap<String, String>>,
 }
 
-/// scheme://host[:port] of what the user typed; http:// when there is no scheme
+/// scheme://host[:port] of what the user typed (host in lower case, no default port);
+/// https:// when there is no scheme: the password goes over HTTP only when asked for
 pub fn normalize_url(s: &str) -> Result<String> {
     let s = s.trim().trim_end_matches('/');
     let s = s.strip_suffix("/ubus").unwrap_or(s);
-    let full = if s.contains("://") { s.to_string() } else { format!("http://{s}") };
+    let full = if s.contains("://") { s.to_string() } else { format!("https://{s}") };
     let u = reqwest::Url::parse(&full).map_err(|e| TransportError::new("invalid_url", format!("{s}: {e}")))?;
     if !matches!(u.scheme(), "http" | "https") {
         return Err(TransportError::new("invalid_url", format!("{s}: only http and https")));
@@ -102,7 +103,14 @@ impl Profiles {
         };
         let mut list = self.list.lock().unwrap();
         match list.iter_mut().find(|x| x.id == p.id) {
-            Some(x) => *x = p.clone(),
+            Some(x) => {
+                // another scheme, host or port is another certificate: the pin goes with
+                // the old address (both normalized: case, slash or :443 change nothing)
+                if x.url != p.url {
+                    p.fingerprint = None;
+                }
+                *x = p.clone()
+            }
             None => list.push(p.clone()),
         }
         self.write(&list)?;
@@ -144,7 +152,11 @@ impl Profiles {
             self.session.lock().unwrap().remove(id);
         } else {
             self.session.lock().unwrap().insert(id.to_string(), password.to_string());
-            forget_stored(id)?;
+            // "do not remember" is the way out when the credential store does not work:
+            // a stale stored password is only a leftover then, not an error
+            if let Err(e) = forget_stored(id) {
+                eprintln!("xvpn: cannot remove the stored password of {id}: {e}");
+            }
         }
         Ok(())
     }
@@ -195,7 +207,8 @@ mod tests {
 
     #[test]
     fn urls() {
-        assert_eq!(normalize_url("192.168.1.1").unwrap(), "http://192.168.1.1");
+        assert_eq!(normalize_url("192.168.1.1").unwrap(), "https://192.168.1.1");
+        assert_eq!(normalize_url("HTTPS://Router.LAN:443/").unwrap(), "https://router.lan");
         assert_eq!(normalize_url(" https://router.lan:8443/ ").unwrap(), "https://router.lan:8443");
         assert_eq!(normalize_url("http://10.0.0.1/ubus").unwrap(), "http://10.0.0.1");
         assert_eq!(normalize_url("http://10.0.0.1/cgi-bin/luci").unwrap(), "http://10.0.0.1");
@@ -219,12 +232,18 @@ mod tests {
         assert!(p.fingerprint.as_deref().unwrap().starts_with("AB:AB:"));
         // http: no pin kept
         let q = s
-            .save(Profile { id: "b".into(), name: "".into(), url: "10.0.0.1".into(), username: "u".into(), fingerprint: Some("x".into()) })
+            .save(Profile { id: "b".into(), name: "".into(), url: "http://10.0.0.1".into(), username: "u".into(), fingerprint: Some("x".into()) })
             .unwrap();
         assert_eq!(q.fingerprint, None);
         assert_eq!(q.name, "http://10.0.0.1");
+        // the same address written otherwise keeps the pin, another one drops it
+        let same = s.save(Profile { url: "HTTPS://192.168.1.1:443/".into(), ..p.clone() }).unwrap();
+        assert_eq!(same.fingerprint, p.fingerprint);
+        let moved = s.save(Profile { url: "https://192.168.1.2".into(), ..p.clone() }).unwrap();
+        assert_eq!(moved.fingerprint, None);
         let again = Profiles::load(dir.clone());
-        assert_eq!(again.list(), vec![p, q]);
+        assert_eq!(again.list(), s.list());
+        assert_eq!(again.list().len(), 2);
         again.delete("a").unwrap();
         assert_eq!(Profiles::load(dir.clone()).list().len(), 1);
         assert_eq!(again.get("a").unwrap_err().kind, "no_profile");
@@ -235,8 +254,9 @@ mod tests {
     fn password_for_this_run_only() {
         let dir = std::env::temp_dir().join(format!("xvpn-test-pw-{}", std::process::id()));
         let s = Profiles::load(dir);
-        // remember: false does not touch the keyring for reading (it may not run in CI)
-        s.session.lock().unwrap().insert("x".into(), "secret".into());
+        // works whether a credential store runs here or not (the docker build has none):
+        // remember: false must not fail on removing a stored one
+        s.set_password("x", "secret", false).unwrap();
         assert_eq!(s.password("x").unwrap(), "secret");
         assert!(s.has_password("x").unwrap());
     }

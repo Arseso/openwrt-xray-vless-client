@@ -29,7 +29,7 @@ trap 'exit 130' INT TERM
 # comes back as a tar on stdout.
 $DOCKER run --rm --init -v "$PWD/desktop:/src:ro" \
 	-v xvpn-desktop-cargo:/cache/cargo -v xvpn-desktop-npm:/cache/npm -v xvpn-desktop-target:/cache/target \
-	-e CARGO_BUILD_JOBS="$JOBS" -e MODE="$MODE" "$IMAGE" bash -euc '
+	-e CARGO_BUILD_JOBS="$JOBS" -e MODE="$MODE" "$IMAGE" bash -euo pipefail -c '
 	exec 3>&1 1>&2
 	mkdir -p /build && cd /src
 	tar -c --exclude=./node_modules --exclude=./dist --exclude=./src-tauri/target --exclude=./src-tauri/gen . | tar -x -C /build
@@ -41,6 +41,8 @@ $DOCKER run --rm --init -v "$PWD/desktop:/src:ro" \
 		cd src-tauri && cargo test --locked
 		exit 0
 	fi
+	# the target dir is a volume: no deb of an older version may come along
+	rm -rf "$CARGO_TARGET_DIR/release/bundle/deb"
 	npx tauri build --bundles deb -- --locked
 	cd "$CARGO_TARGET_DIR/release"
 	tar -c xvpn bundle/deb/*.deb >&3

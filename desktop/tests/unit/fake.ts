@@ -24,6 +24,11 @@ export class FakeRouter implements Transport {
   rpcDenied = true;
   private n = 0;
 
+  constructor() {
+    // rpcd: any live session may ask about itself
+    this.methods.set('session.access', () => ({ access: true }));
+  }
+
   on(name: string, fn: Method): this {
     this.methods.set(name, fn);
     return this;

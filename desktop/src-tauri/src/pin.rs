@@ -5,9 +5,11 @@
 //!
 //! Without a pin the handshake fails with Unknown and the fingerprint seen: the UI
 //! shows it, the user confirms, the profile stores it. A pin that does not match fails
-//! with Changed until the user explicitly trusts the new one.
+//! with Changed until the user explicitly trusts the new one. The PinFailure travels
+//! inside the TLS error of that very connection (CertificateError::Other), so
+//! concurrent requests each get their own.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::{verify_tls12_signature, verify_tls13_signature, CryptoProvider};
@@ -48,6 +50,25 @@ pub enum PinFailure {
     Changed { seen: String, pinned: String },
 }
 
+impl std::fmt::Display for PinFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PinFailure::Unknown { seen } => write!(f, "certificate {seen} is not pinned"),
+            PinFailure::Changed { seen, pinned } => write!(f, "certificate {seen} instead of the pinned {pinned}"),
+        }
+    }
+}
+
+impl std::error::Error for PinFailure {}
+
+/// the PinFailure inside a TLS error, if that is why the handshake failed
+pub fn failure_of(e: &rustls::Error) -> Option<&PinFailure> {
+    match e {
+        rustls::Error::InvalidCertificate(rustls::CertificateError::Other(o)) => o.0.downcast_ref::<PinFailure>(),
+        _ => None,
+    }
+}
+
 pub fn check(pinned: Option<&str>, seen: &str) -> Result<(), PinFailure> {
     match pinned {
         Some(p) if p == seen => Ok(()),
@@ -60,17 +81,11 @@ pub fn check(pinned: Option<&str>, seen: &str) -> Result<(), PinFailure> {
 pub struct PinVerifier {
     pinned: Option<String>,
     provider: Arc<CryptoProvider>,
-    /// the last failure, read by the transport after the request failed
-    failure: Mutex<Option<PinFailure>>,
 }
 
 impl PinVerifier {
     pub fn new(pinned: Option<String>, provider: Arc<CryptoProvider>) -> Self {
-        PinVerifier { pinned, provider, failure: Mutex::new(None) }
-    }
-
-    pub fn take_failure(&self) -> Option<PinFailure> {
-        self.failure.lock().unwrap().take()
+        PinVerifier { pinned, provider }
     }
 }
 
@@ -86,10 +101,7 @@ impl ServerCertVerifier for PinVerifier {
         let seen = fingerprint(end_entity.as_ref());
         match check(self.pinned.as_deref(), &seen) {
             Ok(()) => Ok(ServerCertVerified::assertion()),
-            Err(f) => {
-                *self.failure.lock().unwrap() = Some(f);
-                Err(rustls::Error::InvalidCertificate(rustls::CertificateError::ApplicationVerificationFailure))
-            }
+            Err(f) => Err(rustls::Error::InvalidCertificate(rustls::CertificateError::Other(rustls::OtherError(Arc::new(f))))),
         }
     }
 
@@ -149,9 +161,8 @@ mod tests {
     fn first_connection_reports_the_fingerprint() {
         let c = cert();
         let v = PinVerifier::new(None, provider());
-        assert!(verify(&v, &c).is_err());
-        assert_eq!(v.take_failure(), Some(PinFailure::Unknown { seen: fingerprint(c.as_ref()) }));
-        assert_eq!(v.take_failure(), None);
+        let e = verify(&v, &c).unwrap_err();
+        assert_eq!(failure_of(&e), Some(&PinFailure::Unknown { seen: fingerprint(c.as_ref()) }));
     }
 
     #[test]
@@ -159,7 +170,6 @@ mod tests {
         let c = cert();
         let v = PinVerifier::new(Some(fingerprint(c.as_ref())), provider());
         assert!(verify(&v, &c).is_ok());
-        assert_eq!(v.take_failure(), None);
     }
 
     #[test]
@@ -167,7 +177,10 @@ mod tests {
         let (old, new) = (cert(), cert());
         let pinned = fingerprint(old.as_ref());
         let v = PinVerifier::new(Some(pinned.clone()), provider());
-        assert!(verify(&v, &new).is_err());
-        assert_eq!(v.take_failure(), Some(PinFailure::Changed { seen: fingerprint(new.as_ref()), pinned }));
+        let e = verify(&v, &new).unwrap_err();
+        assert_eq!(failure_of(&e), Some(&PinFailure::Changed { seen: fingerprint(new.as_ref()), pinned }));
+        // each handshake carries its own: a check of the old certificate meanwhile passes
+        assert!(verify(&v, &old).is_ok());
+        assert!(failure_of(&e).is_some());
     }
 }

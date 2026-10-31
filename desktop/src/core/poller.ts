@@ -1,6 +1,7 @@
 // Shared poller of luci.xvpn status: one request every intervalMs for the whole app
 // (tabs, tray #78, notifications #80 listen to the bus instead of polling themselves).
-// Requests never overlap: the next one is scheduled after the answer.
+// Requests never overlap: the next one is scheduled after the answer. After stop()
+// nothing more reaches the bus, not even the answer of a request still on its way.
 //
 // Events (PollerEvents):
 //   status        every answer
@@ -41,6 +42,10 @@ export class StatusPoller {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private running = false;
   private inFlight: Promise<void> | null = null;
+  /** the poll refresh() asked for while one was running */
+  private again: Promise<void> | null = null;
+  /** bumped by stop(): a poll of an older epoch emits nothing */
+  private epoch = 0;
   private failures = 0;
   private downSince: number | null = null;
   private last: Status | null = null;
@@ -78,8 +83,11 @@ export class StatusPoller {
     void this.tick();
   }
 
+  /** a poll still running when stopped emits nothing (another profile may be on the bus) */
   stop(): void {
     this.running = false;
+    this.epoch++;
+    this.again = null;
     if (this.timer)
       clearTimeout(this.timer);
     this.timer = null;
@@ -93,14 +101,26 @@ export class StatusPoller {
     }
   }
 
-  /** polls now (after select, service...) and resolves with that poll; no overlap */
-  async refresh(): Promise<void> {
-    if (this.inFlight)
-      await this.inFlight;
-    if (this.timer)
-      clearTimeout(this.timer);
-    this.timer = null;
-    await this.tick();
+  /**
+   * polls now (after select, service...) and resolves with that poll. During a poll it
+   * waits for it and polls once more; any number of such calls share that one poll.
+   */
+  refresh(): Promise<void> {
+    if (!this.inFlight) {
+      if (this.timer)
+        clearTimeout(this.timer);
+      return this.tick();
+    }
+    if (!this.again) {
+      const epoch = this.epoch;
+      const again: Promise<void> = this.inFlight.then(() => {
+        if (this.again === again)
+          this.again = null;
+        return epoch === this.epoch ? this.tick() : undefined;
+      });
+      this.again = again;
+    }
+    return this.again;
   }
 
   private schedule(): void {
@@ -110,24 +130,29 @@ export class StatusPoller {
 
   private tick(): Promise<void> {
     this.timer = null;
-    const p = this.poll().finally(() => {
-      this.inFlight = null;
-      if (!this.timer)
+    const p: Promise<void> = this.poll(this.epoch).finally(() => {
+      if (this.inFlight === p)
+        this.inFlight = null;
+      // a refresh waiting for this poll starts the next one
+      if (!this.timer && !this.again)
         this.schedule();
     });
     this.inFlight = p;
     return p;
   }
 
-  private async poll(): Promise<void> {
+  private async poll(epoch: number): Promise<void> {
     let status: Status;
     try {
       status = await this.source.status();
     }
     catch (e) {
-      this.failed(toXvpnError(e));
+      if (epoch === this.epoch)
+        this.failed(toXvpnError(e));
       return;
     }
+    if (epoch !== this.epoch)
+      return;
     this.failures = 0;
     if (this.downSince !== null) {
       const downForMs = this.now() - this.downSince;

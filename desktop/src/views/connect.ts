@@ -102,7 +102,8 @@ export function mountConnect(el: HTMLElement, conn: Connection): () => void {
     const busy = ['connecting', 'offline'].includes(conn.state.get().phase);
     for (const p of profiles) {
       list.append(h('div', { class: 'profile' },
-        h('div', { class: 'profile-name' }, h('strong', {}, p.name), h('span', { class: 'muted' }, ` ${p.username}@${p.url}`)),
+        h('div', { class: 'profile-name' }, h('strong', {}, p.name), h('span', { class: 'muted' }, ` ${p.username}@${p.url}`),
+          p.url.startsWith('http://') ? h('span', { class: 'warn-text' }, ` · ${t('http_badge')}`) : null),
         h('div', { class: 'profile-actions' },
           h('button', { class: 'primary', disabled: busy, onclick: () => connect(p) }, t('connect')),
           h('button', { disabled: busy, onclick: () => { editing = p; editingNew = false; render(); } }, t('edit')),
@@ -124,7 +125,7 @@ export function mountConnect(el: HTMLElement, conn: Connection): () => void {
       form.append(h('button', {
         onclick: async () => {
           const gw = await defaultGateway().catch(() => null);
-          editing = { id: newProfileId(), name: t('default_name'), url: `http://${gw ?? '192.168.1.1'}`, username: 'root' };
+          editing = { id: newProfileId(), name: t('default_name'), url: `https://${gw ?? '192.168.1.1'}`, username: 'root' };
           editingNew = true;
           render();
         },
@@ -133,7 +134,14 @@ export function mountConnect(el: HTMLElement, conn: Connection): () => void {
     }
     const p = editing;
     const name = h('input', { value: p.name, required: true });
-    const url = h('input', { value: p.url, required: true, placeholder: 'http://192.168.1.1' });
+    // the password goes to whoever answers at this address: over HTTP in the clear
+    const httpWarn = h('small', { class: 'warn-text' }, t('http_warning'));
+    const isHttp = () => /^http:\/\//i.test(url.value.trim());
+    const url = h('input', {
+      value: p.url, required: true, placeholder: 'https://192.168.1.1',
+      oninput: () => { httpWarn.hidden = !isHttp(); },
+    });
+    httpWarn.hidden = !isHttp();
     const user = h('input', { value: p.username, required: true, autocomplete: 'username' });
     const pass = h('input', { type: 'password', autocomplete: 'current-password', placeholder: editingNew ? '' : t('password_keep') });
     if (!editingNew)
@@ -143,9 +151,8 @@ export function mountConnect(el: HTMLElement, conn: Connection): () => void {
       ev.preventDefault();
       notice = null;
       try {
-        // a new address is another certificate: the pin goes with the old one
-        const fingerprint = url.value.trim() === p.url ? p.fingerprint : null;
-        const saved = await saveProfile({ ...p, name: name.value.trim(), url: url.value.trim(), username: user.value.trim(), fingerprint });
+        // the pin is dropped by Rust when scheme, host or port change (profiles.rs)
+        const saved = await saveProfile({ ...p, name: name.value.trim(), url: url.value.trim(), username: user.value.trim() });
         if (pass.value)
           await setPassword(saved.id, pass.value, remember.checked);
         editing = null;
@@ -160,7 +167,7 @@ export function mountConnect(el: HTMLElement, conn: Connection): () => void {
     form.append(h('form', { class: 'card profile-form', onsubmit: submit },
       h('h3', {}, t('edit_title')),
       h('label', {}, t('name'), name),
-      h('label', {}, t('url'), url, h('small', { class: 'muted' }, t('url_hint'))),
+      h('label', {}, t('url'), url, h('small', { class: 'muted' }, t('url_hint')), httpWarn),
       h('label', {}, t('username'), user),
       h('label', {}, t('password'), pass),
       h('label', { class: 'check' }, remember, ' ', t('remember')),

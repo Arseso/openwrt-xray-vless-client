@@ -70,6 +70,52 @@ describe('Connection', () => {
     conn.disconnect();
   });
 
+  it('switching profiles: a late answer of the old router does not touch the new one', async () => {
+    const a = router(), b = router();
+    const conn = new Connection({ transport: (p) => (p.id === 'a' ? a : b), intervalMs: 1000 });
+    await conn.connect({ ...profile, id: 'a' });
+    await vi.advanceTimersByTimeAsync(0);
+    // router A hangs on the next status and fails much later
+    let failA!: (e: unknown) => void;
+    a.request = () => new Promise((_, rej) => { failA = rej; });
+    await vi.advanceTimersByTimeAsync(1000);
+    await conn.connect({ ...profile, id: 'b' });
+    const seen: string[] = [];
+    conn.bus.on('router-down', () => seen.push('down'));
+    conn.bus.on('poll-error', () => seen.push('error'));
+    failA(new XvpnError('timeout'));
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(seen).toEqual([]);
+    expect(conn.state.get()).toMatchObject({ phase: 'online', profile: { id: 'b' } });
+    conn.disconnect();
+  });
+
+  it('a password changed on the router while polling: failed, no login every interval', async () => {
+    const r = router();
+    const conn = new Connection({ transport: () => r, intervalMs: 1000 });
+    await conn.connect(profile);
+    await vi.advanceTimersByTimeAsync(0);
+    r.password = 'changed';
+    r.expireSessions();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(conn.state.get()).toMatchObject({ phase: 'failed', error: { code: 'wrong_password' } });
+    expect(conn.context).toBeNull();
+    const logins = r.logins;
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(r.logins).toBe(logins);
+  });
+
+  it('disconnect during the pause before a retry resolves connect()', async () => {
+    const r = router();
+    r.failures.push(new XvpnError('unreachable'));
+    const conn = new Connection({ transport: () => r, retryMs: 60_000 });
+    const p = conn.connect(profile);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(conn.state.get().phase).toBe('offline');
+    conn.disconnect();
+    await expect(p).resolves.toMatchObject({ phase: 'disconnected' });
+  });
+
   it('an old package fails with a clear code', async () => {
     const r = new FakeRouter().on('luci.xvpn.status', () => STATUS_UP);
     r.denied.add('luci.xvpn.version');
