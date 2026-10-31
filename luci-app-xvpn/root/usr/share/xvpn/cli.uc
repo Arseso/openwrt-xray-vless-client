@@ -13,7 +13,7 @@ import {
 	FW_WANT_FILE, FW_MODE_FILE, FW_ERROR_FILE, FW_WARN_FILE, FW_LOCK_FILE, GENERATE_ERROR_FILE, STALE_FILE
 } from 'xvpn.util';
 import { all_servers, update, prune, list_change } from 'xvpn.subscription';
-import { build_index, generate, ports_error } from 'xvpn.xrayconf';
+import { build_index, generate, ports_error, config_key } from 'xvpn.xrayconf';
 import { host_env } from 'xvpn.host';
 import { resolve, apply, remove, fix_ifnames, ifnames_applied } from 'xvpn.firewall';
 import { direct_nets, direct_domains, update_lists, prune_lists } from 'xvpn.split';
@@ -267,7 +267,14 @@ case 'generate': {
 	// midway changes nothing
 	let next = `${VAR_DIR}/config.new.json`, tmp = `${VAR_DIR}/check.json`;	// xray goes by the extension
 	mkdir_p(VAR_DIR);
-	write_json(next, generate(cfg, servers, idx));
+	let conf = generate(cfg, servers, idx);
+	write_json(next, conf);
+	// procd restarts xray when the key changes (init.d), not for another active server: the
+	// daemon switches those without a restart (#13)
+	let key = `${VAR_DIR}/config.key`;
+	write_file(key, config_key(conf));
+	idx.xray_key = split(run(`md5sum ${shq(key)}`).out, ' ')[0];
+	unlink(key);
 
 	// the verdicts got so far are kept whatever the end: they are xray's own
 	function keep(passed) {

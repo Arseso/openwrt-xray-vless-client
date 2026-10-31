@@ -40,11 +40,11 @@ function check_config(xray, path, lenient) {
 			break;
 		}
 		let err = match(out, /Failed to start: [^\n]*/)?.[0] ?? out;
-		let tag = match(err, /outbound config with tag (srv-[0-9]+)/)?.[1];
+		let tag = match(err, /outbound config with tag (srv-[0-9]+\.)/)?.[1];
 		if (!lenient || !tag || !forbidden(err))
 			fail(`${path}: xray rejects the config: ${err}`);
 		print(`${path}: dropped ${tag}: ${err}\n`);
-		let i = substr(tag, 4);
+		let i = substr(tag, 4, length(tag) - 5);
 		conf.outbounds = filter(conf.outbounds, (o) => o.tag != tag);
 		conf.inbounds = filter(conf.inbounds, (o) => o.tag != `test-${i}`);
 		conf.routing.rules = filter(conf.routing.rules, (r) => r.outboundTag != tag && !(`test-${i}` in (r.inboundTag ?? [])));

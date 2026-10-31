@@ -30,7 +30,7 @@ VPN-клиент для OpenWrt 24.10 на [xray-core](https://github.com/XTLS/X
 - OpenWrt **24.10** (тестируется на 24.10.4).
 - Зависимости (ставятся `opkg` из штатных фидов автоматически): `luci-base`, `xray-core`, `curl`,
   `kmod-nft-tproxy`, `kmod-nft-socket`, `kmod-nft-bridge`, `ucode`, `ucode-mod-fs`,
-  `ucode-mod-uci`, `ucode-mod-ubus`, `ucode-mod-uloop`.
+  `ucode-mod-uci`, `ucode-mod-ubus`, `ucode-mod-uloop`, `ucode-mod-socket`.
 - Флеш: `xray-core` 25.1.30 — ipk около 9.8 МБ, на флеше около 25 МБ; остальное — мелочь.
   Geo-файлы (`v2ray-geoip`/`v2ray-geosite`) не нужны.
 - ОЗУ: xray — Go-процесс с заметным потреблением памяти. На 256 МБ работает, но запас небольшой,
@@ -215,6 +215,7 @@ ICMP) отклоняется.
 |-------|--------------|----------|
 | Check URL (`health.url`) | `https://www.gstatic.com/generate_204` | HTTP-проверка через сервер; время до первого байта — пинг |
 | Second check URL (`health.url2`) | `https://cp.cloudflare.com/generate_204` | открывается через сервер при тесте всех серверов и выборе; не открылся — сервер «limited», см. ниже; `off` — выключить |
+| Download check URL (`health.dl_url`) | `https://speed.cloudflare.com/__down?bytes=65536` | раз в 5 мин скачивается через активный сервер; не скачался за 15 с (DPI «замораживает» поток) — неудачная проверка; `off` — выключить |
 | Check interval (`health.interval`) | `30` | с, проверка активного сервера (5–3600, больше таймаута) |
 | Timeout (`health.timeout`) | `5` | с, таймаут одной проверки (1–60) |
 | Failures before switching (`health.fail_threshold`) | `3` | неудач подряд до переключения |
@@ -229,6 +230,7 @@ ICMP) отклоняется.
 | Sniffing (`main.sniffing`) | `1` | подменять IP на домен из HTTP/TLS/QUIC: многие серверы не пускают к IP |
 | Block BitTorrent (`main.block_bittorrent`) | `0` | BitTorrent клиентов (рукопожатие по TCP и uTP) — в blackhole: торрент-клиент открывает тысячи сессий |
 | TPROXY, DNS, API port (`main.tproxy_port`, `dns_port`, `api_port`) | `12345`, `10853`, `10085` | разные и вне диапазона тестовых портов |
+| Control port (`main.control_port`) | `10086` | на 127.0.0.1: API xray по TCP (переключение сервера без рестарта) и UDP-проверка по UDP |
 | First test port (`main.test_port_base`) | `20000` | SOCKS-порт для проверки каждого сервера: этот и следующие, по одному на сервер |
 | Client mark, TPROXY mark (`main.client_mark`, `tproxy_mark`) | `0x01000000`, `0x02000000` | метки firewall в hex, ненулевые, без общих битов; не пересекаться с mwan3 (`0x3f00`) и pbr (`0x00ff0000`) |
 | Routing table (`main.route_table`) | `100` | таблица для TPROXY-метки; не 253–255 |
@@ -281,7 +283,7 @@ URL не открылся через первые три живых сервер
 списка, даже со снятым флажком. После синхронизации демон выберет сервер из автоподбора.
 
 Флажки хранятся в UCI как `list xvpn.health.no_auto '<id сервера>'`. Смена флажка не
-перезапускает демон, а xray перезапускается, только если демон переключает сервер. id сервера
+перезапускает ни демон, ни xray. id сервера
 не меняется при ротации хостов подписки
 ([#49](https://github.com/Arseso/openwrt-xray-vless-client/issues/49)), но меняется, если
 провайдер переименует сервер: тогда флажок нужно снять заново. Флажок сервера, которого больше
@@ -408,9 +410,14 @@ echo /usr/local/bin/xray >> /etc/sysupgrade.conf   # чтобы sysupgrade ег�
   после `fw4 flush` их возвращает include.
 - **Failover в демоне.** Каждый сервер — отдельный outbound xray со своим тестовым SOCKS-портом.
   Демон `xvpnd` каждые 30 с проверяет активный сервер HTTP-пингом
-  (`https://www.gstatic.com/generate_204`); после 3 неудач подряд проверяет прямой интернет и, если
-  он есть, отправляет сервер в карантин и переходит на сервер с минимальным пингом. Переключение —
-  перегенерация конфига и перезапуск xray (около секунды, соединения клиентов рвутся).
+  (`https://www.gstatic.com/generate_204`), DoH-запросом к DNS клиентов и UDP через него, раз в
+  5 мин — скачиванием 64 КБ (DPI, который «замораживает» поток после первых КБ). После 3 неудач
+  подряд проверяет прямой интернет по трём URL и, если ответил хотя бы один, отправляет сервер в
+  карантин и переходит на сервер с минимальным пингом. Если DNS или скачивание не проходят и через
+  другой сервер, и напрямую, сервер не виноват: состояние `degraded`, без переключения. Переключение
+  идёт без перезапуска xray (балансировщик и `xray api bo`): открытые соединения клиентов остаются
+  на старом сервере, новые идут через новый. Если UDP через сервер не проходит, на вкладке
+  «Статус» показывается предупреждение.
 - **Kill switch.** Правила не снимаются при падении xray, рестарте и upgrade; при загрузке
   клиентов блокирует `xvpn-guard` ещё до fw4 и сети. Если nft не принял правила, они при любом
   значении `killswitch` откатываются на `block` (клиенты VPN без интернета), а если не принят и он —
@@ -463,14 +470,11 @@ echo /usr/local/bin/xray >> /etc/sysupgrade.conf   # чтобы sysupgrade ег�
   без домена (игры, VoIP по IP, прочий UDP) через такие серверы не пройдёт; DNS с `dns_hijack=0` — тоже.
 - **Локальные имена.** DNS клиентов VPN уходит на один `dns_server` через туннель — имена `*.lan`
   у них не резолвятся.
-- **Смена сервера рвёт все соединения** клиентов ([#13](https://github.com/Arseso/openwrt-xray-vless-client/issues/13)).
 - **xray 25.1.30 из фида:** нет VLESS `encryption` (ML-KEM), hysteria2, tuic; транспорты `h2` и
   `quic` пропускаются. Другой бинарь — `xvpn.main.xray_bin`, см. [Другая версия xray](#другая-версия-xray).
 - Подписки в форматах Clash YAML и sing-box JSON не поддерживаются — смените `user_agent` ([#36](https://github.com/Arseso/openwrt-xray-vless-client/issues/36)).
 - Прочие известные проблемы — в [issues](https://github.com/Arseso/openwrt-xray-vless-client/issues):
   - флаг `reloading` может зависнуть и остановить health-check ([#6](https://github.com/Arseso/openwrt-xray-vless-client/issues/6), PR [#46](https://github.com/Arseso/openwrt-xray-vless-client/pull/46));
-  - health-check не замечает DPI-деградацию и ложно уходит в `wan_down` ([#11](https://github.com/Arseso/openwrt-xray-vless-client/issues/11));
-  - DNS клиентов зависит от UDP через сервер, а health-check этого не видит ([#10](https://github.com/Arseso/openwrt-xray-vless-client/issues/10));
   - адреса серверов резолвит системный DNS — подмена у провайдера ломает подключение ([#16](https://github.com/Arseso/openwrt-xray-vless-client/issues/16));
   - нет настройки policy xray под UDP-нагрузку, например торренты ([#15](https://github.com/Arseso/openwrt-xray-vless-client/issues/15));
   - большие подписки замедляют старт и раздувают конфиг ([#8](https://github.com/Arseso/openwrt-xray-vless-client/issues/8)).
@@ -488,9 +492,9 @@ ubus call xvpn status
 | `starting` | демон только запущен, проверки ещё не было |
 | `waiting_time` | ждём, пока NTP выставит часы (до 2 минут после загрузки), активный сервер не отвечает: серверы не уходят в карантин, подписки не обновляются |
 | `connected` | активный сервер отвечает |
-| `degraded` | были неудачные проверки, порог для переключения не достигнут |
+| `degraded` | были неудачные проверки, порог для переключения не достигнут; или DNS либо скачивание не проходят ни через другой сервер, ни напрямую (не вина сервера, причина в `last_error`) |
 | `failover` | активный в карантине, идёт тест всех и переход |
-| `wan_down` | нет прямого интернета, серверы не трогаем |
+| `wan_down` | нет прямого интернета (не ответил ни один из `health.wan_url`), серверы не трогаем |
 | `no_servers` | серверов нет (тогда xray не запускается) или ни один не отвечает (xray при этом работает); тест всех повторяется с растущей паузой 30 с → 1 → 2 → 4 → 8 → 10 мин, время следующего — `retry` в `status` и «Next test of all servers» в LuCI |
 | `xray_down` | не работает сам xray (упал, завис, битый конфиг или бинарь); причина и последние строки его лога — в `last_error`, демон сам перезапускает xray (`xray_restarts`) |
 | `error` | правила не применились: nft их не принял (клиенты VPN заблокированы, режим `block` или `minimal`) или у выбранного SSID нет имени интерфейса (`access points not found` — клиенты заблокированы, а при запрошенном `passthrough` идут напрямую) |

@@ -21,7 +21,7 @@ $DOCKER run --rm --cap-add NET_ADMIN -v "$PWD:/src:ro" -e XRAY_REJECT="${XRAY_RE
 	n=0; until opkg update >/dev/null; do
 		n=$((n + 1)); [ $n -lt 5 ] || { echo "opkg update failed 5 times"; exit 1; }; sleep 5
 	done
-	n=0; until opkg install ucode-mod-uloop xray-core kmod-nft-tproxy >/dev/null 2>&1 || opkg install ucode-mod-uloop xray-core >/dev/null; do
+	n=0; until opkg install ucode-mod-uloop ucode-mod-socket xray-core kmod-nft-tproxy >/dev/null 2>&1 || opkg install ucode-mod-uloop ucode-mod-socket xray-core >/dev/null; do
 		n=$((n + 1)); [ $n -lt 5 ] || { echo "opkg install failed 5 times"; exit 1; }; sleep 5
 	done
 	ucode -L "/src/luci-app-xvpn/root/usr/share/ucode/*.uc" /src/tests/run.uc /src/tests/fixtures /tmp/out

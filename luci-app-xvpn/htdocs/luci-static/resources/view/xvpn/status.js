@@ -365,6 +365,9 @@ return view.extend({
 				(up && active) ? [ _('Latency'), (lat == null) ? '—' : (lat < 0)
 					? [ label('error', _('failed')), ' ', txt(ago(now, active.tested)) ]
 					: [ txt(_('%d ms').format(lat) + ', ' + ago(now, active.tested)), ...((active.limited && lat >= 0) ? [ ' ', limited(status.url2) ] : []) ] ] : null,
+				// #10: names resolve over DoH, but QUIC, calls and games of the clients need UDP
+				(up && active && status.udp === false) ? [ _('UDP'), [ label('warning', _('does not pass')), ' ',
+					txt(_('UDP does not pass through this server: QUIC, voice calls and games of the clients may not work.')) ] ] : null,
 				(up && active && status.since) ? [ sinceTitle, txt(dur(now - status.since)) ] : null,
 				(up && status.fails > 0) ? [ _('Failed checks in a row'), txt(String(status.fails)) ] : null,
 				sw ? [ _('Last switch'), txt(

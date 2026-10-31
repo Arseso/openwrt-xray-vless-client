@@ -14,6 +14,7 @@ import {
 	no_auto_ids, set_no_auto, retry_delay, auto_pick, MANUAL_FILE, ETC_DIR, RUN_DIR, CONFIG_FILE, INDEX_FILE, ACTIVE_FILE, STATE_FILE, FW_ERROR_FILE, GENERATE_ERROR_FILE, STALE_FILE
 } from 'xvpn.util';
 import { due_in } from 'xvpn.subscription';
+import { dns_via_module, set_active } from 'xvpn.xrayconf';
 import { lists_due_in } from 'xvpn.split';
 
 const CLI = '/usr/share/xvpn/cli.uc';
@@ -34,6 +35,14 @@ const TIME_FLAG = `${RUN_DIR}/time_synced`;	// hotplug.d/ntp/50-xvpn: sysntpd ha
 const TIME_UNTIL = `${RUN_DIR}/time_wait`;	// end of the wait (monotonic): restarts do not wait again
 const URL2 = (H.url2 && H.url2 != H.url) ? H.url2 : null;	// see limited_check()
 const URL2_CDN = H.url2_cdn;	// live servers in a row that fail url2 before any passes it: ask it directly
+// DNS of the clients (#10): https:// is asked with a DoH request through the test port, an IP
+// over UDP (udpcheck.uc); tcp:// is not checked. The UDP check also runs in DoH mode: UDP of
+// the clients (QUIC, calls, games) through the server, a warning only (status udp)
+const DNS = cfg.access.dns_server;
+const DOH = H.dns_check && dns_via_module(cfg) && match(DNS, /^https:/) ? DNS : null;
+const UDP_DNS = H.dns_check && !dns_via_module(cfg);
+// RFC 8484 GET: A of www.gstatic.com, ID 0
+const DOH_QUERY = replace(replace(replace(b64enc('\x00\x00\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x03www\x07gstatic\x03com\x00\x00\x01\x00\x01'), '+', '-'), '/', '_'), '=', '');
 
 let index = { servers: [] }, index_raw = null;
 let prev = read_json(STATE_FILE) ?? {};
@@ -68,10 +77,16 @@ let st = {
 	dead: null,	// no live servers: { delay, next } (monotonic) of the next test of all, see check()
 	subs_force: false,	// the first update at start, see auto_update()
 	lists_updating: false,	// `cli.uc lists` runs (split tunneling, #67)
+	udp: null,	// UDP passes through the active server (#10); null: not checked yet
+	dl_at: null,	// the last download (#11) through the active server that went through (monotonic)
+	dl_failing: false,	// the last one stalled: tried again at every check
+	streak: 0,	// failed checks in a row: counts up when one passes, see failed()
 };
 let test_waiters = [], testq = null, test_resume = null, test_abort = null;
 let timers = {}, settling = false, reload = null;
 let probe_seq = 0;
+let deep = null;	// deep_check() running: { at } (monotonic)
+let bo = null;	// `xray api bo` running: { again }, see apply_active()
 let no_auto_sig = null, no_auto_set = {};
 let conn;
 // ucode does not hoist functions: these call each other in a cycle, defined below
@@ -224,6 +239,63 @@ function probe(port, cb, url) {
 		let ok = (code == 0 && (http == 204 || http == 200));
 		cb(ok ? int(+r[1] * 1000) : -1, code);
 	});
+}
+
+// curl with -w fmt through a SOCKS test port (directly when port is null): cb(code, fields),
+// code is the curl exit code (-1: curl did not start), fields what -w wrote.
+function curl_w(port, url, max_time, fmt, extra, cb) {
+	let out = `${RUN_DIR}/probe-${++probe_seq}`;
+	let cmd = sprintf("/usr/bin/curl -s -o /dev/null --connect-timeout %d --max-time %d -w %s %s %s %s > %s 2>/dev/null",
+		H.timeout, max_time, shq(fmt), extra, port ? `-x socks5h://127.0.0.1:${port}` : '', shq(url), shq(out));
+	spawn('/bin/sh', [ '-c', cmd ], (code) => {
+		let r = (code < 0) ? [] : split(trim(readfile(out) ?? ''), ' ');
+		unlink(out);
+		cb(code, r);
+	});
+}
+
+// The DoH server of the clients answers through port (directly when null): cb(ok, code, http).
+function doh_probe(port, cb) {
+	let url = `${DOH}${match(DOH, /\?/) ? '&' : '?'}dns=${DOH_QUERY}`;
+	curl_w(port, url, H.timeout, '%{http_code}', "-H 'accept: application/dns-message'", (code, r) =>
+		cb(code == 0 && int(r[0]) == 200, code, int(r[0] ?? 0)));
+}
+
+// A DNS query over UDP to host:port answers in time: cb(ok), null when the check did not start.
+function udp_probe(host, port, cb) {
+	spawn('/usr/bin/ucode', [ '/usr/share/xvpn/udpcheck.uc', host, `${port}`, `${min(H.timeout, 3)}` ],
+		(code) => cb(code < 0 ? null : code == 0));
+}
+
+// health.dl_url downloads in full within dl_timeout (#11): DPI that lets the handshake
+// through and freezes the stream after the first KB, or slows it down to a crawl.
+// cb(ok, why), ok null when curl did not start.
+function dl_probe(port, cb) {
+	curl_w(port, H.dl_url, H.dl_timeout, '%{http_code} %{size_download}', '', (code, r) => {
+		if (code < 0)
+			return cb(null);
+		let http = int(r[0]), kb = int(+(r[1] ?? 0) / 1024);
+		if (code == 0 && http == 200)
+			return cb(true);
+		cb(false, code == 28 ? `stalls after ${kb} KB (${H.dl_timeout} s)` : (code ? `fails (curl ${code}, ${kb} KB)` : `fails (HTTP ${http})`));
+	});
+}
+
+// Direct internet (#11): up when one of health.wan_url answers, so a blocked or broken
+// one is no wan_down. cb(up), up null when no curl started.
+function wan_probe(cb) {
+	let left = length(H.wan_url), up = false, ran = false;
+	for (let url in H.wan_url)
+		probe(null, (ms, code) => {
+			if (code >= 0)
+				ran = true;
+			if (ms >= 0 && !up) {
+				up = true;
+				cb(true);
+			}
+			if (--left == 0 && !up)
+				cb(ran ? false : null);
+		}, url);
 }
 
 // Monotonic: grace and retries must not jump with the clock set by NTP at boot.
@@ -881,6 +953,57 @@ reindex = function(notified) {
 	settle();
 };
 
+// The config and the index of the running xray point at the server it switched to: for the
+// next start of xray (respawn, a restart of its key) and of the daemon. Not when a reload or
+// update wrote another index meanwhile: generate took the choice from ACTIVE_FILE.
+function save_active(e) {
+	if (readfile(INDEX_FILE) !== index_raw)
+		return;
+	let conf = read_json(CONFIG_FILE);
+	if (!conf)
+		return;
+	set_active(conf, e.tag);
+	write_json(CONFIG_FILE, conf);
+	index.active = e.id;
+	index.moved_from = null;
+	write_json(INDEX_FILE, index);
+	index_raw = readfile(INDEX_FILE);
+}
+
+// The clients go to the active server (#13): `xray api bo` points the balancer of the running
+// xray at it, no restart, the connections open now go on through the old one. When xray does
+// not run the config of the index (a reload going on or failed, an update not applied, an
+// index from before #13 without the control port) or the call fails: a reload as before.
+// One call at a time: a switch meanwhile is applied once it ends.
+function apply_active() {
+	if (bo) {
+		bo.again = true;
+		return;
+	}
+	let e = server(st.active), port = index.ports?.control, inst = xray_instance();
+	if (!e || !port || !inst?.running || st.reloading || st.reload_pending || st.reload_error
+			|| access(STALE_FILE) || readfile(INDEX_FILE) !== index_raw)
+		return reload_service();
+	let me = bo = { again: false, killed: false }, t;
+	let p = spawn('/bin/sh', [ '-c', `exec ${shq(cfg.main.xray_bin)} api bo -s 127.0.0.1:${port} -t 3 -b active ${shq(e.tag)} >/dev/null 2>&1` ], (code) => {
+		t?.cancel();
+		bo = null;
+		// uloop.process reports a killed process as exit code 0
+		if (code != 0 || me.killed) {
+			log(`cannot switch xray to "${e.name}" without a restart (xray api bo: ${me.killed ? 'hung' : (code < 0 ? 'cannot start' : `exit ${code}`)}), reloading`);
+			return reload_service();
+		}
+		save_active(e);
+		if (me.again || st.active != e.id)
+			apply_active();
+	});
+	if (p)
+		t = uloop.timer(6000, () => {
+			me.killed = true;
+			system([ '/bin/kill', '-9', `${p.pid()}` ]);
+		});
+}
+
 function switch_to(id, reason, manual) {
 	let e = server(id);
 	if (!e)
@@ -891,6 +1014,9 @@ function switch_to(id, reason, manual) {
 	st.since = time();
 	st.fails = 0;
 	st.switches++;
+	st.udp = st.dl_at = null;	// the new one is checked at once
+	st.dl_failing = false;
+	deep = null;	// those of the old one do not hold up its checks
 	// a newer choice wins over decisions put off (#70): the choice by hand, or one of two
 	// choose_best() waiting for the same test of all, whose sibling switched first
 	st.xray_choose = st.choose_pending = null;
@@ -905,7 +1031,8 @@ function switch_to(id, reason, manual) {
 		unlink(MANUAL_FILE);
 	save();
 	set_state('connected', null);
-	reload_service();
+	set_passthrough(false);
+	apply_active();
 	return true;
 }
 
@@ -1016,13 +1143,119 @@ function failover(reason) {
 	choose_best(reason);
 }
 
+// After health.url answers through the active server: the DNS of the clients through it (#10),
+// its UDP (status udp, a warning unless the DNS of the clients is an IP: then it is their DNS)
+// and every dl_interval a download (#11; at every check while it fails). cb(kind, why): kind
+// null when they pass, 'dns' or 'dl'.
+function deep_check(e, cb) {
+	let me = deep = { at: now() };
+	function end(kind, why) {
+		if (deep === me)
+			deep = null;
+		cb(kind, why);
+	}
+	function dl() {
+		if (!H.dl_url || (!st.dl_failing && st.dl_at != null && now() - st.dl_at < H.dl_interval))
+			return end(null);
+		dl_probe(e.test_port, (ok, why) => {
+			if (ok == null || st.active != e.id)
+				return end(null);
+			st.dl_failing = !ok;
+			if (!ok)
+				return end('dl', `${H.dl_url} ${why} through it`);
+			st.dl_at = now();
+			end(null);
+		});
+	}
+	function udp(next) {
+		let port = index.ports?.control;
+		if (!H.dns_check || !port)
+			return next(null);
+		udp_probe('127.0.0.1', port, (ok) => {
+			if (ok != null && st.active == e.id) {
+				if (ok != st.udp && (ok || st.udp != null))
+					log(ok ? `UDP passes through "${e.name}" again` : `UDP does not pass through "${e.name}": QUIC, calls and games of the clients fail`);
+				st.udp = ok;
+			}
+			next(ok);
+		});
+	}
+	if (DOH)
+		return doh_probe(e.test_port, (ok, code, http) => {
+			if (code >= 0 && !ok)
+				return end('dns', `DNS ${DOH} fails through it (${code ? `curl ${code}` : `HTTP ${http}`})`);
+			udp(() => dl());
+		});
+	udp((ok) => (UDP_DNS && ok === false) ? end('dns', `DNS ${DNS} over UDP fails through it`) : dl());
+}
+
+// The fastest live server but e, for elsewhere_ok(); null when there is none.
+function other(e) {
+	let q = { [e.id]: true };
+	for (let s in index.servers)
+		if (quarantined(s.id))
+			q[s.id] = true;
+	let p = auto_pick(index.servers, st.latency, no_auto(), q, st.limited);
+	return (p && p.server.id != e.id && (st.latency[p.server.id]?.ms ?? -1) >= 0) ? p.server : null;
+}
+
+// What failed through the active server (deep_check()) passes elsewhere: through the fastest
+// other server, else directly (a DoH server may be blocked directly but not through the
+// tunnel, so the other server comes first; UDP has no test port of its own: directly only).
+// cb(ok), null when no check started.
+function elsewhere_ok(kind, e, cb) {
+	let o = (kind == 'dl' || DOH) ? other(e) : null;
+	let check = (port, f) => (kind == 'dl')
+		? dl_probe(port, (ok) => f(ok))
+		: doh_probe(port, (ok, code) => f(code < 0 ? null : ok));
+	if (kind == 'dns' && !DOH)
+		return udp_probe(DNS, 53, cb);
+	if (!o)
+		return check(null, cb);
+	check(o.test_port, (ok) => ok ? cb(true) : check(null, (dok) => cb(dok ?? ok)));
+}
+
 // The active server answers.
 function up(e, ms) {
 	st.latency[e.id] = { ms, at: time() };
 	xray_up();
 	st.fails = 0;
+	st.streak++;
 	set_passthrough(false);
 	set_state('connected', null);
+}
+
+// A failed check of the active server: kind null (health.url does not answer), 'dns' or 'dl'
+// (see deep_check()). fail_threshold in a row: failover, unless the internet is down (none of
+// health.wan_url answers directly, #11) or what failed fails elsewhere too: a DNS server or a
+// CDN down, not the server's fault, another one would fail the same.
+function failed(e, gen, kind, why) {
+	st.fails++;
+	// no live servers: the pause was the wait, straight to failover
+	if (st.fails < H.fail_threshold && st.state != 'no_servers')
+		return set_state('degraded', `${st.fails} failed checks${why ? `: ${why}` : ''}`);
+	// a check passed meanwhile, even if the next one failed again: this verdict is old
+	let streak = st.streak, stale = () => !valid(gen) || st.active != e.id || st.streak != streak;
+	wan_probe((wan) => {
+		if (stale() || wan == null)
+			return;
+		if (!wan)
+			return set_state('wan_down', 'no direct internet access');
+		if (!kind)
+			return failover(`"${e.name}" is down`);
+		elsewhere_ok(kind, e, (ok) => {
+			if (stale() || ok == null)
+				return;
+			if (ok)
+				return failover(`"${e.name}": ${why}`);
+			// not the server: the download waits dl_interval again, not every check
+			if (kind == 'dl') {
+				st.dl_failing = false;
+				st.dl_at = now();
+			}
+			set_state('degraded', `${why}, and through another server and directly too: not the server's fault`);
+		});
+	});
 }
 
 check = function() {
@@ -1095,11 +1328,24 @@ check = function() {
 	// a failed reload: the active one is then what xray runs, not what was chosen (reload_failed())
 	if (off && !st.reload_error && !st.reload_pending)
 		return choose_best(`"${e.name}" is excluded from auto selection`);
+	// the DNS, UDP and download checks of the last one still run: it counts, not this one
+	if (deep && now() - deep.at < 60)
+		return;
 	probe(e.test_port, (ms, code) => {
 		if (!valid(gen) || st.active != e.id || code < 0)
 			return;
+		if (ms >= 0 && deep)
+			return;	// a probe of the last check started them meanwhile
 		if (ms >= 0)
-			return up(e, ms);
+			return deep_check(e, (kind, why) => {
+				if (!valid(gen) || st.active != e.id)
+					return;
+				if (!kind)
+					return up(e, ms);
+				st.latency[e.id] = { ms, at: time() };
+				xray_up();	// health.url went through it
+				failed(e, gen, kind, why);
+			});
 		xray_check(code, (problem, inst) => {
 			if (!valid(gen) || st.active != e.id || problem == XRAY_UNKNOWN)
 				return;
@@ -1107,20 +1353,7 @@ check = function() {
 				return xray_down(problem, inst);
 			xray_up();
 			st.latency[e.id] = { ms, at: time() };
-			st.fails++;
-			// no live servers: the pause was the wait, straight to failover
-			if (st.fails < H.fail_threshold && st.state != 'no_servers') {
-				set_state('degraded', `${st.fails} failed checks`);
-				return;
-			}
-			probe(null, (dms, dcode) => {
-				if (!valid(gen) || st.active != e.id || dcode < 0)
-					return;
-				if (dms < 0)
-					set_state('wan_down', 'no direct internet access');
-				else
-					failover(`"${e.name}" is down`);
-			});
+			failed(e, gen, null, null);
 		});
 	});
 };
@@ -1206,6 +1439,8 @@ function status() {
 		lists_updating: st.lists_updating,
 		last_error: error ?? st.last_error ?? limited_error, last_switch: st.last_switch, last_test: st.last_test,
 		xray_restarts: st.xray.restarts ?? 0, url2: URL2, servers,
+		// UDP through the active server (#10); null: not checked
+		udp: (st.state == 'connected' || st.state == 'degraded') ? st.udp : null,
 		// no live servers: the next test of all (router clock) and the pause before it
 		retry: (st.state == 'no_servers' && st.dead)
 			? { at: time() + max(0, st.dead.next - now()), delay: st.dead.delay } : null,

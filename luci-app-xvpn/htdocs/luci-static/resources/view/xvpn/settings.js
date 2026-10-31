@@ -12,13 +12,14 @@ const callServers = rpc.declare({ object: 'luci.xvpn', method: 'servers' });
 // the defaults of util.uc load_config(); an empty field means the default
 const DEFAULTS = {
 	xray_bin: '/usr/bin/xray', loglevel: 'warning',
-	tproxy_port: 12345, dns_port: 10853, api_port: 10085, test_port_base: 20000,
+	tproxy_port: 12345, dns_port: 10853, api_port: 10085, control_port: 10086, test_port_base: 20000,
 	client_mark: '0x01000000', tproxy_mark: '0x02000000', route_table: 100,
-	url: 'https://www.gstatic.com/generate_204', url2: 'https://cp.cloudflare.com/generate_204', interval: 30, timeout: 5, fail_threshold: 3,
+	url: 'https://www.gstatic.com/generate_204', url2: 'https://cp.cloudflare.com/generate_204',
+	dl_url: 'https://speed.cloudflare.com/__down?bytes=65536', interval: 30, timeout: 5, fail_threshold: 3,
 	rank_interval: 600, hysteresis: 150, quarantine: 300, concurrency: 4,
 };
 
-const PORTS = [ 'tproxy_port', 'dns_port', 'api_port' ];
+const PORTS = [ 'tproxy_port', 'dns_port', 'api_port', 'control_port' ];
 const MARKS = [ 'client_mark', 'tproxy_mark' ];
 
 // load_config() reads numbers with hex() after 0x, else with int(), which also takes "12abc":
@@ -94,6 +95,17 @@ return view.extend({
 			return true;
 		};
 		o.write = (sid, v) => uci.set('xvpn', sid, 'url2', v.trim());
+
+		// #11: DPI may let the handshake through and freeze the stream after the first KB
+		o = s.option(form.Value, 'dl_url', _('Download check URL'),
+			_('Downloaded through the active server every 5 minutes: a download that stalls or does not finish in 15 s counts as a failed check, like a server that does not answer. Use a file of 64–128 KB. "off" turns this check off.'));
+		o.placeholder = DEFAULTS.dl_url;
+		o.value('off', _('off'));
+		o.validate = (sid, v) => {
+			v = (v ?? '').trim();
+			return !v || v == 'off' || /^https?:\/\/[^\s/?#]+\S*$/i.test(v) || _('Enter an http:// or https:// URL or "off"');
+		};
+		o.write = (sid, v) => uci.set('xvpn', sid, 'dl_url', v.trim());
 
 		o = s.option(form.Value, 'interval', _('Check interval, s'),
 			_('How often the active server is checked.'));
@@ -178,7 +190,7 @@ return view.extend({
 		s.addremove = false;
 
 		const portNames = {
-			tproxy_port: _('TPROXY port'), dns_port: _('DNS port'), api_port: _('API port'),
+			tproxy_port: _('TPROXY port'), dns_port: _('DNS port'), api_port: _('API port'), control_port: _('Control port'),
 		};
 		const port = (name) => (sid, v) => {
 			const r = integer(1, 65535)(sid, v);
@@ -198,6 +210,7 @@ return view.extend({
 				tproxy_port: _('xray takes the traffic of the VPN clients on this port.'),
 				dns_port: _('xray takes the intercepted DNS queries on this port.'),
 				api_port: _('xray traffic statistics (metrics over HTTP), on 127.0.0.1.'),
+				control_port: _('On 127.0.0.1: the xray API over TCP, to switch servers without a restart, and the UDP check over UDP.'),
 			}[name]);
 			o.placeholder = DEFAULTS[name];
 			o.validate = port(name);
