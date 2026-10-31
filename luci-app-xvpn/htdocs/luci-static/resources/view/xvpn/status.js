@@ -132,6 +132,17 @@ function row(titles, cells, cls) {
 		cells.map((c, i) => E('td', { 'class': 'td', 'data-title': titles[i] }, Array.isArray(c) ? c : [ c ])));
 }
 
+// gRPC carries every connection of the tunnel in one HTTP/2 connection, so one CPU
+// core does all of it: about 130 Mbit/s on a dual-core Cortex-A53 router (issue #68)
+function protoCell(s) {
+	const cell = [ txt(s.proto) ];
+	if (s.transport)
+		cell.push(E('br'), E('small', s.transport.startsWith('grpc') ? {
+			'title': _('gRPC sends all connections through one connection that one CPU core handles: on a weak router it is slower than TCP (e.g. tcp+reality+vision)')
+		} : {}, [ txt(s.transport) ]));
+	return cell;
+}
+
 function info(rows) {
 	return E('table', { 'class': 'table' }, rows.filter((r) => r).map((r) => E('tr', { 'class': 'tr' }, [
 		E('td', { 'class': 'td left', 'width': '33%' }, r[0]),
@@ -360,7 +371,7 @@ return view.extend({
 					: _('Enabled, daemon not running')) : _('Disabled') ],
 				up ? [ _('State'), state ] : null,
 				[ _('Active server'), active
-					? [ E('strong', {}, [ txt(active.name) ]), txt(' (' + [ active.proto, active.sub_name ].filter((x) => x).join(', ') + ')') ]
+					? [ E('strong', {}, [ txt(active.name) ]), txt(' (' + [ active.proto, active.transport, active.sub_name ].filter((x) => x).join(', ') + ')') ]
 					: (activeId ? txt(activeId) : E('em', {}, _('none'))) ],
 				(up && active) ? [ _('Latency'), (lat == null) ? '—' : (lat < 0)
 					? [ label('error', _('failed')), ' ', txt(ago(now, active.tested)) ]
@@ -457,7 +468,7 @@ return view.extend({
 
 			return row(srvTitles, [
 				nameCell,
-				txt(s.proto),
+				protoCell(s),
 				txt((s.address ?? '') + (s.port ? ':' + s.port : '')),
 				s.sub_name ? txt(s.sub_name) : E('em', {}, _('manual')),
 				ping,
