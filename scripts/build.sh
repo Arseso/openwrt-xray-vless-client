@@ -30,8 +30,8 @@ $DOCKER run --rm --init -v "$PWD:/src:ro" -e LUCI_FEED="$LUCI_FEED" \
 	cd bin/packages/*/base
 	tar -c luci-app-xvpn_*.ipk $(ls luci-i18n-xvpn-*.ipk 2>/dev/null) >&3
 ' > "$TAR"
-# replace dist/ only after a successful build
-rm -rf dist
-mkdir dist
+# replace the packages only after a successful build; dist/desktop/ is scripts/desktop-build.sh's
+mkdir -p dist
+rm -f dist/*.ipk
 tar -x -f "$TAR" -C dist
-ls -l dist
+ls -l dist/*.ipk
