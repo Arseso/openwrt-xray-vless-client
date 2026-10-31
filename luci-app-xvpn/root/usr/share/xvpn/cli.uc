@@ -394,6 +394,11 @@ case 'generate': {
 	commit(null);
 }
 
+// for init.d: main.xray_bin as load_config() checked it (util.uc valid_bin())
+case 'xray-bin':
+	print(load_config().main.xray_bin, '\n');
+	exit(0);
+
 case 'fw-apply':
 	exit(fw(ARGV[1] == 'passthrough' ? 'passthrough' : 'full') ? 0 : 1);
 

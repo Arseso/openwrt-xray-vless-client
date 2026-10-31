@@ -180,6 +180,58 @@ function dns_server(v) {
 	return DEFAULT_DNS;
 }
 
+// The values that go into commands and routing run as root: whoever may write /etc/config/xvpn
+// (the rpcd user of the desktop app, #81) must not get more than the VPN with them. A bad
+// value is replaced by the default and logged; LuCI checks the same before it saves.
+const XRAY_BIN = '/usr/bin/xray';
+const DEFAULT_URL = 'https://www.gstatic.com/generate_204';
+
+// an absolute path to a binary named xray*: not /sbin/reboot, not a shell with arguments
+export function valid_bin(v) {
+	// index(): $ of the regex also matches before a newline
+	return type(v) == 'string' && index(v, '\n') < 0
+		&& !!match(v, /^(\/[A-Za-z0-9_][A-Za-z0-9._-]*)*\/xray[A-Za-z0-9._-]*$/);
+};
+
+// http(s) only, as a URL and not as an option of curl
+export function valid_url(v) {
+	return type(v) == 'string' && index(v, '\n') < 0 && !!match(v, /^https?:\/\/[^[:space:]\/?#]+[^[:space:]]*$/);
+};
+
+function checked(name, v, ok, def) {
+	if (v == null || ok(v))
+		return v ?? def;
+	log(`${name} '${v}' is not allowed, using ${def ?? 'none'}`);
+	return def;
+}
+
+// ports of xray on the router: from 1024, the rules drop the ones below for everyone else
+// (guard_input), a dns_port 22 would lock SSH out
+function port(name, v, def) {
+	return checked(name, num(v, null), (n) => n >= 1024 && n <= 65535, def);
+}
+
+// ip rule `lookup` table: not 0 nor default/main/local (253-255), main would be replaced
+function table(v) {
+	return checked('route_table', num(v, null), (n) => (n >= 1 && n <= 252) || (n >= 256 && n <= 2147483647), 100);
+}
+
+// two non-zero 32-bit marks without shared bits, else both defaults
+function marks(c, t) {
+	let cm = num(c, 0x01000000), tm = num(t, 0x02000000);
+	if (cm >= 1 && cm <= 0xffffffff && tm >= 1 && tm <= 0xffffffff && !(cm & tm))
+		return [ cm, tm ];
+	log(`client_mark ${c ?? ''} and tproxy_mark ${t ?? ''} are not two marks without shared bits, using the defaults`);
+	return [ 0x01000000, 0x02000000 ];
+}
+
+// a check URL; 'off'/'0' turns it off where off is allowed (off: true)
+function url(name, v, def, off) {
+	if (off && (v == 'off' || v == '0'))
+		return null;
+	return checked(`health.${name}`, v || null, valid_url, def);
+}
+
 // Loads /etc/config/xvpn with defaults applied and numbers converted.
 export function load_config(confdir) {
 	let c = cursor(confdir);
@@ -190,21 +242,24 @@ export function load_config(confdir) {
 	let h = c.get_all('xvpn', 'health') ?? {};
 	let man = c.get_all('xvpn', 'manual') ?? {};
 	let sp = c.get_all('xvpn', 'split') ?? {};
+	let mk = marks(m.client_mark, m.tproxy_mark);
+	let check_url = url('url', h.url, DEFAULT_URL);
+	let wan = filter(map(list(h.wan_url), (u) => url('wan_url', u, null)), (u) => u != null);
 
 	let cfg = {
 		main: {
 			enabled: bool(m.enabled, false),
-			xray_bin: m.xray_bin || '/usr/bin/xray',
+			xray_bin: checked('xray_bin', m.xray_bin || null, valid_bin, XRAY_BIN),
 			loglevel: m.loglevel || 'warning',
-			tproxy_port: num(m.tproxy_port, 12345),
-			dns_port: num(m.dns_port, 10853),
-			api_port: num(m.api_port, 10085),
+			tproxy_port: port('tproxy_port', m.tproxy_port, 12345),
+			dns_port: port('dns_port', m.dns_port, 10853),
+			api_port: port('api_port', m.api_port, 10085),
 			// gRPC API of xray (TCP: the switch without a restart, #13) and the UDP check (#10)
-			control_port: num(m.control_port, 10086),
-			test_port_base: num(m.test_port_base, 20000),
-			client_mark: num(m.client_mark, 0x01000000),
-			tproxy_mark: num(m.tproxy_mark, 0x02000000),
-			route_table: num(m.route_table, 100),
+			control_port: port('control_port', m.control_port, 10086),
+			test_port_base: port('test_port_base', m.test_port_base, 20000),
+			client_mark: mk[0],
+			tproxy_mark: mk[1],
+			route_table: table(m.route_table),
 			sniffing: bool(m.sniffing, true),
 			// BitTorrent (sniffed from the first packets) goes to blackhole (#15)
 			block_bittorrent: bool(m.block_bittorrent, false),
@@ -216,6 +271,9 @@ export function load_config(confdir) {
 			downlink_only: num(m.downlink_only, 5),
 			// KB a connection; null: xray's own (4 on arm64, 512 on amd64)
 			buffer_size: num(m.buffer_size, null),
+			// s between reads of the tunnel counters for the speed in status (#83), 0: off;
+			// not in the default config
+			speed_interval: max(0, num(m.speed_interval, 3)),
 		},
 		access: {
 			networks: list(a.network),
@@ -227,14 +285,14 @@ export function load_config(confdir) {
 			dns_server: dns_server(a.dns_server),
 		},
 		health: {
-			url: h.url || 'https://www.gstatic.com/generate_204',
+			url: check_url,
 			// tests and choices also check it through the servers that answer url (#61):
 			// another CDN, by domain; 'off' turns it off
-			url2: (h.url2 == 'off' || h.url2 == '0') ? null : (h.url2 || 'https://cp.cloudflare.com/generate_204'),
-			interval: num(h.interval, 30),
-			timeout: num(h.timeout, 5),
+			url2: url('url2', h.url2, 'https://cp.cloudflare.com/generate_204', true),
+			interval: max(1, num(h.interval, 30)),
+			timeout: max(1, num(h.timeout, 5)),
 			fail_threshold: num(h.fail_threshold, 3),
-			rank_interval: num(h.rank_interval, 600),
+			rank_interval: max(1, num(h.rank_interval, 600)),
 			auto_best: bool(h.auto_best, false),
 			hysteresis: num(h.hysteresis, 150),
 			quarantine: num(h.quarantine, 300),
@@ -250,12 +308,12 @@ export function load_config(confdir) {
 			retry_max: num(h.retry_max, 600),
 			// the active server: a download that must not stall (#11, DPI lets the handshake
 			// through and freezes the stream after ~16-20 KB); 'off' turns it off
-			dl_url: (h.dl_url == 'off' || h.dl_url == '0') ? null : (h.dl_url || 'https://speed.cloudflare.com/__down?bytes=65536'),
-			dl_interval: num(h.dl_interval, 300),
-			dl_timeout: num(h.dl_timeout, 15),
+			dl_url: url('dl_url', h.dl_url, 'https://speed.cloudflare.com/__down?bytes=65536', true),
+			dl_interval: max(1, num(h.dl_interval, 300)),
+			dl_timeout: max(1, num(h.dl_timeout, 15)),
 			// direct internet: down only when none of them answers (#11)
-			wan_url: length(list(h.wan_url)) ? list(h.wan_url)
-				: uniq([ h.url || 'https://www.gstatic.com/generate_204', 'https://cp.cloudflare.com/generate_204', 'http://detectportal.firefox.com/success.txt' ]),
+			wan_url: length(wan) ? wan
+				: uniq([ check_url, 'https://cp.cloudflare.com/generate_204', 'http://detectportal.firefox.com/success.txt' ]),
 			// DNS of the clients through the active server (#10): DoH through its test port,
 			// a DNS server given as an IP over UDP; the UDP check runs with the DNS one
 			dns_check: bool(h.dns_check, true),

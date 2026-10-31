@@ -6,9 +6,9 @@
 import { readfile, writefile, mkdir, stat } from 'fs';
 import { parse_link, parse_subscription } from 'xvpn.links';
 import { parse_userinfo, assign_ids, list_change, known_ids, prune_no_auto, NO_AUTO_GRACE } from 'xvpn.subscription';
-import { load_config, fastest, auto_pick, retry_delay, no_auto_ids, set_no_auto, mkdir_p, read_json, SUBS_DIR } from 'xvpn.util';
+import { load_config, valid_bin, valid_url, fastest, auto_pick, retry_delay, no_auto_ids, set_no_auto, mkdir_p, read_json, SUBS_DIR } from 'xvpn.util';
 import { build_index, generate, ports_error, config_key, set_active } from 'xvpn.xrayconf';
-import { render, resolve, fix_ifnames, ifnames_applied, table_names, rule_prefs, stale_routes } from 'xvpn.firewall';
+import { render, resolve, fix_ifnames, ifnames_applied, table_names, rule_prefs, stale_routes, counters, counter_step } from 'xvpn.firewall';
 import { ipv6_up, busy_ports } from 'xvpn.host';
 import { cidr, parse_nets, domain_rule, direct_domains, direct_nets, lists_due_in } from 'xvpn.split';
 import { cursor } from 'uci';
@@ -314,6 +314,30 @@ cfg.access.killswitch = false;
 writefile(`${OUT}/tunnel.nft`, render(cfg, { nets: [], ports: [] }));
 writefile(`${OUT}/passthrough.nft`, render(cfg, res, { passthrough: true }));
 ok('passthrough has no tproxy', index(render(cfg, res, { passthrough: true }), 'tproxy ip') < 0);
+ok('nft counts the tunnel', index(nft, 'counter name tun_up meta mark') >= 0 && index(nft, 'fib saddr type != local counter name tun_down') >= 0);
+ok('passthrough counts nothing', index(render(cfg, res, { passthrough: true }), 'counter name') < 0);
+
+// speed meter (#83): counters from nft -j, a reset (new table) is no jump and never negative
+let cj = '{"nftables": [{"metainfo": {"version": "1.1.1"}}, {"counter": {"family": "inet", "name": "tun_up", "table": "xvpn", "handle": 3, "packets": 2, "bytes": 120}}, {"counter": {"family": "inet", "name": "tun_down", "table": "xvpn", "handle": 4, "packets": 9, "bytes": 9000}}]}';
+eq('counters', counters(cj), { up: 120, down: 9000 });
+ok('counters: none in the table', counters('{"nftables": [{"metainfo": {}}]}') === false);
+ok('counters: no answer of nft', counters('') == null && counters('junk') == null && counters('Error: Could not process rule') == null);
+let cs = counter_step(null, { up: 120, down: 9000 }, 10.0);
+ok('speed: the first sample is the base', cs.add == null && cs.speed == null);
+cs = counter_step(cs.last, { up: 420, down: 15000 }, 12.0);
+eq('speed: B/s over the interval', [ cs.add, cs.speed ], [ { up: 300, down: 6000 }, { up: 150, down: 3000 } ]);
+cs = counter_step(cs.last, { up: 100, down: 2000 }, 14.0);
+eq('speed: a new table counts from zero', cs.add, { up: 100, down: 2000 });
+cs = counter_step(cs.last, false, 16.0);
+eq('speed: no table is zero', cs.speed, { up: 0, down: 0 });
+cs = counter_step(cs.last, { up: 50, down: 70 }, 18.0);
+eq('speed: the table back counts from zero', cs.add, { up: 50, down: 70 });
+// a failed read keeps the base: no jump of the whole counter after it, B/s over both intervals
+let kept = counter_step(cs.last, null, 20.0);
+eq('speed: a failed read keeps the base', [ kept.last, kept.add, kept.speed ], [ cs.last, null, { up: 0, down: 0 } ]);
+cs = counter_step(kept.last, { up: 450, down: 470 }, 22.0);
+eq('speed: after a failed read', [ cs.add, cs.speed ], [ { up: 400, down: 400 }, { up: 100, down: 100 } ]);
+ok('speed: a failed first read is no base', counter_step(null, null, 1.0).last == null);
 
 // ip rules: busybox prints them all, the mark without leading zeros, a trailing space and
 // the table name from rt_tables; only `from all` with the exact pair is ours
@@ -532,6 +556,30 @@ pm = load_config(`${OUT}/dnscfg`).main;
 eq('policy options', [ pm.conn_idle, pm.buffer_size, pm.block_bittorrent ], [ 30, 0, true ]);
 writefile(`${OUT}/dnscfg/xvpn`, "config general 'main'\n\toption buffer_size 'big'\n");
 eq('buffer_size not a number: xray default', load_config(`${OUT}/dnscfg`).main.buffer_size, null);
+
+// what runs as root and routes (#81): an rpcd user with write on xvpn gets no more than the VPN
+ok('xray_bin: absolute paths to xray*', valid_bin('/usr/bin/xray') && valid_bin('/tmp/xray-count') && valid_bin('/root/xray_25.3'));
+ok('xray_bin: anything else is not run', !valid_bin('/sbin/reboot') && !valid_bin('xray') && !valid_bin('/usr/bin/xray run')
+	&& !valid_bin('/usr/bin/../../sbin/xray') && !valid_bin('/tmp/x;reboot;/xray') && !valid_bin('/usr/bin/xray\n') && !valid_bin(null));
+ok('check URLs: http(s) only', valid_url('http://45.0.0.2/') && valid_url('https://a.test/x?y=1')
+	&& !valid_url('-o/etc/passwd') && !valid_url('file:///etc/shadow') && !valid_url('http:// a') && !valid_url('https://'));
+writefile(`${OUT}/dnscfg/xvpn`, "config general 'main'\n\toption xray_bin '/sbin/reboot'\n\toption tproxy_port '22'\n\toption dns_port '70000'\n" +
+	"\toption api_port '1024'\n\toption test_port_base '80'\n\toption route_table '254'\n\toption client_mark '0x3'\n\toption tproxy_mark '0x1'\n" +
+	"\toption speed_interval '-1'\n\nconfig health 'health'\n\toption url '-K/tmp/x'\n\toption url2 'file:///etc/shadow'\n\toption dl_url 'off'\n" +
+	"\toption interval '0'\n\tlist wan_url 'http://a.test/'\n\tlist wan_url 'ftp://b.test/'\n");
+pm = load_config(`${OUT}/dnscfg`);
+eq('unsafe values: the defaults', [ pm.main.xray_bin, pm.main.tproxy_port, pm.main.dns_port, pm.main.api_port, pm.main.test_port_base,
+	pm.main.route_table, pm.main.client_mark, pm.main.tproxy_mark, pm.main.speed_interval ],
+	[ '/usr/bin/xray', 12345, 10853, 1024, 20000, 100, 0x01000000, 0x02000000, 0 ]);
+eq('unsafe URLs: the defaults', [ pm.health.url, pm.health.url2, pm.health.dl_url, pm.health.interval, pm.health.wan_url ],
+	[ 'https://www.gstatic.com/generate_204', 'https://cp.cloudflare.com/generate_204', null, 1, [ 'http://a.test/' ] ]);
+for (let t in [ 0, 253, 255 ]) {
+	writefile(`${OUT}/dnscfg/xvpn`, `config general 'main'\n\toption route_table '${t}'\n`);
+	eq(`route_table ${t}: the default`, load_config(`${OUT}/dnscfg`).main.route_table, 100);
+}
+writefile(`${OUT}/dnscfg/xvpn`, "config general 'main'\n\toption route_table '300'\n\toption client_mark '0x10'\n\toption tproxy_mark '0x20'\n");
+pm = load_config(`${OUT}/dnscfg`).main;
+eq('own route_table and marks kept', [ pm.route_table, pm.client_mark, pm.tproxy_mark ], [ 300, 0x10, 0x20 ]);
 
 // no live servers (#12): the pause between tests of all servers doubles up to retry_max
 let pauses = [], d = null;

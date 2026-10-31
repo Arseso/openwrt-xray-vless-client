@@ -11,7 +11,8 @@
 # the status tab and a reload of the same servers start no xray; a test port taken by another
 # program is skipped, a main one is an error, xray starts with IPv6 off; UDP sessions of a
 # torrent client are let go after conn_idle, BitTorrent is dropped when blocked; split tunneling:
-# listed addresses go around xray, listed domains out of xray directly, the Russian list.
+# listed addresses go around xray, listed domains out of xray directly, the Russian list;
+# the tunnel speed in status over fw4 flush; the rpcd user of the desktop app.
 set -e
 cd "$(dirname "$0")/.."
 DOCKER="${DOCKER:-docker}"
@@ -196,6 +197,7 @@ set xvpn.health.reload_retry=5
 set xvpn.health.retry_max=12
 set xvpn.health.dns_check=0
 set xvpn.health.dl_url=off
+set xvpn.main.speed_interval=1
 add_list xvpn.health.wan_url=http://45.0.0.2:9/
 add_list xvpn.health.wan_url=http://check2.test/
 add_list xvpn.manual.link='$(link 18444 second)'
@@ -228,6 +230,24 @@ want_mode full full
 echo "OK: full rules, ip rule, luci.xvpn firewall"
 tunnel || { echo "FAIL: client gets no internet through the tunnel"; exit 1; }
 echo "OK: client goes through the tunnel"
+# speed meter (#83, speed_interval 1 s): a download limited to 256 KB/s shows a speed, the
+# bytes after it are the file within 10 % (IP packets: the headers are on top). A small receive
+# buffer of the client: otherwise the kernel takes the file at once, faster than curl reads it
+dd if=/dev/zero of=/tmp/www/big bs=1k count=1024 2>/dev/null
+rmem=$(ip netns exec cl sysctl -n net.ipv4.tcp_rmem)
+ip netns exec cl sysctl -qw net.ipv4.tcp_rmem='4096 32768 32768'
+d0=$(status @.traffic.down); u0=$(status @.traffic.up)
+ip netns exec cl curl -s -o /dev/null --limit-rate 256k http://45.0.0.2/big & dl=$!
+speed_on() { [ "$(status @.speed.down)" -gt 65536 ]; }
+wait_cmd 4 speed_on
+sp=$(status @.speed.down)
+wait $dl
+sleep 1
+d=$(($(status @.traffic.down) - d0)); u=$(($(status @.traffic.up) - u0))
+rm /tmp/www/big
+ip netns exec cl sysctl -qw net.ipv4.tcp_rmem="$rmem"
+[ $d -ge 1048576 ] && [ $d -le 1153433 ] && [ $u -gt 0 ] || { echo "FAIL: traffic: down $d (file 1048576), up $u"; exit 1; }
+echo "OK: tunnel speed $sp B/s at 256 KB/s, $d bytes down for a 1 MB file"
 blocked "connected, ICMP is not tunneled"
 /etc/init.d/xvpn-guard start
 full_rules "xvpn-guard start"
@@ -415,12 +435,19 @@ kill $(cat /tmp/remote-18443.pid); sleep 1; remote 18443
 wait_for @.state connected 40
 
 # fw4 flush (service firewall stop/restart) deletes all tables: the include puts them back
+t0=$(status @.traffic.down)
 /etc/init.d/firewall restart
 full_rules "after firewall restart"
 /etc/init.d/firewall stop; /etc/init.d/firewall start
 full_rules "after firewall stop + start"
 tunnel || { echo "FAIL: no tunnel after firewall stop + start"; exit 1; }
 echo "OK: rules restored after fw4 flush"
+# the new table starts its counters from zero: no negative speed, no jump, bytes kept
+sleep 1
+sp=$(status @.speed.down); t=$(status @.traffic.down)
+[ "$sp" -ge 0 ] && [ "$sp" -lt 65536 ] && [ "$t" -ge "$t0" ] \
+	|| { echo "FAIL: speed after fw4 flush: $sp B/s, traffic $t0 -> $t"; exit 1; }
+echo "OK: speed meter goes on over fw4 flush"
 
 # SSIDs: fixed names in /etc/config/wireless; there is no radio in the container,
 # so the names come from UCI alone, as on boot before Wi-Fi is up
@@ -1455,6 +1482,57 @@ uci set xvpn.main.enabled=0; uci commit xvpn
 nft list table inet xvpn >/dev/null 2>&1 && { echo "FAIL: table left after stop with enabled=0"; exit 1; }
 direct || { echo "FAIL: client is still blocked with the service turned off"; exit 1; }
 echo "OK: rules removed when the service is turned off"
+
+# rpcd user of the desktop app (#81): /ubus through uhttpd with the ACL of luci-app-xvpn only
+pass=$(sh /usr/share/xvpn/rpcd-user.sh add | sed -n 's/^user xvpn, password //p')
+[ ${#pass} = 24 ] || { echo "FAIL: rpcd-user.sh add: '$pass'"; exit 1; }
+rpc() { # sid object method [args]
+	_a=${4:-}; [ -n "$_a" ] || _a='{}'
+	curl -s -m 10 -H 'Content-Type: application/json' http://127.0.0.1/ubus \
+		-d '{"jsonrpc":"2.0","id":1,"method":"call","params":["'$1'","'$2'","'$3'",'"$_a"']}'
+}
+login() { rpc 00000000000000000000000000000000 session login '{"username":"xvpn","password":"'$1'"}' | jsonfilter -e '@.result[1].ubus_rpc_session'; }
+[ -z "$(login wrong-password)" ] || { echo "FAIL: rpcd user logs in with a wrong password"; exit 1; }
+sid=$(login "$pass")
+[ -n "$sid" ] || { echo "FAIL: rpcd user cannot log in"; exit 1; }
+allowed() { # what object method [args]
+	_r=$(rpc $sid "$2" "$3" "${4:-}")
+	[ "$(echo "$_r" | jsonfilter -e '@.result[0]')" = 0 ] || { echo "FAIL: rpcd user: $1: $_r"; exit 1; }
+}
+denied() { # what object method [args]: rpcd refuses the method (-32002) or the config (6)
+	_r=$(rpc $sid "$2" "$3" "${4:-}")
+	[ "$(echo "$_r" | jsonfilter -e '@.error.code')" = -32002 ] || [ "$(echo "$_r" | jsonfilter -e '@.result[0]')" = 6 ] \
+		|| { echo "FAIL: rpcd user may $1: $_r"; exit 1; }
+}
+# the version of the package: here the files are copied, a control file stands for opkg
+v=$(sed -n 's/^PKG_VERSION:=//p' /src/luci-app-xvpn/Makefile)-r$(sed -n 's/^PKG_RELEASE:=//p' /src/luci-app-xvpn/Makefile)
+printf 'Package: luci-app-xvpn\nVersion: %s\n' "$v" > /usr/lib/opkg/info/luci-app-xvpn.control
+[ "$(rpc $sid luci.xvpn version | jsonfilter -e '@.result[1].version' -e '@.result[1].api' | tr '\n' ' ')" = "$v 1 " ] \
+	|| { echo "FAIL: luci.xvpn version: $(rpc $sid luci.xvpn version)"; exit 1; }
+rm /usr/lib/opkg/info/luci-app-xvpn.control
+allowed "luci.xvpn status" luci.xvpn status
+allowed "luci.xvpn firewall" luci.xvpn firewall
+allowed "uci get xvpn" uci get '{"config":"xvpn","section":"main","option":"enabled"}'
+allowed "uci set xvpn" uci set '{"config":"xvpn","section":"main","values":{"speed_interval":"1"}}'
+allowed "uci changes" uci changes
+allowed "uci revert xvpn" uci revert '{"config":"xvpn"}'
+denied "uci get network" uci get '{"config":"network"}'
+denied "uci get rpcd" uci get '{"config":"rpcd"}'
+denied "uci set firewall" uci set '{"config":"firewall","section":"xvpn","values":{"enabled":"0"}}'
+denied "file exec" file exec '{"command":"/bin/id"}'
+denied "file read" file read '{"path":"/etc/shadow"}'
+denied "system reboot" system reboot
+# the app logs out; a new password (add again) and del end the sessions open
+sid=$(login "$pass"); allowed "session destroy" session destroy
+denied "a destroyed session" luci.xvpn version
+sid=$(login "$pass")
+pass=$(sh /usr/share/xvpn/rpcd-user.sh add | sed -n 's/^user xvpn, password //p')
+denied "a session after a new password" luci.xvpn version
+sid=$(login "$pass"); allowed "the new password" luci.xvpn version
+sh /usr/share/xvpn/rpcd-user.sh del >/dev/null
+denied "a session after del" luci.xvpn version
+[ -z "$(login "$pass")" ] || { echo "FAIL: rpcd user logs in after del"; exit 1; }
+echo "OK: rpcd user: luci.xvpn and uci xvpn, no file exec or other configs; logout, sessions end on add and del"
 
 # package removal: default_prerm disables, then stops
 uci set xvpn.main.enabled=1; uci commit xvpn

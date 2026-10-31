@@ -3,7 +3,7 @@
 		"description": "Grant access to XVPN",
 		"read": {
 			"ubus": {
-				"luci.xvpn": [ "status", "servers", "subscriptions", "access_points", "stats", "log", "firewall", "parse_links", "split" ]
+				"luci.xvpn": [ "version", "status", "servers", "subscriptions", "access_points", "stats", "log", "firewall", "parse_links", "split" ]
 			},
 			"uci": [ "xvpn", "firewall" ]
 		},
@@ -12,6 +12,20 @@
 				"luci.xvpn": [ "update", "service", "test", "select", "set_auto", "split_update" ]
 			},
 			"uci": [ "xvpn" ]
+		}
+	},
+	"luci-app-xvpn-remote": {
+		"description": "Grant the ubus uci calls for the XVPN config without luci-base (rpcd user of the desktop app)",
+		"read": {
+			"ubus": {
+				"uci": [ "get", "changes" ],
+				"session": [ "destroy" ]
+			}
+		},
+		"write": {
+			"ubus": {
+				"uci": [ "set", "add", "delete", "rename", "order", "revert", "commit", "apply", "confirm", "rollback" ]
+			}
 		}
 	}
 }

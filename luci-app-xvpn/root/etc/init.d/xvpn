@@ -12,7 +12,8 @@ start_service() {
 	config_load xvpn
 	local enabled xray_bin gomemlimit gogc
 	config_get_bool enabled main enabled 0
-	config_get xray_bin main xray_bin /usr/bin/xray
+	# checked: an rpcd user that may write xvpn must not run any binary as root (#81)
+	xray_bin=$($CLI xray-bin) || xray_bin=/usr/bin/xray
 	# Go GC of xray on a 256 MB router (DESIGN.md 6.4); not in the default config
 	config_get gomemlimit main gomemlimit 80MiB
 	config_get gogc main gogc 50
@@ -98,7 +99,7 @@ service_started() {
 	port="$(jsonfilter -i /var/etc/xvpn/index.json -e @.ports.control 2>/dev/null)"
 	tag="$(jsonfilter -i "$CONF" -e '@.routing.balancers[0].selector[0]' 2>/dev/null)"
 	if [ -n "$port" ] && [ -n "$tag" ]; then
-		"$(uci -q get xvpn.main.xray_bin || echo /usr/bin/xray)" api bo -s "127.0.0.1:$port" -t 3 -b active "$tag" >/dev/null 2>&1 || true
+		"$($CLI xray-bin || echo /usr/bin/xray)" api bo -s "127.0.0.1:$port" -t 3 -b active "$tag" >/dev/null 2>&1 || true
 	fi
 	ubus -t 2 call xvpn reindex >/dev/null 2>&1 || true
 }

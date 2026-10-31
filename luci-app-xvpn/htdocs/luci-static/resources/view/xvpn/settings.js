@@ -164,7 +164,9 @@ return view.extend({
 		o = s.option(form.Value, 'xray_bin', _('Path to xray'),
 			_('The xray-core binary (25.x).'));
 		o.placeholder = DEFAULTS.xray_bin;
-		o.validate = (sid, v) => !v || /^\/\S+$/.test(v.trim()) || _('Enter an absolute path');
+		// the same as valid_bin() in util.uc: the service runs it as root
+		o.validate = (sid, v) => !v || /^(\/[A-Za-z0-9_][A-Za-z0-9._-]*)*\/xray[A-Za-z0-9._-]*$/.test(v.trim())
+			|| _('Enter an absolute path to a binary whose name starts with xray');
 		o.write = (sid, v) => uci.set('xvpn', sid, 'xray_bin', v.trim());
 
 		o = s.option(form.ListValue, 'loglevel', _('Log level of xray'),
@@ -193,7 +195,8 @@ return view.extend({
 			tproxy_port: _('TPROXY port'), dns_port: _('DNS port'), api_port: _('API port'), control_port: _('Control port'),
 		};
 		const port = (name) => (sid, v) => {
-			const r = integer(1, 65535)(sid, v);
+			// below 1024 the rules would drop the port for everyone but the VPN clients (util.uc port())
+			const r = integer(1024, 65535)(sid, v);
 			if (r !== true)
 				return r;
 			const p = number(this.value(adv, sid, name)), base = number(this.value(adv, sid, 'test_port_base'));
