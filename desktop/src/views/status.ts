@@ -11,7 +11,7 @@ import { t } from '../i18n/status';
 import { byHand } from '../tray/model';
 import { clear, h } from '../ui/dom';
 import { errorText } from '../ui/errors';
-import { bytes, duration, ms, speed } from '../ui/format';
+import { bytes, duration, ping, speed } from '../ui/format';
 import { registerView } from './registry';
 
 export const STATS_EVERY_MS = 30_000;
@@ -101,7 +101,7 @@ registerView({
           ? h('dl', { class: 'props' },
             h('dt', {}, t('active')), h('dd', { id: 'active-server' },
               h('strong', {}, active.name), h('span', { class: 'muted' }, ` · ${active.proto} ${active.address}:${active.port} · ${byHand(up!) ? t('by_hand') : t('by_auto')}`)),
-            h('dt', {}, t('ping')), h('dd', {}, active.latency != null ? ms(active.latency) : '—'),
+            h('dt', {}, t('ping')), h('dd', {}, ping(active.latency)),
             up!.udp != null ? [h('dt', {}, t('udp')), h('dd', {}, up!.udp ? t('udp_ok') : t('udp_bad'))] : null,
             up!.speed !== undefined ? [h('dt', {}, t('speed')), h('dd', { id: 'speed' },
               up!.speed ? `↓ ${speed(up!.speed.down)}  ↑ ${speed(up!.speed.up)}` : t('speed_none'))] : null,

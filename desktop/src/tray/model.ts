@@ -5,7 +5,7 @@ import { Status, StatusUp } from '../api/xvpn';
 import { ConnectionState } from '../core/connection';
 import { t } from '../i18n/tray';
 import { t as ts } from '../i18n/status';
-import { ms, speed } from '../ui/format';
+import { ping, speed } from '../ui/format';
 
 /** the icon files src-tauri/icons/tray/<icon>.png */
 export type TrayIcon = 'connected' | 'failover' | 'wan_down' | 'xray_down' | 'offline' | 'stopped';
@@ -81,10 +81,10 @@ export function trayModel(conn: ConnectionState, status: Status | null, error?: 
   let tooltip = `xvpn · ${stateLine(conn, status)}`;
   if (up) {
     info.push(active ? t('server', { name: `${active.name} (${byHand(up) ? t('by_hand') : t('by_auto')})` }) : t('server_none'));
-    const ping = active?.latency != null ? ms(active.latency) : '—';
-    info.push(t('ping', { ping }));
+    const pingText = ping(active?.latency);
+    info.push(t('ping', { ping: pingText }));
     if (active)
-      tooltip += `\n${active.name} · ${ping}`;
+      tooltip += `\n${active.name} · ${pingText}`;
     if (up.speed) {
       const line = t('speed', { down: speed(up.speed.down), up: speed(up.speed.up) });
       info.push(line);
@@ -97,11 +97,11 @@ export function trayModel(conn: ConnectionState, status: Status | null, error?: 
   const servers: TrayServer[] = all.slice(0, MAX_SERVERS).map((s) => ({
     id: s.id,
     active: s.id === up?.active,
-    label: [s.name, s.latency != null ? ms(s.latency) : '—', s.quarantined ? t('quarantined') : null].filter(Boolean).join(' · '),
+    label: [s.name, ping(s.latency), s.quarantined ? t('quarantined') : null].filter(Boolean).join(' · '),
   }));
   // the active one is always there
   if (active && !servers.some((s) => s.active))
-    servers.push({ id: active.id, active: true, label: `${active.name} · ${active.latency != null ? ms(active.latency) : '—'}` });
+    servers.push({ id: active.id, active: true, label: `${active.name} · ${ping(active.latency)}` });
   if (all.length > MAX_SERVERS)
     servers.push({ id: '', active: false, label: t('more', { n: all.length - MAX_SERVERS }) });
   return {

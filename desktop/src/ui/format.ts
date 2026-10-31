@@ -32,6 +32,15 @@ export function ms(n: number): string {
   return lang() === 'ru' ? `${Math.round(n)} мс` : `${Math.round(n)} ms`;
 }
 
+/** latency of a server: absent — not tested yet, negative — the last test failed */
+export function ping(latency: number | null | undefined): string {
+  if (latency == null)
+    return '—';
+  if (latency < 0)
+    return lang() === 'ru' ? 'нет ответа' : 'failed';
+  return ms(latency);
+}
+
 /** 3725 → 1 h 2 min */
 export function duration(sec: number): string {
   const ru = lang() === 'ru';

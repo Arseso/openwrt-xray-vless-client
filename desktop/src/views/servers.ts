@@ -6,7 +6,7 @@ import { DaemonServer, Status } from '../api/xvpn';
 import { t } from '../i18n/servers';
 import { clear, h } from '../ui/dom';
 import { errorText } from '../ui/errors';
-import { ms } from '../ui/format';
+import { ping } from '../ui/format';
 import { registerView } from './registry';
 
 export function matches(s: DaemonServer, q: string): boolean {
@@ -73,7 +73,7 @@ registerView({
         h('td', {}, h('div', {}, s.name), h('small', { class: 'muted' }, s.sub_name ?? t('manual'))),
         h('td', {}, s.proto),
         h('td', { class: 'mono' }, `${s.address}:${s.port}`),
-        h('td', { class: 'num' }, s.latency != null ? ms(s.latency) : '—'),
+        h('td', { class: 'num' }, ping(s.latency)),
         h('td', {}, flags),
         h('td', {}, auto),
         h('td', {}, h('button', {

@@ -55,11 +55,14 @@ describe('tray menu texts', () => {
       servers: [
         { ...STATUS_UP.servers[0] },
         { id: 'b', name: 'B', proto: 'trojan', address: 'b', port: 1, latency: null, quarantined: true, auto: false, limited: false },
+        { id: 'c', name: 'C', proto: 'ss', address: 'c', port: 1, latency: -1, quarantined: false, auto: true, limited: false },
       ],
     });
     const m = trayModel(online, st);
     expect(m.info[1]).toBe('Сервер: A (вручную)');
     expect(m.servers[1]).toEqual({ id: 'b', label: 'B · — · карантин', active: false });
+    // -1: the last test failed
+    expect(m.servers[2]).toEqual({ id: 'c', label: 'C · нет ответа', active: false });
   });
 
   it('xray down and a stopped service', () => {
