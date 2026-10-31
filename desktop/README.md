@@ -183,7 +183,7 @@ sh scripts/desktop-itest.sh        # клиент против стенда scri
 ```
 
 Кэш cargo, npm, target и MSVC SDK cargo-xwin — в docker-томах `xvpn-desktop-cargo`,
-`xvpn-desktop-npm`, `xvpn-desktop-target`, `xvpn-desktop-xwin`. `TARGETS=linux` — без
+`xvpn-desktop-npm`, `xvpn-desktop-target`, `xvpn-desktop-xwin`, инструменты бандлера — `xvpn-desktop-tools`. `TARGETS=linux` — без
 Windows. Хост слабый: тяжёлые команды параллельные сессии запускают под общим замком
 `flock ~/.cache/xvpn-heavy.lock <команда>`.
 

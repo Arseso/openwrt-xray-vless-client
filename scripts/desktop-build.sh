@@ -3,8 +3,8 @@
 # the deb and the AppImage, and the Windows NSIS setup cross-built with cargo-xwin. The
 # version is PKG_VERSION of luci-app-xvpn/Makefile (one version for the router package and
 # the app; tauri.conf.json is overridden at build time). The image is desktop/docker/
-# Dockerfile; the cargo registry, npm cache, MSVC SDK of cargo-xwin and the cargo target dir
-# live in docker volumes, so a second build is incremental.
+# Dockerfile; the cargo registry, npm cache, MSVC SDK of cargo-xwin, the bundler's tools and
+# the cargo target dir live in docker volumes, so a second build is incremental.
 #
 #   sh scripts/desktop-build.sh         build (release)
 #   sh scripts/desktop-build.sh test    tsc, vitest and cargo test, no build
@@ -40,10 +40,11 @@ fi
 echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "PKG_VERSION '$VERSION' is not x.y.z" >&2; exit 1; }
 
 set --
-SIGN=0
+# not SIGN: linuxdeploy-plugin-appimage takes SIGN=1 as a request to sign with gpg
+UPDATER_SIGN=0
 if [ "$MODE" = build ] && [ -f "$KEYS/updater.key" ]; then
 	set -- -v "$KEYS:/keys:ro"
-	SIGN=1
+	UPDATER_SIGN=1
 fi
 
 $DOCKER build -q -t "$IMAGE" desktop/docker >/dev/null
@@ -56,9 +57,9 @@ trap 'exit 130' INT TERM
 # comes back as a tar on stdout.
 $DOCKER run --rm --init -v "$PWD/desktop:/src:ro" "$@" \
 	-v xvpn-desktop-cargo:/cache/cargo -v xvpn-desktop-npm:/cache/npm -v xvpn-desktop-target:/cache/target \
-	-v xvpn-desktop-xwin:/cache/xwin \
+	-v xvpn-desktop-xwin:/cache/xwin -v xvpn-desktop-tools:/cache/tools \
 	-e CARGO_BUILD_JOBS="$JOBS" -e MODE="$MODE" -e VERSION="$VERSION" -e TAG="$TAG" -e TARGETS="$TARGETS" \
-	-e SIGN="$SIGN" -e REPO="$REPO" "$IMAGE" bash -euo pipefail -c '
+	-e UPDATER_SIGN="$UPDATER_SIGN" -e REPO="$REPO" "$IMAGE" bash -euo pipefail -c '
 	exec 3>&1 1>&2
 	mkdir -p /build && cd /src
 	tar -c --exclude=./node_modules --exclude=./dist --exclude=./src-tauri/target --exclude=./src-tauri/gen . | tar -x -C /build
@@ -76,29 +77,32 @@ $DOCKER run --rm --init -v "$PWD/desktop:/src:ro" "$@" \
 		exit 0
 	fi
 	conf="{\"version\": \"$VERSION\"}"
-	if [ "$SIGN" = 1 ]; then
+	if [ "$UPDATER_SIGN" = 1 ]; then
 		TAURI_SIGNING_PRIVATE_KEY=$(cat /keys/updater.key)
 		TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$(cat /keys/updater.pass 2>/dev/null || true)
 		export TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD
 		conf="{\"version\": \"$VERSION\", \"bundle\": {\"createUpdaterArtifacts\": true}}"
 	fi
 	out=/out; mkdir -p $out
+	# the bundler downloads its tools from GitHub (linuxdeploy, NSIS plugins) and now and then
+	# fails on them: once more with its log (the compile is done by then)
+	tauri() { npx tauri build --config "$conf" "$@" || npx tauri build -v --config "$conf" "$@"; }
 	T=$CARGO_TARGET_DIR
 	for target in $TARGETS; do
 		case $target in
 		linux)
 			# the target dir is a volume: no package of an older version may come along
 			rm -rf "$T/release/bundle"
-			npx tauri build --config "$conf" --bundles deb,appimage -- --locked
+			tauri --bundles deb,appimage -- --locked
 			cp "$T/release/xvpn" "$T"/release/bundle/deb/*.deb "$T"/release/bundle/appimage/*.AppImage $out/
-			[ "$SIGN" = 0 ] || cp "$T"/release/bundle/appimage/*.AppImage.sig $out/
+			[ "$UPDATER_SIGN" = 0 ] || cp "$T"/release/bundle/appimage/*.AppImage.sig $out/
 			;;
 		windows)
 			W=$T/x86_64-pc-windows-msvc/release
 			rm -rf "$W/bundle"
-			npx tauri build --config "$conf" --runner cargo-xwin --target x86_64-pc-windows-msvc --bundles nsis -- --locked
+			tauri --runner cargo-xwin --target x86_64-pc-windows-msvc --bundles nsis -- --locked
 			cp "$W"/bundle/nsis/*-setup.exe $out/
-			[ "$SIGN" = 0 ] || cp "$W"/bundle/nsis/*-setup.exe.sig $out/
+			[ "$UPDATER_SIGN" = 0 ] || cp "$W"/bundle/nsis/*-setup.exe.sig $out/
 			# what Windows would run: the setup holds the app (a PE32+ GUI binary)
 			file "$W/xvpn.exe" | grep -q "PE32+ executable (GUI) x86-64" || { file "$W/xvpn.exe"; exit 1; }
 			7z l $out/*-setup.exe | grep -q " xvpn.exe$" || { 7z l $out/*-setup.exe; echo "no xvpn.exe in the setup"; exit 1; }
@@ -106,7 +110,7 @@ $DOCKER run --rm --init -v "$PWD/desktop:/src:ro" "$@" \
 		*) echo "unknown target $target"; exit 1 ;;
 		esac
 	done
-	if [ "$SIGN" = 1 ]; then
+	if [ "$UPDATER_SIGN" = 1 ]; then
 		# latest.json of tauri-plugin-updater: the AppImage for Linux, the NSIS setup for Windows
 		node -e "
 			const fs = require(\"fs\"), path = require(\"path\");

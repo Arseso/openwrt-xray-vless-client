@@ -189,11 +189,11 @@ echo "ci: ok, dist/$ipk"
 
 if [ "$MODE" = release ]; then
 	assets=$(desktop_assets) || die "the desktop app is not ready for the release"
-	notes="Packages:
-- \`$ipk\` and \`luci-i18n-xvpn-*\` — the router (OpenWrt 24.10)
-- \`xvpn_${ver}_x64-setup.exe\` — the desktop app for Windows (NSIS setup)
-- \`xvpn_${ver}_amd64.AppImage\`, \`xvpn_${ver}_amd64.deb\` — the desktop app for Linux
-- \`*.sig\`, \`latest.json\` — signatures and the manifest of the app's updater"
+	notes="Пакеты:
+- \`$ipk\` и \`luci-i18n-xvpn-*\` — роутер (OpenWrt 24.10)
+- \`xvpn_${ver}_x64-setup.exe\` — приложение для Windows (установщик NSIS)
+- \`xvpn_${ver}_amd64.AppImage\`, \`xvpn_${ver}_amd64.deb\` — приложение для Linux (обновляется само только AppImage)
+- \`*.sig\`, \`latest.json\` — подписи и манифест автообновления приложения"
 	git tag -a "$tag" -m "$tag"
 	git push origin "refs/tags/$tag"
 	# shellcheck disable=SC2086 # one asset per line, no spaces in the names
