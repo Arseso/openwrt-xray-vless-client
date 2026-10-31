@@ -85,6 +85,11 @@ export interface StatusUp extends StatusBase {
   udp?: boolean | null;
   /** no live servers: the next test of all and the pause before it */
   retry?: { at: number; delay: number } | null;
+  /** through the tunnel, B/s over the last main.speed_interval (#83); null until the
+   * second reading or while the counters fail; absent in packages before #83 */
+  speed?: { up: number; down: number } | null;
+  /** bytes through the tunnel since xvpnd started; null with speed_interval 0 */
+  traffic?: { up: number; down: number } | null;
 }
 
 export type Status = StatusUp | StatusDown;

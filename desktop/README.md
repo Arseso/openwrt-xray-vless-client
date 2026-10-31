@@ -42,7 +42,8 @@ desktop/
       index.ts         по строке import на вкладку
       <name>.ts        вкладка: status, servers, subscriptions, access-points, settings, log
       connect.ts       экран роутеров и решений о сертификате (не вкладка)
-    ui/                dom.ts (h, clear), errors.ts (errorText)
+    tray/              модель меню трея (model.ts) и контроллер на connection.bus (index.ts)
+    ui/                dom.ts (h, clear), errors.ts (errorText), format.ts (скорость, байты)
   src-tauri/src/
     lib.rs             сборка приложения, маршрутизация команд по префиксу
     commands.rs        команды ядра: ubus_request, ubus_login, profile_*, default_gateway
@@ -50,7 +51,8 @@ desktop/
     pin.rs             TOFU: проверка SHA-256 сертификата uhttpd
     profiles.rs        profiles.json + keyring
     gateway.rs         шлюз по умолчанию (Linux /proc/net/route, Windows route print)
-    tray.rs            трей — TODO(#78)
+    tray.rs            трей, автозапуск, закрытие окна в трей (#78)
+    vpncheck.rs        «иду ли я через VPN»: внешний IP ПК, адреса сервера (#78)
     notifications.rs   уведомления — TODO(#80)
   tests/unit/          vitest, фейковый роутер (fake.ts)
   tests/stand/         тот же клиент против стенда scripts/luci.sh
@@ -123,6 +125,41 @@ registerView({
 трея или уведомлений добавляется в свой модуль (`tauri::generate_handler!` в его
 `handler()`), `lib.rs` не трогается. У каждого модуля есть `init(app)`, вызывается из
 `setup`.
+
+### Трей (#78)
+
+`src/tray/model.ts` — чистая функция `trayModel(состояние подключения, status, ошибка)` →
+`TrayModel`: иконка (`connected`, `failover`, `wan_down`, `xray_down`, `offline`, `stopped` —
+файлы `src-tauri/icons/tray/<icon>.png`), подсказка, информационные строки меню, подменю
+серверов (не больше 40, активный всегда есть), «Автовыбор», подписи. `src/tray/index.ts`
+считает модель на каждом `status` и `connection` и шлёт `tray_update`, только если она
+изменилась; `tray.rs` меняет тексты пунктов на месте и пересобирает меню, только когда
+меняется его форма (другие серверы, другой язык). Клики возвращаются событием
+`tray-action` (`select`, `auto`, `test`, `service`, `refresh` — при открытии меню на
+Windows); «Открыть окно», «Открыть LuCI» и «Выход» Rust делает сам.
+
+- «Автовыбор» — `set_auto` активного сервера, как авто/ручной режим в issue и колонка
+  «Авто» в LuCI. «(авто)/(вручную)» в строке сервера — по `last_switch.reason`. Вернуть
+  демон из ручного выбора к автоматическому через ubus сейчас нельзя: `select` пишет
+  ручной выбор, а метода его сбросить нет.
+- Закрытие окна прячет его в трей. На Linux — только если есть хост StatusNotifierItem
+  (`org.kde.StatusNotifierWatcher` на сессионной шине): в GNOME без расширения
+  AppIndicator трея нет, там окно сворачивается.
+- Окно с `backgroundThrottling: disabled`: спрятанное в трей, оно продолжает опрос в
+  обычном темпе (иначе WebView2 через 5 минут растягивает таймеры до минуты).
+- Автозапуск — `tauri-plugin-autostart` с аргументом `--minimized` (старт в трее),
+  переключатель на вкладке «Статус».
+
+### «Иду ли я через VPN»
+
+Внешний IP ПК (Rust спрашивает `api.ipify.org`, запасные `ifconfig.me`, `icanhazip.com`,
+HTTPS с корнями webpki) сравнивается с адресами активного сервера, разрешёнными на ПК.
+IP выхода сервера роутер не знает: ни демон, ни `luci.xvpn` его не отдают, а узнать его
+дёшево можно было бы только запросом с роутера через тестовый SOCKS-порт сервера (новый
+метод rpcd). Поэтому выход считается равным адресу сервера — верно для обычного
+сервера на одном хосте; у ретранслятора или CDN-фронта выход другой, тогда показывается
+«нет» с обоими адресами и этой оговоркой. Проверка — только по кнопке: это запрос к
+стороннему сервису.
 
 ## Подключение
 

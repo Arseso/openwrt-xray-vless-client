@@ -15,6 +15,7 @@ mod pin;
 mod profiles;
 mod transport;
 mod tray;
+mod vpncheck;
 
 use std::sync::Arc;
 
@@ -24,6 +25,7 @@ pub fn run() {
     let core = commands::handler();
     let tray = tray::handler();
     let notify = notifications::handler();
+    let vpn = vpncheck::handler();
 
     tauri::Builder::default()
         .setup(|app| {
@@ -39,6 +41,8 @@ pub fn run() {
                 tray(invoke)
             } else if cmd.starts_with("notify_") {
                 notify(invoke)
+            } else if cmd.starts_with("vpn_") {
+                vpn(invoke)
             } else {
                 core(invoke)
             }
