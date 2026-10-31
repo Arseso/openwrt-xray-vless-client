@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { Status } from '../../src/api/xvpn';
 import { LiveHistory, Ring, Sample, sampleOf } from '../../src/core/history';
-import { linePath, niceMax, rate } from '../../src/views/history';
+import { last, linePath, niceMax, rate } from '../../src/views/history';
 import { STATUS_UP } from './fake';
 
 describe('history', () => {
@@ -33,8 +33,21 @@ describe('history', () => {
     expect(got.map((x) => x?.at ?? null)).toEqual([1, 2, null, 3]);
   });
 
+  it('the PC clock set back starts over', () => {
+    const h = new LiveHistory(10);
+    const s = (at: number): Sample => ({ at, ping: 1, up: null, down: null });
+    h.add('a', s(100));
+    h.add('a', s(200));
+    h.add('a', s(50));
+    expect(h.samples().map((x) => x.at)).toEqual([50]);
+  });
+
   it('draws lines with gaps and round axes', () => {
-    expect(linePath([0, 1, 2, 3], [1, null, 2, 3])).toBe('M0.0,1.0M2.0,2.0L3.0,3.0');
+    // a lone point is a dot
+    expect(linePath([0, 1, 2, 3], [1, null, 2, 3])).toBe('M0.0,1.0h0M2.0,2.0L3.0,3.0');
+    expect(linePath([0, 1, 2], [null, 5, null])).toBe('M1.0,5.0h0');
+    expect(last([1, 2, null])).toBeNull();
+    expect(last([1, 2])).toBe(2);
     expect(niceMax(0)).toBe(1);
     expect(niceMax(37)).toBe(50);
     expect(niceMax(120)).toBe(200);

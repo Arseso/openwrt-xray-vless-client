@@ -82,6 +82,8 @@ describe.skipIf(!CONTAINER)(`notifications against ${URL}`, () => {
       await until(() => notices.some((n) => n.type === 'failover'), 120_000);
       const after = conn.context!.poller.status!;
       expect(after.running && after.active).not.toBe(active.id);
+      // the daemon marks it (#80), a switch by hand is not
+      expect(after.running && after.last_switch?.failover).toBe(true);
       // the next checks and polls tell nothing more about it
       await sleep(10_000);
       unblock();

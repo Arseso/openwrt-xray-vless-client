@@ -21,29 +21,46 @@ pub fn handler() -> impl Fn(Invoke<Wry>) -> bool + Send + Sync + 'static {
     tauri::generate_handler![notify_show]
 }
 
-/// title and body come from the router (server names): plain text for the notification
-/// daemon, which may take markup, so the angle brackets go
+/// title and body come from the router (server names): one line of plain text
 fn plain(s: &str, max: usize) -> String {
-    s.chars().filter(|c| !c.is_control() && *c != '<' && *c != '>').take(max).collect()
+    s.chars().filter(|c| !c.is_control()).take(max).collect()
 }
 
+/// the body of a freedesktop notification may be markup (GNOME, KDE): "a & b" or "<x>" in
+/// a server name must stay text. Windows and macOS take it as text and would show "&amp;"
+fn body_text(s: &str) -> String {
+    if cfg!(all(unix, not(target_os = "macos"))) {
+        s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    } else {
+        s.to_string()
+    }
+}
+
+/// Ok once the notification is handed to the system: tauri-plugin-notification shows it on
+/// a background task, a missing notification daemon (Linux) is only logged there
 #[tauri::command]
 fn notify_show(app: AppHandle, title: String, body: String) -> Result<()> {
     app.notification()
         .builder()
         .title(plain(&title, 120))
-        .body(plain(&body, 400))
+        .body(body_text(&plain(&body, 400)))
         .show()
         .map_err(|e| TransportError::new("notify", e.to_string()))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::plain;
+    use super::{body_text, plain};
 
     #[test]
     fn plain_text_only() {
-        assert_eq!(plain("a<b>c\nd", 100), "abcd");
+        assert_eq!(plain("a<b>c\nd", 100), "a<b>cd");
         assert_eq!(plain("сервер", 3), "сер");
+    }
+
+    #[test]
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn body_is_escaped_for_markup() {
+        assert_eq!(body_text("A & B <x>"), "A &amp; B &lt;x&gt;");
     }
 }

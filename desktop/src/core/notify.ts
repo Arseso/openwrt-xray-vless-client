@@ -196,13 +196,19 @@ export class Notifier {
   }
 
   /**
-   * A notice dropped (type off, quiet hours) counts as sent: the event is not told an
-   * hour later when the quiet time ends, only the next one is.
+   * A notice dropped (type off, quiet hours) is not marked sent: a condition asked about
+   * again (a subscription expiring) is told once the quiet time ends or the type is on.
+   * The transitions of Watcher are told once anyway: it acts on 'sent' only.
    */
   send(n: Notice): Verdict {
     if (this.sent.has(n.key) || n.key in this.kept)
       return 'duplicate';
     const at = this.now();
+    const s = this.settings();
+    if (!s.types[n.type])
+      return 'off';
+    if (inQuietHours(new Date(at), s.quiet))
+      return 'quiet';
     this.sent.set(n.key, at);
     if (n.persist) {
       this.kept[n.key] = at;
@@ -213,11 +219,6 @@ export class Notifier {
         // this run only
       }
     }
-    const s = this.settings();
-    if (!s.types[n.type])
-      return 'off';
-    if (inQuietHours(new Date(at), s.quiet))
-      return 'quiet';
     void Promise.resolve()
       .then(() => this.show(n.title, n.body))
       .catch((e: unknown) => console.error('notify: show failed', e));
@@ -250,18 +251,31 @@ export function health(s: Status): Health | null {
   }
 }
 
-/** switches the user asked for or that only found a faster server are not failovers */
-const NOT_FAILOVER = /^(manual selection|chosen by hand|faster server)/;
+/** the daemon not running this long is an outage; less is a restart (the app's or another's) */
+export const STOP_GRACE_MS = 45_000;
+/** after the router is back (a reboot: the service starts, WAN comes up) no "VPN down" */
+export const ROUTER_GRACE_MS = 120_000;
+/** an older switch is not news: it happened while nobody watched (s, router clock) */
+const SWITCH_MAX_AGE_S = 120;
 
 interface RouterMemory {
   health?: Health;
   /** the down notice of the current outage was sent: its recovery is told too */
   downTold: boolean;
-  /** outages told: the key of each down/up pair */
+  /** outages: the key of each down/up pair */
   outages: number;
-  /** last_switch.at seen, undefined before the first status */
+  /** last_switch.at seen on this connection, undefined before its first status */
   switchAt?: number | null;
+  /** state failover seen since the last switch: a daemon without last_switch.failover */
+  failoverSeen: boolean;
   routerDownSince: number | null;
+  routerDownTold: boolean;
+  /** PC clock: the daemon not running since */
+  stoppedSince: number | null;
+  /** PC clock: no "VPN down" until then */
+  graceUntil: number;
+  /** stopped from this app: not an outage while it stays stopped */
+  userStopped: boolean;
 }
 
 function serverName(s: Status, id: string | null | undefined): string {
@@ -277,20 +291,54 @@ function gb(bytes: number): string {
 export class Watcher {
   private routers = new Map<string, RouterMemory>();
 
-  constructor(private readonly notifier: Pick<Notifier, 'send'>, private readonly settings: () => NotifySettings = loadSettings) {}
+  constructor(
+    private readonly notifier: Pick<Notifier, 'send'>,
+    private readonly settings: () => NotifySettings = loadSettings,
+    private readonly now: () => number = Date.now,
+  ) {}
 
   private mem(pid: string): RouterMemory {
     let m = this.routers.get(pid);
-    if (!m)
-      this.routers.set(pid, m = { downTold: false, outages: 0, routerDownSince: null });
+    if (!m) {
+      this.routers.set(pid, m = {
+        downTold: false, outages: 0, failoverSeen: false, routerDownSince: null, routerDownTold: false,
+        stoppedSince: null, graceUntil: 0, userStopped: false,
+      });
+    }
     return m;
+  }
+
+  /** a new connection to router pid: switches before it are not news */
+  onConnected(pid: string): void {
+    const m = this.mem(pid);
+    m.switchAt = undefined;
+    m.failoverSeen = false;
+  }
+
+  /** luci.xvpn service called from this app */
+  onService(pid: string, action: string): void {
+    const m = this.mem(pid);
+    if (action === 'stop')
+      m.userStopped = true;
+    else
+      m.graceUntil = Math.max(m.graceUntil, this.now() + STOP_GRACE_MS);
   }
 
   /** every answer of the poller of router pid (profile id) */
   onStatus(pid: string, s: Status): void {
     const m = this.mem(pid);
+    const now = this.now();
+    if (s.running) {
+      m.stoppedSince = null;
+      m.userStopped = false;
+    }
+    else
+      m.stoppedSince ??= now;
     this.failover(pid, m, s);
-    const h = health(s);
+    let h = health(s);
+    // a restart or a reboot looks like an outage for a while: wait for it to pass
+    if (h === 'down' && (now < m.graceUntil || (!s.running && (m.userStopped || now - m.stoppedSince! < STOP_GRACE_MS))))
+      h = null;
     if (h === null)
       return;
     const prev = m.health;
@@ -301,8 +349,8 @@ export class Watcher {
       // also at the first status: the app started while the VPN does not work
       if (prev === 'up' || prev === undefined) {
         const why = s.running ? (s.passthrough ? t('why.passthrough') : (s.last_error || t(`state.${s.state}`))) : t('why.stopped');
-        this.notifier.send({ type: 'vpn', key: `vpn-down:${pid}:${++m.outages}`, title: t('vpn_down'), body: why });
-        m.downTold = true;
+        // not told (quiet hours, type off): no "back" either
+        m.downTold = this.notifier.send({ type: 'vpn', key: `vpn-down:${pid}:${++m.outages}`, title: t('vpn_down'), body: why }) === 'sent';
       }
     }
     else {
@@ -318,8 +366,18 @@ export class Watcher {
     const sw = s.last_switch ?? null;
     const seen = m.switchAt;
     m.switchAt = sw?.at ?? null;
-    // the first status: a switch from before the app started
-    if (seen === undefined || !sw || sw.at === seen || !sw.from || NOT_FAILOVER.test(sw.reason))
+    const switched = !!sw && seen !== undefined && sw.at !== seen;
+    if (s.state === 'failover')
+      m.failoverSeen = true;
+    else if (!switched && s.state === 'connected')
+      m.failoverSeen = false;
+    if (!switched || !sw.from)
+      return;
+    // the daemon says so (#80); an older one: the poller saw the state failover before it
+    const failover = typeof sw.failover === 'boolean' ? sw.failover : m.failoverSeen;
+    m.failoverSeen = false;
+    // the VPN was told down: "back through X" tells this switch
+    if (!failover || m.downTold || s.time - sw.at > SWITCH_MAX_AGE_S)
       return;
     this.notifier.send({
       type: 'failover', key: `failover:${pid}:${sw.at}:${sw.to}`,
@@ -333,7 +391,7 @@ export class Watcher {
     if (m.routerDownSince !== null)
       return;
     m.routerDownSince = since;
-    this.notifier.send({ type: 'router', key: `router-down:${pid}:${since}`, title: t('router_down'), body: t('router_down_body', { name: profileName }) });
+    m.routerDownTold = this.notifier.send({ type: 'router', key: `router-down:${pid}:${since}`, title: t('router_down'), body: t('router_down_body', { name: profileName }) }) === 'sent';
   }
 
   onRouterUp(pid: string, profileName: string): void {
@@ -342,7 +400,10 @@ export class Watcher {
     if (since === null)
       return;
     m.routerDownSince = null;
-    this.notifier.send({ type: 'router', key: `router-up:${pid}:${since}`, title: t('router_up'), body: t('router_up_body', { name: profileName }) });
+    m.graceUntil = Math.max(m.graceUntil, this.now() + ROUTER_GRACE_MS);
+    if (m.routerDownTold)
+      this.notifier.send({ type: 'router', key: `router-up:${pid}:${since}`, title: t('router_up'), body: t('router_up_body', { name: profileName }) });
+    m.routerDownTold = false;
   }
 
   /** luci.xvpn subscriptions: expiry and traffic from subscription-userinfo, update errors */
@@ -358,7 +419,7 @@ export class Watcher {
         if (left <= set.expireDays * 86400) {
           const days = Math.max(0, Math.ceil(left / 86400));
           this.notifier.send({
-            type: 'subscription', key: `sub-expire:${pid}:${sub.id}:${ui.expire}`, persist: true,
+            type: 'subscription', key: `sub-expire:${pid}:${sub.id}:${ui.expire}:${left > 0 ? 'soon' : 'over'}`, persist: true,
             title: left > 0 ? t('sub_expiring') : t('sub_expired'),
             body: left > 0 ? t('sub_expiring_body', { name, days }) : t('sub_expired_body', { name }),
           });
@@ -377,7 +438,7 @@ export class Watcher {
       }
       if (sub.error) {
         this.notifier.send({
-          type: 'sub_error', key: `sub-error:${pid}:${sub.id}:${sub.last_attempt ?? sub.error}`, persist: true,
+          type: 'sub_error', key: `sub-error:${pid}:${sub.id}:${sub.error}:${sub.last_ok ?? ''}`, persist: true,
           title: t('sub_error'), body: t('sub_error_body', { name, error: sub.error }),
         });
       }
@@ -390,6 +451,7 @@ export interface NotificationsOptions {
   notifier?: Pick<Notifier, 'send'>;
   subsEveryMs?: number;
   subsFirstMs?: number;
+  now?: () => number;
 }
 
 export const showSystem: Show = (title, body) => invokeRust('notify_show', { title, body });
@@ -400,11 +462,14 @@ export const showSystem: Show = (title, body) => invokeRust('notify_show', { tit
  */
 export function startNotifications(conn: Connection, opts: NotificationsOptions = {}): () => void {
   const notifier = opts.notifier ?? new Notifier(opts.show ?? showSystem);
-  const watcher = new Watcher(notifier);
+  const now = opts.now ?? Date.now;
+  const watcher = new Watcher(notifier, loadSettings, now);
   const every = opts.subsEveryMs ?? SUBS_EVERY_MS;
   let ctx: AppContext | null = null;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let wasUpdating = false;
+  /** failed attempts of connect() in a row: the poller is not there to say router-down */
+  let offline = 0;
 
   const stopSubs = () => {
     if (timer)
@@ -430,18 +495,30 @@ export function startNotifications(conn: Connection, opts: NotificationsOptions 
   };
 
   const offs = [
-    conn.bus.on('connection', () => {
+    conn.bus.on('connection', (st) => {
       const c = conn.context;
+      // the router does not answer from the start (2 attempts, like the poller's router-down)
+      offline = !c && st.phase === 'offline' ? offline + 1 : 0;
+      if (offline >= 2 && st.profile)
+        watcher.onRouterDown(st.profile.id, st.profile.name, now());
       if (c === ctx)
         return;
       ctx = c;
       stopSubs();
       wasUpdating = false;
       if (c) {
+        const pid = c.profile.id;
+        watcher.onConnected(pid);
+        // a start, stop or restart from this app is no outage (servers tab, tray)
+        const service = c.xvpn.service.bind(c.xvpn);
+        c.xvpn.service = (action) => {
+          watcher.onService(pid, action);
+          return service(action);
+        };
         c.poller.setInterval(loadSettings().intervalMs);
         pollSubs(c, opts.subsFirstMs ?? SUBS_FIRST_MS);
         // connected anew while the router was told away (the poller of the outage is gone)
-        watcher.onRouterUp(c.profile.id, c.profile.name);
+        watcher.onRouterUp(pid, c.profile.name);
       }
     }),
     conn.bus.on('status', ({ status }) => {

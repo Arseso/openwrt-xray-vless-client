@@ -53,6 +53,7 @@ export const t = strings({
     test: 'Show a test notification',
     test_title: 'xvpn',
     test_body: 'Notifications work.',
+    test_sent: 'Handed to the system. Nothing appeared? Check that the desktop runs a notification service and allows them for xvpn.',
     test_failed: 'The system did not show it: {error}',
   },
   ru: {
@@ -105,6 +106,7 @@ export const t = strings({
     test: 'Показать пробное уведомление',
     test_title: 'xvpn',
     test_body: 'Уведомления работают.',
+    test_sent: 'Передано системе. Не появилось — проверьте, что в системе работает служба уведомлений и они разрешены для xvpn.',
     test_failed: 'Система его не показала: {error}',
   },
 });

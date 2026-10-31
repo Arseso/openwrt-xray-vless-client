@@ -72,6 +72,7 @@ export class LiveHistory implements HistorySource {
   private ring: Ring<Sample>;
   private listeners = new Set<(s: Sample | null) => void>();
   private profile: string | null = null;
+  private lastAt = -Infinity;
 
   constructor(capacity = HISTORY_CAPACITY) {
     this.ring = new Ring(capacity);
@@ -88,15 +89,16 @@ export class LiveHistory implements HistorySource {
     };
   }
 
-  /** the samples of the profile id; another profile starts over */
+  /** the samples of the profile id; another profile, or the PC clock set back, starts over */
   add(profile: string, s: Sample): void {
-    if (profile !== this.profile) {
+    if (profile !== this.profile || s.at < this.lastAt) {
       this.profile = profile;
       if (this.ring.size) {
         this.ring.clear();
         this.emit(null);
       }
     }
+    this.lastAt = s.at;
     this.ring.push(s);
     this.emit(s);
   }

@@ -99,8 +99,11 @@ registerView({
       h('button', {
         onclick: () => {
           result.textContent = '';
+          // Ok means handed over: the system may still not show it (no notification daemon)
           Promise.resolve(showSystem(t('test_title'), t('test_body')))
-            .catch((e: unknown) => {
+            .then(() => {
+              result.textContent = t('test_sent');
+            }, (e: unknown) => {
               result.textContent = t('test_failed', { error: errorText(e) });
             });
         },

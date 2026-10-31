@@ -42,17 +42,20 @@ function clock(ms: number): string {
   return new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
-/** the "d" of a path: one M..L run per stretch of numbers between nulls */
+/**
+ * The "d" of a path: one M..L run per stretch of numbers between nulls; a lone point
+ * becomes a dot (a zero-length segment with round caps)
+ */
 export function linePath(xs: number[], ys: (number | null)[]): string {
-  let d = '', open = false;
+  let d = '';
   for (let i = 0; i < xs.length; i++) {
     const y = ys[i];
-    if (y === null) {
-      open = false;
+    if (y === null)
       continue;
-    }
+    const open = i > 0 && ys[i - 1] !== null;
     d += `${open ? 'L' : 'M'}${xs[i].toFixed(1)},${y.toFixed(1)}`;
-    open = true;
+    if (!open && (i === xs.length - 1 || ys[i + 1] === null))
+      d += 'h0';
   }
   return d;
 }
@@ -85,12 +88,9 @@ function chart(samples: readonly Sample[], series: Series[], fmt: (v: number) =>
       svg('title', {}, s.label))));
 }
 
-function last(values: (number | null)[]): number | null {
-  for (let i = values.length - 1; i >= 0; i--) {
-    if (values[i] !== null)
-      return values[i];
-  }
-  return null;
+/** the newest value; none while the newest sample is a gap (the router away) */
+export function last(values: (number | null)[]): number | null {
+  return values.length ? values[values.length - 1] : null;
 }
 
 registerView({
@@ -122,7 +122,7 @@ registerView({
       const all = historySource().samples();
       const to = all.length ? all[all.length - 1].at : Date.now();
       const from = range ? to - range * 60_000 : (all[0]?.at ?? to);
-      const samples = range ? all.filter((s) => s.at >= from) : all;
+      const samples = all.filter((s) => s.at >= from && s.at <= to);
       if (!samples.length) {
         body.replaceChildren(h('p', { class: 'muted' }, t('empty')));
         return;
