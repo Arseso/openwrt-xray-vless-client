@@ -6,7 +6,7 @@ import { execFileSync } from 'node:child_process';
 import { afterAll, describe, expect, it } from 'vitest';
 import { Profile } from '../../src/api/profiles';
 import { Connection } from '../../src/core/connection';
-import { DEFAULT_SETTINGS, Notice, Notifier, saveSettings, startNotifications } from '../../src/core/notify';
+import { DEFAULT_SETTINGS, Notice, Notifier, health, saveSettings, startNotifications } from '../../src/core/notify';
 import { NodeTransport } from './node-transport';
 
 const URL = process.env.XVPN_URL ?? 'http://127.0.0.1:8019';
@@ -41,11 +41,11 @@ function unblock(): void {
 }
 
 describe.skipIf(!CONTAINER)(`notifications against ${URL}`, () => {
-  const health = CONTAINER ? inStand('uci -q get xvpn.health.interval || echo 30').trim() : '30';
+  const interval = CONTAINER ? inStand('uci -q get xvpn.health.interval || echo 30').trim() : '30';
 
   afterAll(() => {
     unblock();
-    inStand(`/etc/init.d/uhttpd start; uci set xvpn.health.interval=${health}; uci commit xvpn; /etc/init.d/xvpn restart`);
+    inStand(`/etc/init.d/uhttpd start; uci set xvpn.health.interval=${interval}; uci commit xvpn; /etc/init.d/xvpn restart`);
   });
 
   it('one failover for a blocked server, one down and one up for the router', async () => {
@@ -69,7 +69,8 @@ describe.skipIf(!CONTAINER)(`notifications against ${URL}`, () => {
       expect((await conn.connect(profile)).phase).toBe('online');
       const before = await until(() => {
         const s = conn.context?.poller.status;
-        return s?.running && s.state === 'connected' && s.active ? s : null;
+        // degraded too: the stand may have no DNS over HTTPS to the internet
+        return s?.running && health(s) === 'up' && s.active ? s : null;
       }, 60_000);
       const active = before.servers.find((s) => s.id === before.active)!;
       console.log('active', active.name, active.port);
