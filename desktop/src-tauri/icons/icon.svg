@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <!-- placeholder icon: a shield with an x -->
+  <rect width="1024" height="1024" rx="200" fill="#2f6fde"/>
+  <path d="M512 150 L820 270 V500 C820 690 690 820 512 880 C334 820 204 690 204 500 V270 Z" fill="#ffffff"/>
+  <path d="M390 380 L634 650 M634 380 L390 650" stroke="#2f6fde" stroke-width="80" stroke-linecap="round"/>
+</svg>

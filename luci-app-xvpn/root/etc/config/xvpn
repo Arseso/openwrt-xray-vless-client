@@ -29,4 +29,8 @@ config health 'health'
 	option quarantine '300'
 	option concurrency '4'
 
+config split 'split'
+	option ru '0'
+	option ru_interval '168'
+
 config manual 'manual'

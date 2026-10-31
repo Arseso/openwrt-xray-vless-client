@@ -1,6 +1,6 @@
 #!/usr/bin/ucode
 // SPDX-License-Identifier: MIT
-// xvpn command line: generate | ifnames | ifnames-wait | fw-apply [passthrough] | fw-guard | fw-refresh | fw-remove | update [sid...|all]
+// xvpn command line: generate | ifnames | ifnames-wait | fw-apply [passthrough] | fw-guard | fw-refresh | fw-remove | update [sid...|all] | lists
 
 'use strict';
 
@@ -13,9 +13,10 @@ import {
 	FW_WANT_FILE, FW_MODE_FILE, FW_ERROR_FILE, FW_WARN_FILE, FW_LOCK_FILE, GENERATE_ERROR_FILE, STALE_FILE
 } from 'xvpn.util';
 import { all_servers, update, prune, list_change } from 'xvpn.subscription';
-import { build_index, generate, ports_error } from 'xvpn.xrayconf';
+import { build_index, generate, ports_error, config_key } from 'xvpn.xrayconf';
 import { host_env } from 'xvpn.host';
 import { resolve, apply, remove, fix_ifnames, ifnames_applied } from 'xvpn.firewall';
+import { direct_nets, direct_domains, update_lists, prune_lists } from 'xvpn.split';
 
 const cfg = load_config();
 
@@ -30,8 +31,9 @@ const STARTED = clock(true)[0];
 // follows a wifi change tests nothing; a changed server list is tested once (one test of the
 // whole config while xray accepts it; one by one only the servers it has not judged yet).
 // { bin: bin_sig(), frame: <main and access settings>, full: <the server set whose whole
-// config passed>, ok: { <outbound key>: bool } }; another binary or other settings start
-// anew. In /var: after a boot everything is tested once again
+// config passed>, ok: { <outbound key>: bool }, why: { <outbound key>: <xray's reason> } };
+// another binary or other settings start anew. In /var: after a boot everything is tested
+// once again
 const TESTED_FILE = `${VAR_DIR}/tested.json`;
 
 // another binary (an upgrade, xray_bin changed or fixed in place) may judge otherwise
@@ -54,6 +56,18 @@ for (let k in [ 'GOMEMLIMIT', 'GOGC' ])
 // the last xray_ok was xray's own verdict on the config, so it may be kept: accepted, or
 // exit code 23 (config error); not hung, not killed (OOM), not a Go runtime error (2)
 let definite = false;
+// why xray rejected the config of the last xray_ok (exit code 23), for the log
+let reason = null;
+
+// "Failed to start: main: failed to load config files: [<path>] > infra/conf: failed to
+// build outbound config with tag srv-0 > infra/conf: vless without TLS…": the last part
+// says what is wrong with the server (a newer xray forbids what the link sets, #14)
+function xray_reason(text) {
+	let l = match(text ?? '', /Failed to start: ([^\n]*)/)?.[1];
+	if (!l)
+		return null;
+	return substr(replace(pop(split(l, ' > ')), /^[a-z\/]+: /, ''), 0, 300);
+}
 
 // write_json that checks the file is whole: on a full tmpfs xray would reject a truncated
 // config with the same 23
@@ -68,13 +82,14 @@ function put(path, obj) {
 // process as exit code 0: sh writes xray's own code.
 function xray_ok(path, limit, reserve) {
 	definite = false;
+	reason = null;
 	let left = GENERATE_BUDGET - (clock(true)[0] - STARTED) - (reserve ?? 0);
 	if (left <= 0)
 		return null;
-	let out = `${VAR_DIR}/xray-ok`, wait = min(limit, left), hung = false, t;
+	let out = `${VAR_DIR}/xray-ok`, said = `${VAR_DIR}/xray-ok.log`, wait = min(limit, left), hung = false, t;
 	unlink(out);
 	uloop.init();
-	let p = uloop.process('/bin/sh', [ '-c', `${shq(cfg.main.xray_bin)} run -test -c ${shq(path)} >/dev/null 2>&1; echo $? > ${shq(out)}` ],
+	let p = uloop.process('/bin/sh', [ '-c', `${shq(cfg.main.xray_bin)} run -test -c ${shq(path)} >${shq(said)} 2>&1; echo $? > ${shq(out)}` ],
 		XRAY_ENV, () => uloop.end());
 	if (!p)
 		return false;
@@ -84,13 +99,16 @@ function xray_ok(path, limit, reserve) {
 	});
 	uloop.run();
 	t.cancel();
-	let code = readfile(out);
+	let code = readfile(out), text = readfile(said);
 	unlink(out);
+	unlink(said);
 	if (hung && wait < limit)
 		return null;
 	if (hung)
 		log(`${cfg.main.xray_bin} run -test hung for ${limit} s, killed`);
 	definite = !hung && code != null && int(code) in [ 0, 23 ];
+	if (definite && int(code) == 23)
+		reason = xray_reason(text);
 	return !hung && code != null && int(code) == 0;
 }
 
@@ -136,7 +154,19 @@ function fw(want) {
 			mode = 'block';
 	}
 
+	// split tunneling (#67): only full and passthrough carry the lists
+	if (mode in [ 'full', 'passthrough' ])
+		res.direct = direct_nets(cfg);
 	let err = apply(rc, res, MODES[mode]);
+	// a list nft does not take (out of kernel memory, say) must not block the clients:
+	// they go through the tunnel without it, the status shows the error
+	if (err != null && length([ ...(res.direct?.v4 ?? []), ...(res.direct?.v6 ?? []) ])) {
+		let e = `split tunneling list rejected, all traffic goes through the tunnel: ${err}`;
+		push(errs, e);
+		log(e);
+		res.direct = null;
+		err = apply(rc, res, MODES[mode]);
+	}
 	if (err != null) {
 		push(errs, `firewall rules failed: ${err}`);
 		let tried = mode;
@@ -201,18 +231,25 @@ case 'generate': {
 	// set it again meanwhile
 	let stale = readfile(STALE_FILE);
 	prune(cfg);
+	prune_lists(cfg);
 	let all = all_servers(cfg), servers = all;
 	let active = trim(readfile(ACTIVE_FILE) ?? ''), prev = read_json(INDEX_FILE);
 	// IPv6 and the ports held by others (not by our running xray), once for every index below
 	let env = host_env();
 	// everything but the servers that goes into the config (ports, DNS, sniffing, listen…)
-	let sig = bin_sig(), frame = conf_key([ cfg.main, cfg.access, env.ipv6 ]), tested = read_json(TESTED_FILE);
+	// the direct domains (#67) only when set: the key of the configs without them stays as it was
+	let domains = direct_domains(cfg);
+	let sig = bin_sig(), frame = conf_key(length(domains) ? [ cfg.main, cfg.access, env.ipv6, domains ] : [ cfg.main, cfg.access, env.ipv6 ]), tested = read_json(TESTED_FILE);
 	if (type(tested?.ok) != 'object' || tested.bin != sig || tested.frame != frame)
 		tested = { bin: sig, frame, full: null, ok: {} };
+	tested.why ??= {};
 	let verdict = (s) => tested.ok[s.key ??= conf_key(s.outbound)];
 	let set_key = (list) => conf_key(sort(map(list, (s) => s.key ?? conf_key(s.outbound))));
 	// rejected before: dropped without a test
-	let skipped = map(filter(servers, (s) => verdict(s) === false), (s) => s.name);
+	// each reason in full went to the log when the server was tested
+	let brief = (r) => (length(r) > 80) ? `${substr(r, 0, 79)}…` : r;
+	let skipped = map(filter(servers, (s) => verdict(s) === false),
+		(s) => tested.why[s.key] ? `${s.name} (${brief(tested.why[s.key])})` : s.name);
 	if (length(skipped)) {
 		log(`xray rejected ${length(skipped)} server(s) earlier: ${join(', ', skipped)}`);
 		servers = filter(servers, (s) => verdict(s) !== false);
@@ -230,7 +267,14 @@ case 'generate': {
 	// midway changes nothing
 	let next = `${VAR_DIR}/config.new.json`, tmp = `${VAR_DIR}/check.json`;	// xray goes by the extension
 	mkdir_p(VAR_DIR);
-	write_json(next, generate(cfg, servers, idx));
+	let conf = generate(cfg, servers, idx);
+	write_json(next, conf);
+	// procd restarts xray when the key changes (init.d), not for another active server: the
+	// daemon switches those without a restart (#13)
+	let key = `${VAR_DIR}/config.key`;
+	write_file(key, config_key(conf));
+	idx.xray_key = split(run(`md5sum ${shq(key)}`).out, ' ')[0];
+	unlink(key);
 
 	// the verdicts got so far are kept whatever the end: they are xray's own
 	function keep(passed) {
@@ -240,11 +284,15 @@ case 'generate': {
 				tested.ok[s.key] = true;
 		}
 		// the servers gone from the subscriptions go from the file too
-		let ok = {};
+		let ok = {}, why = {};
 		for (let s in all)
-			if (verdict(s) != null)
+			if (verdict(s) != null) {
 				ok[s.key] = verdict(s);
+				if (!ok[s.key] && tested.why[s.key])
+					why[s.key] = tested.why[s.key];
+			}
 		tested.ok = ok;
+		tested.why = why;
 		write_json(TESTED_FILE, tested);
 	}
 	function commit(code) {
@@ -311,14 +359,21 @@ case 'generate': {
 			definite = false;
 			if (put(tmp, generate(cfg, [ s ], build_index(cfg, [ s ], s.id, null, env))))
 				ok = xray_ok(tmp, TEST_ONE, TEST_FULL);
-			if (definite)
+			if (definite) {
 				tested.ok[s.key] = ok;
+				if (!ok && reason)
+					tested.why[s.key] = reason;
+			}
 			if (ok == null)
 				untested++;
 			else if (ok)
 				push(good, s);
-			else
+			else {
 				push(bad, s.name);
+				// a newer xray forbids what the link sets (vless without TLS, allowInsecure…)
+				if (definite && reason)
+					log(`xray rejected server "${s.name}": ${reason}`);
+			}
 		}
 		log(`xray rejected ${length(bad)} server(s): ${join(', ', bad)}`);
 		if (untested && !length(good))
@@ -338,6 +393,11 @@ case 'generate': {
 		keep(true);
 	commit(null);
 }
+
+// for init.d: main.xray_bin as load_config() checked it (util.uc valid_bin())
+case 'xray-bin':
+	print(load_config().main.xray_bin, '\n');
+	exit(0);
 
 case 'fw-apply':
 	exit(fw(ARGV[1] == 'passthrough' ? 'passthrough' : 'full') ? 0 : 1);
@@ -415,7 +475,22 @@ case 'update': {
 	exit((need == 'reload') ? 0 : 2);
 }
 
+// the Russian list of split tunneling (#67): downloaded through the active server, then
+// directly; a changed list goes into the rules at once, xray is not restarted.
+// 0: changed, 2: unchanged, 1: error
+case 'lists': {
+	let r = update_lists(cfg, active_port());
+	log(r.error ? `split tunneling list: ${r.error}`
+		: `split tunneling list: ${r.v4} IPv4 and ${r.v6} IPv6 networks${r.changed ? ' (changed)' : ''}`);
+	printf('%J\n', r);
+	if (r.error)
+		exit(1);
+	if (r.changed && readfile(FW_WANT_FILE))
+		fw(null);
+	exit(r.changed ? 0 : 2);
+}
+
 default:
-	warn('usage: cli.uc generate | ifnames | ifnames-wait | fw-apply [passthrough] | fw-guard | fw-refresh | fw-remove | update [sid...|all]\n');
+	warn('usage: cli.uc generate | ifnames | ifnames-wait | fw-apply [passthrough] | fw-guard | fw-refresh | fw-remove | update [sid...|all] | lists\n');
 	exit(1);
 }

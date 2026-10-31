@@ -9,7 +9,10 @@
 # procd lock held) does not stop the health checks, a slow generate is not killed and a
 # killed one leaves the running config; before NTP sets the clock no server goes to quarantine;
 # the status tab and a reload of the same servers start no xray; a test port taken by another
-# program is skipped, a main one is an error, xray starts with IPv6 off.
+# program is skipped, a main one is an error, xray starts with IPv6 off; UDP sessions of a
+# torrent client are let go after conn_idle, BitTorrent is dropped when blocked; split tunneling:
+# listed addresses go around xray, listed domains out of xray directly, the Russian list;
+# the tunnel speed in status over fw4 flush; the rpcd user of the desktop app.
 set -e
 cd "$(dirname "$0")/.."
 DOCKER="${DOCKER:-docker}"
@@ -40,7 +43,9 @@ diag() {
 	echo "--- xvpn status"; command ubus -t 3 call xvpn status || echo "(rc=$?)"
 	echo "--- service list"; command ubus -t 3 call service list '{"name":"xvpn"}' || echo "(rc=$?)"
 	[ ! -s /tmp/ubus-timeouts ] || { echo "--- ubus timeouts"; cat /tmp/ubus-timeouts; }
-	echo "--- logread"; logread | grep -E 'xvpn|xray|procd' | tail -30
+	echo "--- logread"; logread | grep -E 'xvpn|xray|procd' | grep -v 'daemon.info xray' | tail -30
+	# a runtime error of xvpnd: procd logs its stderr under the binary name
+	echo "--- ucode"; logread | grep 'ucode\[' | tail -20
 }
 i=0; until logread 2>/dev/null | grep -q 'init complete'; do [ $i -lt 30 ] || break; sleep 1; i=$((i+1)); done
 # netifd puts eth0 into br-lan and drops the docker address: give it back as wan.
@@ -58,12 +63,19 @@ set network.wan.ipaddr=$1
 set network.wan.gateway=$2
 commit network
 UCI
+# DNS for wan: the host's resolvers, but not one in the router's own LAN (a home router at
+# 192.168.1.1 as the host's DNS: dnsmasq would ask itself and refuse), 1.1.1.1 as the fallback
+for ns in $(awk '/^nameserver/ { print $2 }' /etc/resolv.conf) 1.1.1.1; do
+	case $ns in 192.168.1.*|127.*|*:*) continue ;; esac
+	uci add_list network.wan.dns=$ns
+done
+uci commit network
 /etc/init.d/network restart
 sleep 3
 # downloads.openwrt.org may fail right after the network restart or on a busy host
 # (wget returned 4): opkg update and install are tried again
 for i in 1 2 3 4 5; do opkg update >/dev/null && break; sleep 5; done
-for i in 1 2 3 4 5; do opkg install ucode-mod-uloop xray-core curl ip-full >/dev/null && break; sleep 5; done
+for i in 1 2 3 4 5; do opkg install ucode-mod-uloop ucode-mod-socket xray-core curl ip-full >/dev/null && break; sleep 5; done
 cp -a /src/luci-app-xvpn/root/. /
 /etc/uci-defaults/80_luci-xvpn
 /etc/init.d/rpcd restart
@@ -87,6 +99,11 @@ ip -n wan route add default via 45.0.0.1
 sysctl -qw net.ipv4.ip_forward=1
 mkdir -p /tmp/www; echo hello > /tmp/www/index.html
 ip netns exec wan uhttpd -f -p 45.0.0.2:80 -h /tmp/www >/dev/null 2>&1 &
+# health.url2 (#61) by domain on its own address: the remotes resolve it, a whitelisting one
+# drops it, a DROP of 45.0.0.3 in wan stands for its CDN down
+ip -n wan addr add 45.0.0.3/24 dev vw1
+ip netns exec wan uhttpd -f -p 45.0.0.3:80 -h /tmp/www >/dev/null 2>&1 &
+echo '45.0.0.3 check2.test' >> /etc/hosts
 
 direct() { ip netns exec cl ping -c1 -W1 45.0.0.2 >/dev/null 2>&1; }
 tunnel() { [ "$(ip netns exec cl curl -s -m 5 http://45.0.0.2/)" = hello ]; }
@@ -126,12 +143,13 @@ SH
 direct || { echo "FAIL: test network: client cannot reach wan without xvpn"; exit 1; }
 echo "OK: test network, client goes direct without xvpn"
 
-remote() { # port [freedom settings]
+remote() { # port [freedom settings] [domain it drops: a whitelist without it]
 	_fr=${2:-}; [ -n "$_fr" ] || _fr='{}'
+	_drop=${3:+'"routing": { "rules": [ { "domain": [ "full:'$3'" ], "outboundTag": "drop" } ] },'}
 	cat > /tmp/remote-$1.json <<JSON
 { "inbounds": [ { "listen": "127.0.0.1", "port": $1, "protocol": "vless",
-    "settings": { "clients": [ { "id": "$UUID" } ], "decryption": "none" } } ],
-  "outbounds": [ { "protocol": "freedom", "settings": $_fr } ] }
+    "settings": { "clients": [ { "id": "$UUID" } ], "decryption": "none" } } ], $_drop
+  "outbounds": [ { "protocol": "freedom", "settings": $_fr }, { "protocol": "blackhole", "tag": "drop" } ] }
 JSON
 	xray run -c /tmp/remote-$1.json >/dev/null 2>&1 &
 	echo $! > /tmp/remote-$1.pid
@@ -173,10 +191,18 @@ add_list xvpn.access.network=lan
 add_list xvpn.access.port=vc0
 set xvpn.health.interval=3
 set xvpn.health.url=http://45.0.0.2/
+set xvpn.health.url2=http://check2.test/
+set xvpn.health.url2_cdn=1
 set xvpn.health.timeout=4
 set xvpn.health.fail_threshold=2
 set xvpn.health.reload_idle=15
 set xvpn.health.reload_retry=5
+set xvpn.health.retry_max=12
+set xvpn.health.dns_check=0
+set xvpn.health.dl_url=off
+set xvpn.main.speed_interval=1
+add_list xvpn.health.wan_url=http://45.0.0.2:9/
+add_list xvpn.health.wan_url=http://check2.test/
 add_list xvpn.manual.link='$(link 18444 second)'
 add_list xvpn.manual.link='$(link 18443 first)'
 commit xvpn
@@ -207,6 +233,24 @@ want_mode full full
 echo "OK: full rules, ip rule, luci.xvpn firewall"
 tunnel || { echo "FAIL: client gets no internet through the tunnel"; exit 1; }
 echo "OK: client goes through the tunnel"
+# speed meter (#83, speed_interval 1 s): a download limited to 256 KB/s shows a speed, the
+# bytes after it are the file within 10 % (IP packets: the headers are on top). A small receive
+# buffer of the client: otherwise the kernel takes the file at once, faster than curl reads it
+dd if=/dev/zero of=/tmp/www/big bs=1k count=1024 2>/dev/null
+rmem=$(ip netns exec cl sysctl -n net.ipv4.tcp_rmem)
+ip netns exec cl sysctl -qw net.ipv4.tcp_rmem='4096 32768 32768'
+d0=$(status @.traffic.down); u0=$(status @.traffic.up)
+ip netns exec cl curl -s -o /dev/null --limit-rate 256k http://45.0.0.2/big & dl=$!
+speed_on() { [ "$(status @.speed.down)" -gt 65536 ]; }
+wait_cmd 4 speed_on
+sp=$(status @.speed.down)
+wait $dl
+sleep 1
+d=$(($(status @.traffic.down) - d0)); u=$(($(status @.traffic.up) - u0))
+rm /tmp/www/big
+ip netns exec cl sysctl -qw net.ipv4.tcp_rmem="$rmem"
+[ $d -ge 1048576 ] && [ $d -le 1153433 ] && [ $u -gt 0 ] || { echo "FAIL: traffic: down $d (file 1048576), up $u"; exit 1; }
+echo "OK: tunnel speed $sp B/s at 256 KB/s, $d bytes down for a 1 MB file"
 blocked "connected, ICMP is not tunneled"
 /etc/init.d/xvpn-guard start
 full_rules "xvpn-guard start"
@@ -290,13 +334,123 @@ wait_for @.state connected 40
 	|| { echo "FAIL: tproxy not back on :: with IPv6 on"; cat /proc/net/if_inet6; exit 1; }
 echo "OK: back on :: once IPv6 is on"
 
+# split tunneling (#67): a CGI on 45.0.0.4 and 45.0.0.5 answers with the address the request
+# came from: 10.77.0.2 — the router forwarded the client (direct), 45.0.0.1 — xray (tunnel)
+mkdir -p /tmp/www/cgi-bin
+printf '#!/bin/sh\nprintf "Content-Type: text/plain\\r\\n\\r\\n%%s\\n" "$REMOTE_ADDR"\n' > /tmp/www/cgi-bin/ip
+chmod +x /tmp/www/cgi-bin/ip
+ip -n wan addr add 45.0.0.4/24 dev vw1; ip -n wan addr add 45.0.0.5/24 dev vw1
+ip netns exec wan uhttpd -f -p 45.0.0.4:80 -p 45.0.0.5:80 -h /tmp/www -x /cgi-bin >/dev/null 2>&1 &
+echo '45.0.0.5 direct.test' >> /etc/hosts
+from() { ip netns exec cl curl -s -m 5 "$@" 2>/dev/null || true; }
+via() { # what url [curl args]: the request goes as what (direct | tunnel | none)
+	_w=$1; shift; _a=$(from "$@")
+	case "$_a" in 10.77.0.2) _g=direct ;; 45.0.0.1) _g=tunnel ;; *) _g=none ;; esac
+	[ "$_g" = "$_w" ] || { echo "FAIL: $* went $_g ('$_a'), expected $_w"; nft list table inet xvpn | head -40; diag; exit 1; }
+}
+ping_ok() { ip netns exec cl ping -c1 -W1 "$1" >/dev/null 2>&1; }
+# by lookup: auto-merge prints 45.0.0.4 and 45.0.0.5 as 45.0.0.4/31
+in_direct() { nft get element inet xvpn direct4 "{ $1 }" >/dev/null 2>&1; }
+via tunnel http://45.0.0.4/cgi-bin/ip
+# the active remote drops direct.test (a whitelist without it): it opens only around the tunnel
+# (checked at the end, with the domain off); the Russian list from 45.0.0.2, not there yet
+active_is first || { echo "FAIL: split tests expect first active, got $(active_name)"; exit 1; }
+kill $(cat /tmp/remote-18443.pid); sleep 1; remote 18443 '' direct.test
+uci batch <<UCI
+add_list xvpn.split.ip=45.0.0.4
+add_list xvpn.split.ip=not-an-address
+add_list xvpn.split.domain=direct.test
+set xvpn.split.ru=1
+add_list xvpn.split.ru_url=http://45.0.0.2/ru.zone
+commit xvpn
+UCI
+/etc/init.d/xvpn reload
+sleep 2
+wait_for @.state connected 40
+in_direct 45.0.0.4 || { echo "FAIL: 45.0.0.4 not in direct4"; nft list table inet xvpn; exit 1; }
+via direct http://45.0.0.4/cgi-bin/ip
+ping_ok 45.0.0.4 || { echo "FAIL: kill switch blocks an address of the direct list"; exit 1; }
+via tunnel http://45.0.0.5/cgi-bin/ip
+blocked "split on, an address out of the list"
+echo "OK: split: the listed address goes around xray (ICMP too), the rest through the tunnel"
+# the freedom outbound connects from the router: the remote never sees direct.test
+[ "$(from http://45.0.0.5/ -H 'Host: direct.test')" = hello ] || { echo "FAIL: direct.test is not sent out directly"; diag; exit 1; }
+# other domains still go to the remote (it resolves check2.test itself)
+[ "$(from http://45.0.0.3/ -H 'Host: check2.test')" = hello ] || { echo "FAIL: other domains broke"; exit 1; }
+logread | grep -q '"not-an-address" is not an IP address' || { echo "FAIL: bad entry not logged"; exit 1; }
+echo "OK: split: a listed domain goes out of xray directly (freedom), a bad address is skipped"
+# flow offload (fw4 flowtable) on: the direct connections still work, the tunnel too
+if uci set firewall.@defaults[0].flow_offloading=1 && uci commit firewall && /etc/init.d/firewall restart >/dev/null 2>&1 \
+	&& nft list flowtables 2>/dev/null | grep -q flowtable; then
+	full_rules "flow offloading on"
+	via direct http://45.0.0.4/cgi-bin/ip; via tunnel http://45.0.0.5/cgi-bin/ip
+	echo "OK: split with flow offloading: direct and tunnel work"
+else
+	echo "SKIP: no flowtable in this kernel"
+fi
+uci -q delete firewall.@defaults[0].flow_offloading || true; uci commit firewall; /etc/init.d/firewall restart >/dev/null 2>&1
+full_rules "flow offloading off"
+# kill switch: the guard (block: stop, boot, failed rules) closes the direct list too
+ucode /usr/share/xvpn/cli.uc fw-guard
+no_tproxy "split, guard"
+ping_ok 45.0.0.4 && { echo "FAIL: direct list open in the guard"; exit 1; }
+via none http://45.0.0.4/cgi-bin/ip
+nft list table inet xvpn | grep -q direct && { echo "FAIL: lists in the guard table"; exit 1; }
+ucode /usr/share/xvpn/cli.uc fw-apply
+via direct http://45.0.0.4/cgi-bin/ip
+echo "OK: split: the guard (kill switch) blocks the direct list too"
+# the Russian list: downloaded (here from 45.0.0.2 through the tunnel), cached on the flash,
+# applied to the rules without a restart of xray
+echo '45.0.0.5/32 # x' > /tmp/www/ru.zone
+x=$(xray_pid)
+# the daemon's own first download (15 s after its start, the file was not there) may be running
+wait_cmd 20 sh -c 'ubus call luci.xvpn split_update | grep -q "\"ok\": true"'
+wait_cmd 30 in_direct 45.0.0.5
+grep -qx 45.0.0.5 /etc/xvpn/lists/ru.txt || { echo "FAIL: list not cached: $(cat /etc/xvpn/lists/ru.txt)"; exit 1; }
+[ "$(ubus call luci.xvpn split | jsonfilter -e @.cached.v4)" = 1 ] || { echo "FAIL: luci.xvpn split: $(ubus call luci.xvpn split)"; exit 1; }
+[ "$(xray_pid)" = "$x" ] || { echo "FAIL: the list restarted xray"; exit 1; }
+via direct http://45.0.0.5/cgi-bin/ip
+in_direct 45.0.0.4 || { echo "FAIL: own list lost beside the Russian one"; exit 1; }
+echo "OK: split: the Russian list is downloaded, cached and applied without restarting xray"
+# a broken source keeps the cached list
+echo '<html>error</html>' > /tmp/www/ru.zone
+ubus call xvpn lists >/dev/null
+wait_cmd 30 sh -c 'ubus call luci.xvpn split | grep -q "no networks in the list"'
+in_direct 45.0.0.5 || { echo "FAIL: a failed download dropped the list"; exit 1; }
+echo "OK: split: a failed download keeps the cached list"
+uci batch <<UCI
+set xvpn.split.ru=0
+delete xvpn.split.ru_url
+delete xvpn.split.ip
+delete xvpn.split.domain
+commit xvpn
+UCI
+/etc/init.d/xvpn reload
+sleep 2
+wait_for @.state connected 40
+[ ! -e /etc/xvpn/lists/ru.txt ] || { echo "FAIL: cache of the list left on the flash"; exit 1; }
+nft list table inet xvpn | grep -q '@direct' && { echo "FAIL: direct rules without lists"; exit 1; }
+via tunnel http://45.0.0.4/cgi-bin/ip
+# the remote drops direct.test: so above it went around the tunnel
+[ -z "$(from http://45.0.0.5/ -H 'Host: direct.test')" ] || { echo "FAIL: the remote does not drop direct.test"; exit 1; }
+echo "OK: split off: cache removed, all through the tunnel"
+kill $(cat /tmp/remote-18443.pid); sleep 1; remote 18443
+wait_for @.state connected 40
+
 # fw4 flush (service firewall stop/restart) deletes all tables: the include puts them back
+t0=$(status @.traffic.down)
 /etc/init.d/firewall restart
 full_rules "after firewall restart"
 /etc/init.d/firewall stop; /etc/init.d/firewall start
 full_rules "after firewall stop + start"
 tunnel || { echo "FAIL: no tunnel after firewall stop + start"; exit 1; }
 echo "OK: rules restored after fw4 flush"
+# the new table starts its counters from zero: no negative speed, no jump, bytes kept
+sleep 1
+sp=$(status @.speed.down); t=$(status @.traffic.down)
+[ "$sp" -ge 0 ] && [ "$sp" -lt 65536 ] && [ "$t" -ge "$t0" ] \
+	|| { echo "FAIL: speed after fw4 flush: $sp B/s, traffic $t0 -> $t"; exit 1; }
+echo "OK: speed meter goes on over fw4 flush"
 
 # SSIDs: fixed names in /etc/config/wireless; there is no radio in the container,
 # so the names come from UCI alone, as on boot before Wi-Fi is up
@@ -568,17 +722,197 @@ wait_for @.state connected 60
 [ "$(active_name)" = second ] || { echo "FAIL: failover expected second, got $(active_name)"; exit 1; }
 echo "OK: failover to the other server"
 logread | grep xvpn | grep -E 'switching|state' | tail -5
+# the first WAN URL refuses (blocked): the failover above went on with the second (#11)
+logread | grep -q 'no direct internet' && { echo "FAIL: wan_down with one WAN URL down"; exit 1; }
+echo "OK: one WAN URL down is no wan_down"
+
+# #13: a server chosen by hand without a restart of xray (`xray api bo` points the balancer at
+# it): a download open through the old one goes on, new connections go through the new one,
+# the config and the index point at it for the next start
+id_of() { status "@.servers[@.name='$1'].id"; }
+select_ok() { [ "$(ubus call xvpn select "{\"id\":\"$1\"}" | jsonfilter -e @.ok)" = true ]; }
+down_of() { ubus call luci.xvpn stats | jsonfilter -e "@.traffic['$1'].down"; }
+tag_of() { jsonfilter -i /var/etc/xvpn/index.json -e "@.servers[@.id='$1'].tag"; }
+head -c 65536 /dev/zero > /tmp/www/dl
+remote 18443
+test_all
+id1=$(id_of first); id2=$(id_of second); xp=$(xray_pid)
+ip netns exec cl curl -s -m 30 --limit-rate 16k -o /tmp/dl.out http://45.0.0.2/dl & dlp=$!
+sleep 1
+select_ok "$id1" && active_is first || { echo "FAIL: select first"; ubus call xvpn status; exit 1; }
+d0=$(down_of "$id1")
+tunnel || { echo "FAIL: no tunnel right after the switch"; diag; exit 1; }
+wait $dlp || true
+[ "$(wc -c < /tmp/dl.out)" = 65536 ] || { echo "FAIL: the download through the old server broke at $(wc -c < /tmp/dl.out) bytes"; diag; exit 1; }
+[ "$(xray_pid)" = "$xp" ] || { echo "FAIL: select restarted xray"; diag; exit 1; }
+[ "$(down_of "$id1")" -gt "${d0:-0}" ] || { echo "FAIL: new connections do not go through first: $(ubus call luci.xvpn stats)"; exit 1; }
+[ "$(jsonfilter -i /var/etc/xvpn/config.json -e '@.routing.balancers[0].selector[0]')" = "$(tag_of "$id1")" ] \
+	&& [ "$(jsonfilter -i /var/etc/xvpn/index.json -e @.active)" = "$id1" ] || { echo "FAIL: config or index not pointed at first"; exit 1; }
+logread | grep -q 'without a restart' && { echo "FAIL: the switch fell back to a reload"; diag; exit 1; }
+echo "OK: select switches without a restart of xray, the open download goes on"
+# a reload of the same servers (LuCI, UCI triggers) does not restart xray either
+/etc/init.d/xvpn reload
+sleep 2
+wait_for @.state connected 30
+[ "$(xray_pid)" = "$xp" ] && active_is first || { echo "FAIL: a reload after the switch restarted xray or switched back"; diag; exit 1; }
+wait_cmd 15 select_ok "$id2"
+wait_cmd 10 active_is second
+[ "$(xray_pid)" = "$xp" ] || { echo "FAIL: select back restarted xray"; exit 1; }
+rm -f /etc/xvpn/active_manual	# the daemon's choice, as before
+echo "OK: a reload keeps xray and the choice, back to second without a restart"
+
+# #10: the DNS server of the clients as an IP (dnsmasq in wan): their queries go over UDP
+# through the server, so does the check. "second" drops UDP: names do not resolve through it,
+# the daemon goes to "first"; the clients resolve names
+ip netns exec wan dnsmasq -k -u root -C /dev/null --no-resolv --bind-interfaces -a 45.0.0.2 -p 53 \
+	-A /test/45.0.0.2 -A /gstatic.com/45.0.0.2 --pid-file=/tmp/dnsmasq-wan.pid >/dev/null 2>&1 &
+udpdrop() { # port: its remote drops UDP
+	kill $(cat /tmp/remote-$1.pid) 2>/dev/null || true
+	cat > /tmp/remote-$1.json <<JSON
+{ "inbounds": [ { "listen": "127.0.0.1", "port": $1, "protocol": "vless",
+    "settings": { "clients": [ { "id": "$UUID" } ], "decryption": "none" } } ],
+  "routing": { "rules": [ { "network": "udp", "outboundTag": "drop" } ] },
+  "outbounds": [ { "protocol": "freedom" }, { "protocol": "blackhole", "tag": "drop" } ] }
+JSON
+	xray run -c /tmp/remote-$1.json >/dev/null 2>&1 &
+	echo $! > /tmp/remote-$1.pid
+}
+resolves() { ip netns exec cl nslookup a.test 10.77.0.1 2>/dev/null | grep -q 'Address.*45.0.0.2'; }
+# the download check of the #11 step below is on from here: it passes through both
+mkdir -p /tmp/www/cgi-bin /tmp/freeze/cgi-bin
+printf '#!/bin/sh\nprintf "Content-Type: application/octet-stream\\r\\n\\r\\n"\nhead -c 65536 /dev/zero\n' > /tmp/www/cgi-bin/dl
+printf '#!/bin/sh\nprintf "Content-Type: application/octet-stream\\r\\n\\r\\n"\nhead -c 20480 /dev/zero\nsleep 30\n' > /tmp/freeze/cgi-bin/dl
+chmod +x /tmp/www/cgi-bin/dl /tmp/freeze/cgi-bin/dl
+ip netns exec wan uhttpd -f -p 45.0.0.2:8098 -h /tmp/www -x /cgi-bin >/dev/null 2>&1 &
+ip netns exec wan uhttpd -f -p 45.0.0.2:8099 -h /tmp/freeze -x /cgi-bin >/dev/null 2>&1 &
+dp=$(xvpnd_pid)
+uci batch <<UCI
+set xvpn.access.dns_server=45.0.0.2
+set xvpn.health.dns_check=1
+set xvpn.health.quarantine=5
+set xvpn.health.dl_url=http://45.0.0.2:8098/cgi-bin/dl
+set xvpn.health.dl_interval=1
+set xvpn.health.dl_timeout=3
+commit xvpn
+UCI
+reload_config
+wait_cmd 30 xvpnd_restarted "$dp"
+wait_for @.state connected 30
+wait_for @.udp true 15
+active_is second && resolves || { echo "FAIL: client names through second"; diag; exit 1; }
+echo "OK: UDP checked through the active server, the client resolves names"
+udpdrop 18444
+wait_for @.udp false 15
+wait_cmd 30 active_is first
+wait_for @.state connected 30
+status @.last_switch.reason | grep -q 'over UDP fails through it' && resolves \
+	|| { echo "FAIL: no failover for DNS over UDP: $(status @.last_switch.reason)"; diag; exit 1; }
+echo "OK: DNS over UDP fails through second: failover to first, names resolve again"
+
+# #11: "first" lets the handshake through and freezes the download check after 20 KB (DPI):
+# health.url answers through it, the download stalls, the daemon goes to "second"; the same
+# download directly passes. A CGI on 8099 sends 20 KB and hangs; the remote of first sends
+# 45.0.0.2:8098 there
+freeze() { # port
+	kill $(cat /tmp/remote-$1.pid) 2>/dev/null || true
+	cat > /tmp/remote-$1.json <<JSON
+{ "inbounds": [ { "listen": "127.0.0.1", "port": $1, "protocol": "vless",
+    "settings": { "clients": [ { "id": "$UUID" } ], "decryption": "none" } } ],
+  "routing": { "rules": [ { "port": "8098", "outboundTag": "freeze" } ] },
+  "outbounds": [ { "protocol": "freedom" }, { "protocol": "freedom", "tag": "freeze", "settings": { "redirect": "45.0.0.2:8099" } } ] }
+JSON
+	xray run -c /tmp/remote-$1.json >/dev/null 2>&1 &
+	echo $! > /tmp/remote-$1.pid
+}
+kill $(cat /tmp/remote-18444.pid); remote 18444
+active_is first || { echo "FAIL: not on first before the DPI step"; diag; exit 1; }
+freeze 18443
+wait_cmd 40 active_is second
+wait_for @.state connected 30
+status @.last_switch.reason | grep -q 'stalls after 20 KB' && [ "$(latency first)" -ge 0 ] \
+	|| { echo "FAIL: no failover for a stalled download: $(status @.last_switch.reason)"; diag; exit 1; }
+echo "OK: a server that freezes the stream after 20 KB is left, though health.url answers through it"
+
+# #11: none of health.wan_url answers directly (the first refuses, check2.test is dropped
+# in wan): wan_down, no failover
+kill $(cat /tmp/remote-18443.pid); remote 18443
+ip netns exec wan nft -f - <<NFT
+table inet dropwan {
+	chain input { type filter hook input priority 0; ip daddr 45.0.0.3 drop; }
+}
+NFT
+kill $(cat /tmp/remote-18444.pid)
+wait_for @.state wan_down 30
+active_is second || { echo "FAIL: wan_down switched the server"; diag; exit 1; }
+# the server first: with WAN back and the server still down the daemon would fail over
+remote 18444
+wait_for @.state connected 30
+ip netns exec wan nft delete table inet dropwan
+echo "OK: no WAN URL answers: wan_down, the server stays"
+dp=$(xvpnd_pid)
+uci batch <<UCI
+delete xvpn.access.dns_server
+set xvpn.health.dns_check=0
+set xvpn.health.dl_url=off
+delete xvpn.health.quarantine
+delete xvpn.health.dl_interval
+delete xvpn.health.dl_timeout
+commit xvpn
+UCI
+reload_config
+wait_cmd 30 xvpnd_restarted "$dp"
+wait_for @.state connected 30
+active_is second || { echo "FAIL: not back on second"; diag; exit 1; }
+
+# no live servers (#12): the test of all again after a pause, twice as long each time
+# (interval 3 s, retry_max 12 s: 3, 6, 12 …), once a run, the pause in the status; a test
+# by hand starts it over. Dead remotes answer at once (blackhole: HTTP 403), xray works.
+# The active one is probed meanwhile: back, it is connected by that probe, before the next
+# test and without a test run
+dead() { # port: kept in /tmp/remote-$1.pid for slow() or a kill before remote()
+	kill $(cat /tmp/remote-$1.pid) 2>/dev/null || true
+	cat > /tmp/remote-$1.json <<JSON
+{ "inbounds": [ { "listen": "127.0.0.1", "port": $1, "protocol": "vless",
+    "settings": { "clients": [ { "id": "$UUID" } ], "decryption": "none" } } ],
+  "outbounds": [ { "protocol": "blackhole", "settings": { "response": { "type": "http" } } } ] }
+JSON
+	xray run -c /tmp/remote-$1.json >/dev/null 2>&1 &
+	echo $! > /tmp/remote-$1.pid
+}
+retry_is() { # delay: one call, during a test the state is failover and there is no retry
+	_s=$(ubus call xvpn status); at=$(echo "$_s" | jsonfilter -e @.retry.at)
+	[ "$(echo "$_s" | jsonfilter -e @.retry.delay)" = "$1" ] && [ "$at" -ge "$(date +%s)" ]
+}
+connected_to() { active_is "$1" && [ "$(status @.state)" = connected ]; }
+tests_since() { echo $(($(status @.tests) - t0)); }
+s0=$(date +%s)
+dead 18443; dead 18444
+wait_for @.state no_servers 30
+t0=$(status @.tests)
+wait_cmd 15 retry_is 6
+[ "$(tests_since)" = 1 ] || { echo "FAIL: no live servers: $(tests_since) tests until the pause is 6 s"; diag; exit 1; }
+test_all
+wait_cmd 5 retry_is 3
+wait_cmd 20 retry_is 12
+# one doubling a run: 3 (by hand) → 6 → 12 is two more
+[ "$(tests_since)" = 4 ] || { echo "FAIL: no live servers: $(tests_since) tests until the pause is 12 s again"; diag; exit 1; }
+echo "OK: no live servers: the pause grows to retry_max, a test by hand starts it over"
+n=$(status @.tests)
+kill $(cat /tmp/remote-18444.pid)	# xray binds with reuseport: the blackhole would answer too
+remote 18444
+wait_cmd 12 connected_to second
+[ $((at - $(date +%s))) -ge 3 ] && [ "$(status @.tests)" = "$n" ] && [ -z "$(status @.retry)" ] \
+	|| { echo "FAIL: the active server back is not connected by the probe before the next test ($at, tests $n -> $(status @.tests))"; diag; exit 1; }
+echo "OK: the active server back is connected before the next test ($(($(date +%s) - s0)) s for #12)"
 
 # servers left out of auto selection (#60). "third" is the fastest: the remotes of the
 # others pass requests on in 20-byte pieces 30 ms apart (freedom fragment), ~0.1 s each.
 # auto_best with small rank_interval, hysteresis and quarantine for these steps
-id_of() { status "@.servers[@.name='$1'].id"; }
 auto_of() { status "@.servers[@.name='$1'].auto"; }
 set_auto() { # id true|false
 	r=$(ubus call luci.xvpn set_auto "{\"id\":\"$1\",\"auto\":$2}")
 	[ "$(echo "$r" | jsonfilter -e @.ok)" = true ] || { echo "FAIL: set_auto $1 $2: $r"; exit 1; }
 }
-select_ok() { [ "$(ubus call xvpn select "{\"id\":\"$1\"}" | jsonfilter -e @.ok)" = true ]; }
 # one call: the state and its reason (a dead active one goes through failover again and again)
 no_candidates() { s=$(ubus call xvpn status); [ "$(echo "$s" | jsonfilter -e @.state)" = no_servers ] && echo "$s" | jsonfilter -e @.last_error | grep -q 'excluded'; }
 not_third() { ! active_is third; }
@@ -628,7 +962,9 @@ kill $(cat /tmp/remote-$(port_of $o).pid)
 wait_cmd 30 no_candidates
 not_third && [ "$(cat /etc/xvpn/active)" != "$id3" ] || { echo "FAIL: failover chose a server left out"; ubus call xvpn status; exit 1; }
 echo "OK: failover does not choose a live server left out of auto selection"
-# ...nor at start; the one in auto selection once it is back
+# ...nor at start; the one in auto selection once it is back: a test by hand in no_servers
+# chooses it at once (#12), not after the pause
+s1=$(date +%s)
 /etc/init.d/xvpn stop
 rm /etc/xvpn/active
 /etc/init.d/xvpn start
@@ -637,9 +973,11 @@ sleep 4
 [ "$(status @.state)" != connected ] && not_third && [ ! -e /etc/xvpn/active ] \
 	|| { echo "FAIL: chosen at start while left out"; ubus call xvpn status; exit 1; }
 slow 18443
+wait_for @.testing false 10
+ubus call xvpn test >/dev/null
 wait_cmd 30 active_is first
 wait_for @.state connected 30
-echo "OK: start does not choose a server left out of auto selection"
+echo "OK: start does not choose a server left out of auto selection, a test by hand takes the one back ($(($(date +%s) - s1)) s)"
 # chosen by hand and left out: auto_best does not leave it for second, fast again; reload_config
 # (apply in LuCI, /etc/config/xvpn changed by set_auto) restarts neither xray nor xvpnd;
 # back in auto selection it is left. A daemon restart keeps the choice: see "back in the list"
@@ -705,6 +1043,72 @@ wait_for @.state connected 30
 active_is second || { echo "FAIL: not back on second"; ubus call xvpn status; exit 1; }
 echo "OK: back in auto selection"
 
+# #61: "limited" answers health.url and resets the connections to health.url2 (a whitelist,
+# blackhole in its remote). It is the fastest (second is slow), yet the start does not
+# choose it; the status says why. url2_cdn is 1: the first live server that fails url2
+# makes the daemon ask url2 directly, it answers, so the verdicts go on
+limited_of() { status "@.servers[@.name='$1'].limited"; }
+slow 18444; remote 18450 '' check2.test
+uci add_list xvpn.manual.link="$(link 18450 limited)"; uci commit xvpn
+/etc/init.d/xvpn stop
+rm -f /etc/xvpn/active /var/run/xvpn/state.json
+/etc/init.d/xvpn start
+wait_cmd 30 count_is 3
+wait_cmd 30 tests_done 1	# the choice at start: its test, not a check of the first active one
+wait_for @.state connected 40
+[ "$(limited_of limited)" = true ] && [ "$(limited_of second)" = false ] && [ "$(status @.url2)" = http://check2.test/ ] \
+	&& [ "$(latency limited)" -ge 0 ] && [ "$(latency limited)" -lt "$(latency second)" ] && [ "$(status "@.servers[@.name='limited'].quarantined")" = false ] \
+	|| { echo "FAIL: limited is not marked"; ubus call xvpn status; exit 1; }
+active_is second || { echo "FAIL: start chose $(active_name), not second"; ubus call xvpn status; exit 1; }
+logread | grep -q '"limited" is limited: http://check2.test/ fails' || { echo "FAIL: no log line about limited"; exit 1; }
+echo "OK: a server that fails health.url2 is limited, the start chooses a slower one, not quarantined"
+# chosen by hand it stays: the checks go on with health.url, a test does not leave it
+lid=$(id_of limited)
+wait_cmd 15 select_ok "$lid"
+wait_for @.state connected 30
+wait_cmd 20 active_is limited
+test_all	# its decision is taken as the run ends
+active_is limited && [ "$(status @.state)" = connected ] || { echo "FAIL: limited chosen by hand was left"; ubus call xvpn status; exit 1; }
+echo "OK: a limited server can be chosen by hand"
+# the daemon's choice (as after an update that made it limited): a test leaves it
+rm /etc/xvpn/active_manual
+test_all
+wait_cmd 20 active_is second
+wait_for @.state connected 30
+status @.last_switch.reason | grep -q 'is limited' || { echo "FAIL: switch reason: $(status @.last_switch.reason)"; exit 1; }
+echo "OK: a test leaves a limited server the daemon chose"
+# url2 times out through second and directly (its CDN down: DROP of 45.0.0.3 in wan):
+# the marks stay as they were, no switch
+ip netns exec wan nft -f - <<NFT
+table inet dropcdn {
+	chain input { type filter hook input priority 0; ip daddr 45.0.0.3 drop; }
+}
+NFT
+test_all
+[ "$(limited_of limited)" = true ] && [ "$(limited_of second)" = false ] && active_is second && [ "$(status @.state)" = connected ] \
+	&& logread | grep -q 'and directly: its CDN is down' || { echo "FAIL: url2 CDN down"; ubus call xvpn status; exit 1; }
+echo "OK: url2 down directly too: its CDN, the marks stay, no switch"
+ip netns exec wan nft delete table inet dropcdn
+# no live servers (#12 pause), then only the limited one comes back: chosen, connected, the
+# reason in last_error, no retry
+dead 18444; dead 18450
+/etc/init.d/xvpn stop
+rm -f /etc/xvpn/active /var/run/xvpn/state.json
+/etc/init.d/xvpn start
+wait_for @.state no_servers 30
+kill $(cat /tmp/remote-18450.pid); remote 18450 '' check2.test
+wait_cmd 30 connected_to limited
+[ "$(limited_of limited)" = true ] && [ -z "$(status @.retry)" ] && status @.last_error | grep -q 'only limited servers answer' \
+	|| { echo "FAIL: only the limited one back"; ubus call xvpn status; exit 1; }
+echo "OK: after the pause with no live servers the only limited one is chosen, connected, the reason shown"
+kill $(cat /tmp/remote-18450.pid) $(cat /tmp/remote-18444.pid); remote 18444
+uci del_list xvpn.manual.link="$(link 18450 limited)"; uci commit xvpn
+# not reload_config: its md5 of the configs dates from before the link was added, the same as now
+/etc/init.d/xvpn reload
+wait_cmd 30 count_is 2
+wait_for @.state connected 30
+active_is second || { echo "FAIL: not back on second"; ubus call xvpn status; exit 1; }
+
 # subscription over http (curl reports file:// as HTTP 0), busybox has no base64
 # LuCI: a new subscription; its servers go before the manual links, so every test
 # port shifts (20000 was "second", now it is a dead server)
@@ -757,7 +1161,8 @@ wait_for @.state connected 40
 wait_for @.state connected 40
 tunnel || { echo "FAIL: no tunnel with the counting xray"; exit 1; }
 for i in 1 2 3; do s=$(ubus call luci.xvpn stats); ubus call luci.xvpn status >/dev/null; done
-[ ! -s /tmp/xray-runs ] || { echo "FAIL: xray started by a reload or the status tab: $(cat /tmp/xray-runs)"; exit 1; }
+# but `api bo` of service_started(): the balancer of the running xray follows the config (#13)
+! grep -v '^api bo ' /tmp/xray-runs | grep -q . || { echo "FAIL: xray started by a reload or the status tab: $(cat /tmp/xray-runs)"; exit 1; }
 [ "$(echo "$s" | jsonfilter -e "@.traffic['$(status @.active)'].down")" -gt 0 ] \
 	|| { echo "FAIL: no traffic of the active server in stats: $s"; exit 1; }
 echo "OK: stats from the metrics section, a reload of the same servers runs no xray -test"
@@ -770,6 +1175,59 @@ logread | grep -q "main.gomemlimit '80MB'" && tr '\0' '\n' < /proc/$(xray_pid)/e
 echo "OK: a bad gomemlimit falls back to 80MiB"
 uci delete xvpn.main.gomemlimit
 uci set xvpn.main.xray_bin=/usr/bin/xray; uci commit xvpn
+/etc/init.d/xvpn reload
+wait_for @.state connected 40
+
+# a torrent client (#15): many UDP sessions through TPROXY are let go after conn_idle, each
+# holds a socket of xray; buffer_size 4 as on arm64. BitTorrent is dropped when blocked.
+uci set xvpn.main.conn_idle=10; uci set xvpn.main.buffer_size=4; uci set xvpn.main.block_bittorrent=1; uci commit xvpn
+/etc/init.d/xvpn reload
+wait_for @.state connected 40
+[ "$(jsonfilter -i /var/etc/xvpn/config.json -e '@.policy.levels["0"].connIdle')" = 10 ] \
+	&& [ "$(jsonfilter -i /var/etc/xvpn/config.json -e '@.policy.levels["0"].bufferSize')" = 4 ] \
+	|| { echo "FAIL: policy not in the config: $(jsonfilter -i /var/etc/xvpn/config.json -e '@.policy')"; exit 1; }
+cat > /tmp/udp-sink.uc <<'UC'
+import * as socket from 'socket';
+let u = socket.create(socket.AF_INET, socket.SOCK_DGRAM);
+u.bind({ address: '45.0.0.2', port: 7000 });
+while (true) u.recv(2048);
+UC
+cat > /tmp/udp-many.uc <<'UC'
+import * as socket from 'socket';
+let ss = [];
+for (let i = 0; i < +ARGV[0]; i++) {
+	let s = socket.create(socket.AF_INET, socket.SOCK_DGRAM);
+	s.connect({ address: '45.0.0.2', port: 7000 });
+	s.send('x');
+	push(ss, s);
+}
+for (let s in ss) s.close();
+UC
+cat > /tmp/bt.uc <<'UC'
+import * as socket from 'socket';
+let s = socket.create(socket.AF_INET, socket.SOCK_STREAM);
+s.connect({ address: '45.0.0.2', port: 80 });
+s.send(ARGV[0] == 'bt' ? '\x13BitTorrent protocol\0\0\0\0\0\0\0\0aaaaaaaaaaaaaaaaaaaabbbbbbbbbbbbbbbbbbbb'
+	: 'GET / HTTP/1.0\r\n\r\n');
+print(socket.poll(5000, [ s, socket.POLLIN ])?.[0]?.[1] ? (s.recv(12) ?? '') : '');
+UC
+ip netns exec wan ucode /tmp/udp-sink.uc &
+sink=$!
+sleep 1
+xfds() { ls /proc/$(xray_pid)/fd | wc -l; }
+base=$(xfds)
+ip netns exec cl ucode /tmp/udp-many.uc 300
+sleep 2
+peak=$(xfds)
+[ $((peak - base)) -ge 250 ] || { echo "FAIL: 300 UDP sessions hold $((peak - base)) sockets of xray"; kill $sink; exit 1; }
+few() { [ $(xfds) -le $((base + 20)) ]; }
+wait_cmd 40 few
+kill $sink
+echo "OK: 300 UDP sessions let go after conn_idle (xray fds $base -> $peak -> $(xfds), $(grep VmRSS /proc/$(xray_pid)/status | tr -s ' \t' ' '))"
+ip netns exec cl ucode /tmp/bt.uc http | grep -q '^HTTP/1\.. 200' || { echo "FAIL: HTTP blocked with block_bittorrent"; exit 1; }
+[ -z "$(ip netns exec cl ucode /tmp/bt.uc bt)" ] || { echo "FAIL: BitTorrent handshake reached the server"; exit 1; }
+echo "OK: BitTorrent dropped, HTTP goes through"
+uci delete xvpn.main.conn_idle; uci delete xvpn.main.buffer_size; uci delete xvpn.main.block_bittorrent; uci commit xvpn
 /etc/init.d/xvpn reload
 wait_for @.state connected 40
 
@@ -844,10 +1302,16 @@ set xvpn.s2.url=http://127.0.0.1/sub.b64
 set xvpn.s2.via_tunnel=0
 commit xvpn
 UCI
+dp=$(xvpnd_pid)
 r=$(ubus call luci.xvpn update '{"sid":"s2"}')
 [ "$(echo "$r" | jsonfilter -e @.ok)" = true ] || { echo "FAIL: fresh subscription: $r"; exit 1; }
 wait_cmd 20 test -s /etc/xvpn/subs/s2.json
 [ ! -e /var/run/xvpn/updating ] || { echo "FAIL: lock left after update"; exit 1; }
+# the new section changes XVPN_CONF: the next reload restarts xvpnd. Here, not in the middle
+# of the next steps (xray_down: the restart of xray reloads the service)
+/etc/init.d/xvpn reload
+wait_cmd 30 xvpnd_restarted "$dp"
+wait_for @.state connected 30
 echo "OK: fresh subscription updated"
 
 # xray hangs (killall -STOP xray, but the remotes are xray too): xray_down, no server
@@ -921,10 +1385,13 @@ hung_reload() { # what
 	echo "OK: $1: killed, state error, the active server is still checked"
 }
 id=$(status @.active)
+# a reload by the daemon: select of the active server switches without one (#13), with the
+# server list not applied (stale, as after an update) it reloads
+daemon_reload() { touch /var/run/xvpn/stale; select_ok "$id"; }
 sed -i 's/^start_service() {$/&\n [ -e \/tmp\/hang-reload ] \&\& sleep 1000/' /etc/init.d/xvpn
 grep -q hang-reload /etc/init.d/xvpn || { echo "FAIL: test setup, no sleep in init.d"; exit 1; }
 touch /tmp/hang-reload
-wait_cmd 15 select_ok "$id"	# busy for the pause after the last reload
+wait_cmd 15 daemon_reload	# busy for the pause after the last reload
 wait_cmd 10 sh -c "ps w | grep -q '[s]leep 1000'"
 hung=$(ps w | awk '/[s]leep 1000/ { print $1 }')
 hung_reload "sleep in start_service"
@@ -940,7 +1407,7 @@ echo "OK: the daemon reloaded again and is connected"
 # someone holds procd's service lock: the reload waits for it, the same as hung
 flock /var/lock/procd_xvpn.lock sleep 1001 & lk=$!
 sleep 1
-wait_cmd 15 select_ok "$id"	# busy for the pause after the last reload
+wait_cmd 15 daemon_reload	# busy for the pause after the last reload
 sleep 2
 hung_reload "procd lock held"
 kill $lk $(ps w | awk '/[s]leep 1001/ { print $1 }') 2>/dev/null || true
@@ -956,7 +1423,7 @@ uci set xvpn.main.xray_bin=/tmp/xray-slow
 uci add_list xvpn.manual.link="vless://$UUID@127.0.0.9:18449?type=tcp&security=none#bad"
 uci commit xvpn	# no reload_config: the daemon runs the reload (procd restarts xvpnd at its end: file /etc/config/xvpn)
 k=$(killed)
-wait_cmd 15 select_ok "$id"	# busy for the pause after the last reload
+wait_cmd 15 daemon_reload	# busy for the pause after the last reload
 wait_cmd 90 sh -c "logread | grep -q 'rejected 1 server(s): bad'"
 sleep 5	# fw-apply, procd and the pause after the reload
 wait_for @.state connected 40
@@ -975,12 +1442,41 @@ kill -9 $g
 echo "OK: a killed generate leaves the running config"
 uci set xvpn.main.xray_bin=/usr/bin/xray
 uci del_list xvpn.manual.link="vless://$UUID@127.0.0.9:18449?type=tcp&security=none#bad"
+# another table and mark (#56): the rules and routes with the previous ones go, IPv4 and IPv6;
+# someone's rules (the same mark or table, one more selector) and routes stay. The new table
+# has a name in rt_tables: ip prints it instead of the number
+ours() { (ip rule; ip -6 rule) | grep -E '^[0-9]+:[[:space:]]+from all fwmark ' | grep -vE 'lookup 300 ?$|0x8000000/'; }
+theirs() {
+	ip rule | grep -q 'from all fwmark 0x2000000/0x2000000 lookup 300' && ip -6 rule | grep -q 'fwmark 0x2000000/0x2000000 lookup 300' \
+		&& ip rule | grep -q 'from 10.99.0.1 fwmark 0x2000000/0x2000000 lookup 100' && ip rule | grep -q 'fwmark 0x8000000/0x8000000 lookup 100' \
+		&& ip route show table 100 | grep -q 10.77.0.0 || { echo "FAIL: someone's rule or route removed ($1)"; ip rule; ip -6 rule; ip route show table 100; exit 1; }
+}
+for f in -4 -6; do ip $f rule add fwmark 0x2000000/0x2000000 table 300; done
+ip rule add from 10.99.0.1 fwmark 0x2000000/0x2000000 table 100
+ip rule add fwmark 0x8000000/0x8000000 table 100
+ip route add 10.77.0.0/16 dev lo table 100
+echo '200 xvtest' >> /etc/iproute2/rt_tables
+uci set xvpn.main.route_table=200
+uci set xvpn.main.tproxy_mark=0x04000000
 uci commit xvpn
 /etc/init.d/xvpn reload
 wait_for @.state connected 40
+for f in -4 -6; do
+	r=$(ip $f rule | grep -E '^[0-9]+:[[:space:]]+from all fwmark ' | grep -vE 'lookup 300 ?$|0x8000000/')
+	[ "$(echo "$r" | grep -cE 'fwmark 0x4000000/0x4000000 lookup xvtest ?$')" = 1 ] && [ "$(echo "$r" | wc -l)" = 1 ] \
+		&& ip $f route show table 200 | grep -q '^local default' && ! ip $f route show table 100 | grep -q '^local' \
+		|| { echo "FAIL: ip $f rules after a change of route_table and tproxy_mark:"; ip $f rule; ip $f route show table all | grep table; exit 1; }
+done
+theirs reload
+tunnel || { echo "FAIL: no tunnel with route_table 200 and tproxy_mark 0x04000000"; exit 1; }
+echo "OK: a new route_table and tproxy_mark: the previous rules and routes are gone, someone's stay, the tunnel works"
 
 /etc/init.d/xvpn stop
 no_tproxy "stop with the service enabled"
+[ -z "$(ours)" ] && [ -z "$(ip route show table 200; ip -6 route show table 200)" ] \
+	|| { echo "FAIL: ip rules or routes left after stop"; ip rule; ip -6 rule; exit 1; }
+theirs stop
+echo "OK: no ip rules or routes after stop, someone's stay"
 in_set inet nets xvpn-ap1 && in_set bridge ports myvpn0 || { echo "FAIL: guard without the SSIDs"; exit 1; }
 blocked "stopped, service enabled"
 
@@ -990,11 +1486,72 @@ nft list table inet xvpn >/dev/null 2>&1 && { echo "FAIL: table left after stop 
 direct || { echo "FAIL: client is still blocked with the service turned off"; exit 1; }
 echo "OK: rules removed when the service is turned off"
 
+# rpcd user of the desktop app (#81): /ubus through uhttpd with the ACL of luci-app-xvpn only
+pass=$(sh /usr/share/xvpn/rpcd-user.sh add | sed -n 's/^user xvpn, password //p')
+[ ${#pass} = 24 ] || { echo "FAIL: rpcd-user.sh add: '$pass'"; exit 1; }
+rpc() { # sid object method [args]
+	_a=${4:-}; [ -n "$_a" ] || _a='{}'
+	curl -s -m 10 -H 'Content-Type: application/json' http://127.0.0.1/ubus \
+		-d '{"jsonrpc":"2.0","id":1,"method":"call","params":["'$1'","'$2'","'$3'",'"$_a"']}'
+}
+login() { rpc 00000000000000000000000000000000 session login '{"username":"xvpn","password":"'$1'"}' | jsonfilter -e '@.result[1].ubus_rpc_session'; }
+[ -z "$(login wrong-password)" ] || { echo "FAIL: rpcd user logs in with a wrong password"; exit 1; }
+sid=$(login "$pass")
+[ -n "$sid" ] || { echo "FAIL: rpcd user cannot log in"; exit 1; }
+allowed() { # what object method [args]
+	_r=$(rpc $sid "$2" "$3" "${4:-}")
+	[ "$(echo "$_r" | jsonfilter -e '@.result[0]')" = 0 ] || { echo "FAIL: rpcd user: $1: $_r"; exit 1; }
+}
+denied() { # what object method [args]: rpcd refuses the method (-32002) or the config (6)
+	_r=$(rpc $sid "$2" "$3" "${4:-}")
+	[ "$(echo "$_r" | jsonfilter -e '@.error.code')" = -32002 ] || [ "$(echo "$_r" | jsonfilter -e '@.result[0]')" = 6 ] \
+		|| { echo "FAIL: rpcd user may $1: $_r"; exit 1; }
+}
+# the version of the package: here the files are copied, a control file stands for opkg
+v=$(sed -n 's/^PKG_VERSION:=//p' /src/luci-app-xvpn/Makefile)-r$(sed -n 's/^PKG_RELEASE:=//p' /src/luci-app-xvpn/Makefile)
+printf 'Package: luci-app-xvpn\nVersion: %s\n' "$v" > /usr/lib/opkg/info/luci-app-xvpn.control
+[ "$(rpc $sid luci.xvpn version | jsonfilter -e '@.result[1].version' -e '@.result[1].api' | tr '\n' ' ')" = "$v 1 " ] \
+	|| { echo "FAIL: luci.xvpn version: $(rpc $sid luci.xvpn version)"; exit 1; }
+rm /usr/lib/opkg/info/luci-app-xvpn.control
+allowed "luci.xvpn status" luci.xvpn status
+allowed "luci.xvpn firewall" luci.xvpn firewall
+allowed "uci get xvpn" uci get '{"config":"xvpn","section":"main","option":"enabled"}'
+allowed "uci set xvpn" uci set '{"config":"xvpn","section":"main","values":{"speed_interval":"1"}}'
+allowed "uci changes" uci changes
+allowed "uci revert xvpn" uci revert '{"config":"xvpn"}'
+denied "uci get network" uci get '{"config":"network"}'
+denied "uci get rpcd" uci get '{"config":"rpcd"}'
+denied "uci set firewall" uci set '{"config":"firewall","section":"xvpn","values":{"enabled":"0"}}'
+denied "file exec" file exec '{"command":"/bin/id"}'
+denied "file read" file read '{"path":"/etc/shadow"}'
+denied "system reboot" system reboot
+# the app logs out; a new password (add again) and del end the sessions open
+sid=$(login "$pass"); allowed "session destroy" session destroy
+denied "a destroyed session" luci.xvpn version
+sid=$(login "$pass")
+pass=$(sh /usr/share/xvpn/rpcd-user.sh add | sed -n 's/^user xvpn, password //p')
+denied "a session after a new password" luci.xvpn version
+sid=$(login "$pass"); allowed "the new password" luci.xvpn version
+sh /usr/share/xvpn/rpcd-user.sh del >/dev/null
+denied "a session after del" luci.xvpn version
+[ -z "$(login "$pass")" ] || { echo "FAIL: rpcd user logs in after del"; exit 1; }
+echo "OK: rpcd user: luci.xvpn and uci xvpn, no file exec or other configs; logout, sessions end on add and del"
+
 # package removal: default_prerm disables, then stops
 uci set xvpn.main.enabled=1; uci commit xvpn
 /etc/init.d/xvpn start; sleep 2
+[ "$(ours | wc -l)" = 2 ] || { echo "FAIL: no ip rules in full before package removal"; ip rule; ip -6 rule; exit 1; }
 /etc/init.d/xvpn disable; /etc/init.d/xvpn stop
 nft list table inet xvpn >/dev/null 2>&1 && { echo "FAIL: table left after disable + stop"; exit 1; }
+# fw-remove from full: the rules and routes go, IPv4 and IPv6, someone's stay
+[ -z "$(ours)" ] && [ -z "$(ip route show table 200; ip -6 route show table 200)" ] && [ ! -e /var/run/xvpn/fw_route ] \
+	|| { echo "FAIL: ip rules or routes left after fw-remove"; ip rule; ip -6 rule; exit 1; }
+theirs fw-remove
+for f in -4 -6; do ip $f rule del fwmark 0x2000000/0x2000000 table 300; done
+ip rule del from 10.99.0.1 fwmark 0x2000000/0x2000000 table 100
+ip rule del fwmark 0x8000000/0x8000000 table 100
+ip route flush table 100
+sed -i '/xvtest/d' /etc/iproute2/rt_tables
 echo "OK: rules removed on package removal"
 sed -n '/^define Package\/luci-app-xvpn\/postrm/,/^endef/p' /src/luci-app-xvpn/Makefile | sed '1d;$d; s/\$\$/$/g' > /tmp/postrm
 uci set wireless.homeap.ssid=Staged

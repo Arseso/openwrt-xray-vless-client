@@ -96,7 +96,7 @@ function parse_url(s) {
 
 // Builds xray streamSettings from v2rayN-style parameters:
 // type, security, sni, fp, alpn, pbk, sid, spx, host, path, serviceName,
-// mode, authority, headerType, seed, extra, allowInsecure.
+// mode, authority, headerType, seed, extra, allowInsecure, pcs, vcn.
 export function stream_settings(p, address) {
 	let type = lc(p.type || 'tcp');
 	let network = NETWORKS[type];
@@ -117,7 +117,11 @@ export function stream_settings(p, address) {
 			serverName: sni,
 			fingerprint: p.fp,
 			alpn: split_list(p.alpn),
+			// xray 26 removed allowInsecure and rejects the server that sets it (#14); pcs and
+			// vcn replace it there, 25.1.30 does not know them and ignores them
 			allowInsecure: (truthy(p.allowInsecure) || truthy(p.insecure)) ? true : null,
+			pinnedPeerCertSha256: p.pcs,
+			verifyPeerCertByName: p.vcn,
 		});
 	}
 	else if (security == 'reality') {
@@ -245,6 +249,7 @@ function parse_vmess(link) {
 		headerType: (net in [ 'tcp', 'kcp' ]) ? v.type : null,
 		mode: (net == 'grpc' && v.type == 'multi') ? 'multi' : ((net == 'xhttp') ? v.type : null),
 		allowInsecure: v.allowInsecure ? '1' : null,
+		pcs: v.pcs, vcn: v.vcn,
 	};
 	if (net == 'grpc')
 		p.serviceName = v.path;
@@ -356,6 +361,13 @@ function from_xray_config(c) {
 			out.streamSettings = { ...ob.streamSettings };
 			// chained proxies are not supported here
 			delete out.streamSettings.sockopt;
+			// a fixed HTTP/2 window turns off grpc-go's adaptive one: 5-10 Mbit/s
+			// instead of ~130 on an AX3000T (issue #68)
+			let g = out.streamSettings.grpcSettings;
+			if (type(g) == 'object' && g.initial_windows_size != null) {
+				out.streamSettings.grpcSettings = { ...g };
+				delete out.streamSettings.grpcSettings.initial_windows_size;
+			}
 		}
 		if (ob.mux)
 			out.mux = ob.mux;

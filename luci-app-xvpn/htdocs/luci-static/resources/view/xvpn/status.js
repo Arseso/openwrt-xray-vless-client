@@ -83,6 +83,13 @@ function label(cls, text) {
 	return E('span', { 'class': 'label ' + cls }, [ txt(text) ]);
 }
 
+// a server that fails health.url2 (#61)
+function limited(url2) {
+	const l = label('warning', _('limited'));
+	l.title = _('%s does not open through this server: it may let through only some sites. It is not chosen automatically while there are other servers.').format(url2 ?? _('The second check URL'));
+	return l;
+}
+
 // two largest units: '%t' prints "0h 0m 6s"
 function dur(sec) {
 	sec = Math.max(0, Math.floor(sec));
@@ -368,12 +375,18 @@ return view.extend({
 					: (activeId ? txt(activeId) : E('em', {}, _('none'))) ],
 				(up && active) ? [ _('Latency'), (lat == null) ? '—' : (lat < 0)
 					? [ label('error', _('failed')), ' ', txt(ago(now, active.tested)) ]
-					: txt(_('%d ms').format(lat) + ', ' + ago(now, active.tested)) ] : null,
+					: [ txt(_('%d ms').format(lat) + ', ' + ago(now, active.tested)), ...((active.limited && lat >= 0) ? [ ' ', limited(status.url2) ] : []) ] ] : null,
+				// #10: names resolve over DoH, but QUIC, calls and games of the clients need UDP
+				(up && active && status.udp === false) ? [ _('UDP'), [ label('warning', _('does not pass')), ' ',
+					txt(_('UDP does not pass through this server: QUIC, voice calls and games of the clients may not work.')) ] ] : null,
 				(up && active && status.since) ? [ sinceTitle, txt(dur(now - status.since)) ] : null,
 				(up && status.fails > 0) ? [ _('Failed checks in a row'), txt(String(status.fails)) ] : null,
 				sw ? [ _('Last switch'), txt(
 					((sw.from && sw.from != sw.to) ? name(sw.from) + ' → ' : '') + name(sw.to) + ': ' + (sw.reason ?? '') + ', ' + ago(now, sw.at)) ] : null,
 				(up && status.last_test) ? [ _('Last test of all servers'), txt(ago(now, status.last_test)) ] : null,
+				// no live servers: the daemon tests all of them again after a pause, longer each time
+				(up && status.retry) ? [ _('Next test of all servers'), txt(((status.retry.at <= now) ? _('due')
+					: _('in %s').format(dur(status.retry.at - now))) + ' ' + _('(pause %s)').format(dur(status.retry.delay))) ] : null,
 				(up && status.last_error && status.last_error.trim() != fwError)
 					? [ _('Last error'), lines(status.last_error, 'color:var(--error-color-high, #c00)') ] : null,
 				[ _('Firewall rules'), txt(fwText) ],
@@ -443,6 +456,9 @@ return view.extend({
 			if (s.latency != null)
 				ping = (s.latency < 0) ? label('error', _('failed'))
 					: E('span', { 'title': ago(now, s.tested) }, [ txt(_('%d ms').format(s.latency)) ]);
+			// #61: answers the check URL, not the second one
+			if (s.limited && s.latency >= 0)	// one that does not answer at all is just failed
+				ping = [ ping, ' ', limited(status.url2) ];
 
 			const nameCell = [ isActive ? E('strong', {}, [ txt(s.name) ]) : txt(s.name) ];
 			if (isActive)

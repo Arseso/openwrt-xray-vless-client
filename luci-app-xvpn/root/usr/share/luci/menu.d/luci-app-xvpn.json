@@ -26,6 +26,11 @@
 		"order": 30,
 		"action": { "type": "view", "path": "xvpn/access" }
 	},
+	"admin/services/xvpn/split": {
+		"title": "Split tunneling",
+		"order": 35,
+		"action": { "type": "view", "path": "xvpn/split" }
+	},
 	"admin/services/xvpn/settings": {
 		"title": "Settings",
 		"order": 40,

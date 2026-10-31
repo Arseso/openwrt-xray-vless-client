@@ -12,13 +12,14 @@ const callServers = rpc.declare({ object: 'luci.xvpn', method: 'servers' });
 // the defaults of util.uc load_config(); an empty field means the default
 const DEFAULTS = {
 	xray_bin: '/usr/bin/xray', loglevel: 'warning',
-	tproxy_port: 12345, dns_port: 10853, api_port: 10085, test_port_base: 20000,
+	tproxy_port: 12345, dns_port: 10853, api_port: 10085, control_port: 10086, test_port_base: 20000,
 	client_mark: '0x01000000', tproxy_mark: '0x02000000', route_table: 100,
-	url: 'https://www.gstatic.com/generate_204', interval: 30, timeout: 5, fail_threshold: 3,
+	url: 'https://www.gstatic.com/generate_204', url2: 'https://cp.cloudflare.com/generate_204',
+	dl_url: 'https://speed.cloudflare.com/__down?bytes=65536', interval: 30, timeout: 5, fail_threshold: 3,
 	rank_interval: 600, hysteresis: 150, quarantine: 300, concurrency: 4,
 };
 
-const PORTS = [ 'tproxy_port', 'dns_port', 'api_port' ];
+const PORTS = [ 'tproxy_port', 'dns_port', 'api_port', 'control_port' ];
 const MARKS = [ 'client_mark', 'tproxy_mark' ];
 
 // load_config() reads numbers with hex() after 0x, else with int(), which also takes "12abc":
@@ -78,6 +79,34 @@ return view.extend({
 		o.validate = (sid, v) => !v || /^https?:\/\/[^\s/?#]+\S*$/i.test(v.trim()) || _('Enter an http:// or https:// URL');
 		o.write = (sid, v) => uci.set('xvpn', sid, 'url', v.trim());
 
+		// #61: servers that let through only the sites on their whitelist answer the first URL
+		o = s.option(form.Value, 'url2', _('Second check URL'),
+			_('Opened through every server that answers the check URL when all servers are tested and a server is chosen. A server that fails it is marked limited and is not chosen automatically while there are others; you can still choose it by hand. Use a URL by domain on another CDN than the check URL. "off" turns this check off.'));
+		o.placeholder = DEFAULTS.url2;
+		o.value('https://cp.cloudflare.com/generate_204');
+		o.value('off', _('off'));
+		// the same URL as the first one would turn the check off without a word
+		o.validate = (sid, v) => {
+			v = (v ?? '').trim();
+			if (v && v != 'off' && !/^https?:\/\/[^\s/?#]+\S*$/i.test(v))
+				return _('Enter an http:// or https:// URL or "off"');
+			if ((v || DEFAULTS.url2) == String(this.value(h, sid, 'url')).trim())
+				return _('Use another URL than the check URL, preferably on another CDN');
+			return true;
+		};
+		o.write = (sid, v) => uci.set('xvpn', sid, 'url2', v.trim());
+
+		// #11: DPI may let the handshake through and freeze the stream after the first KB
+		o = s.option(form.Value, 'dl_url', _('Download check URL'),
+			_('Downloaded through the active server every 5 minutes: a download that stalls or does not finish in 15 s counts as a failed check, like a server that does not answer. Use a file of 64–128 KB. "off" turns this check off.'));
+		o.placeholder = DEFAULTS.dl_url;
+		o.value('off', _('off'));
+		o.validate = (sid, v) => {
+			v = (v ?? '').trim();
+			return !v || v == 'off' || /^https?:\/\/[^\s/?#]+\S*$/i.test(v) || _('Enter an http:// or https:// URL or "off"');
+		};
+		o.write = (sid, v) => uci.set('xvpn', sid, 'dl_url', v.trim());
+
 		o = s.option(form.Value, 'interval', _('Check interval, s'),
 			_('How often the active server is checked.'));
 		o.placeholder = DEFAULTS.interval;
@@ -135,7 +164,9 @@ return view.extend({
 		o = s.option(form.Value, 'xray_bin', _('Path to xray'),
 			_('The xray-core binary (25.x).'));
 		o.placeholder = DEFAULTS.xray_bin;
-		o.validate = (sid, v) => !v || /^\/\S+$/.test(v.trim()) || _('Enter an absolute path');
+		// the same as valid_bin() in util.uc: the service runs it as root
+		o.validate = (sid, v) => !v || /^(\/[A-Za-z0-9_][A-Za-z0-9._-]*)*\/xray[A-Za-z0-9._-]*$/.test(v.trim())
+			|| _('Enter an absolute path to a binary whose name starts with xray');
 		o.write = (sid, v) => uci.set('xvpn', sid, 'xray_bin', v.trim());
 
 		o = s.option(form.ListValue, 'loglevel', _('Log level of xray'),
@@ -152,15 +183,20 @@ return view.extend({
 		o.default = '1';
 		o.rmempty = false;
 
+		o = s.option(form.Flag, 'block_bittorrent', _('Block BitTorrent'),
+			_('BitTorrent connections of the clients are dropped: a torrent client opens thousands of sessions, which may run the router out of memory.'));
+		o.default = '0';
+
 		const adv = s = m.section(form.NamedSection, 'main', 'general', _('Advanced'),
 			_('Change only on a conflict with other services of the router.'));
 		s.addremove = false;
 
 		const portNames = {
-			tproxy_port: _('TPROXY port'), dns_port: _('DNS port'), api_port: _('API port'),
+			tproxy_port: _('TPROXY port'), dns_port: _('DNS port'), api_port: _('API port'), control_port: _('Control port'),
 		};
 		const port = (name) => (sid, v) => {
-			const r = integer(1, 65535)(sid, v);
+			// below 1024 the rules would drop the port for everyone but the VPN clients (util.uc port())
+			const r = integer(1024, 65535)(sid, v);
 			if (r !== true)
 				return r;
 			const p = number(this.value(adv, sid, name)), base = number(this.value(adv, sid, 'test_port_base'));
@@ -177,6 +213,7 @@ return view.extend({
 				tproxy_port: _('xray takes the traffic of the VPN clients on this port.'),
 				dns_port: _('xray takes the intercepted DNS queries on this port.'),
 				api_port: _('xray traffic statistics (metrics over HTTP), on 127.0.0.1.'),
+				control_port: _('On 127.0.0.1: the xray API over TCP, to switch servers without a restart, and the UDP check over UDP.'),
 			}[name]);
 			o.placeholder = DEFAULTS[name];
 			o.validate = port(name);

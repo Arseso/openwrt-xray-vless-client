@@ -2,3 +2,8 @@ dist/
 .build/
 .claude/worktrees/
 .ci/
+.cache/
+*~
+desktop/node_modules/
+desktop/src-tauri/target/
+desktop/src-tauri/gen/

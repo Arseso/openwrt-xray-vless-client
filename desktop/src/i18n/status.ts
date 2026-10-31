@@ -1,0 +1,46 @@
+// Strings of the tab «Статус» (src/views/status.ts).
+
+import { strings } from '../core/i18n';
+
+export const t = strings({
+  en: {
+    title: 'Status',
+    router: 'Router',
+    package: 'luci-app-xvpn',
+    state: 'State',
+    active: 'Server',
+    error: 'Error',
+    waiting: 'Waiting for the router…',
+    stopped: 'Service is stopped',
+    not_answering: 'Daemon is busy and did not answer',
+    'state.starting': 'Starting',
+    'state.connected': 'Connected',
+    'state.degraded': 'Unstable: health checks fail',
+    'state.failover': 'Switching to another server',
+    'state.no_servers': 'No working servers',
+    'state.wan_down': 'No internet on the router (WAN)',
+    'state.xray_down': 'xray is not running',
+    'state.waiting_time': 'Waiting for the router clock (NTP)',
+    'state.error': 'Error',
+  },
+  ru: {
+    title: 'Статус',
+    router: 'Роутер',
+    package: 'luci-app-xvpn',
+    state: 'Состояние',
+    active: 'Сервер',
+    error: 'Ошибка',
+    waiting: 'Ждём ответа роутера…',
+    stopped: 'Служба остановлена',
+    not_answering: 'Демон занят и не ответил',
+    'state.starting': 'Запуск',
+    'state.connected': 'Подключено',
+    'state.degraded': 'Нестабильно: проверки не проходят',
+    'state.failover': 'Переключение на другой сервер',
+    'state.no_servers': 'Нет рабочих серверов',
+    'state.wan_down': 'На роутере нет интернета (WAN)',
+    'state.xray_down': 'xray не запущен',
+    'state.waiting_time': 'Ждём часы роутера (NTP)',
+    'state.error': 'Ошибка',
+  },
+});
