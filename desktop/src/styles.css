@@ -73,3 +73,15 @@ dl.props dd { margin: 0; }
 [data-state=connected] { color: var(--ok); }
 [data-state=degraded], [data-state=failover], [data-state=starting], [data-state=waiting_time] { color: var(--warn); }
 [data-state=no_servers], [data-state=wan_down], [data-state=xray_down], [data-state=error] { color: var(--error); }
+input.short { width: 7em; }
+.notify-settings label { display: block; margin: 8px 0; }
+.notify-settings label.check { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+svg.chart { width: 100%; height: auto; display: block; }
+svg.chart .grid { stroke: var(--border); stroke-width: 1; }
+svg.chart .axis { fill: var(--muted); font-size: 11px; }
+svg.chart .line { fill: none; stroke-width: 1.5; stroke-linejoin: round; }
+.series-ping { --series: var(--accent); }
+.series-down { --series: var(--ok); }
+.series-up { --series: var(--warn); }
+svg.chart .line { stroke: var(--series); }
+.legend { font-weight: normal; font-size: 13px; color: var(--series); margin-left: 8px; }

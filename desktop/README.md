@@ -35,12 +35,15 @@ desktop/
       store.ts         наблюдаемый стор
       poller.ts        общий поллер status
       connection.ts    подключение к профилю: фазы, AppContext для вкладок
+      notify.ts        уведомления: переходы → уведомления, дедупликация, тихие часы, настройки
+      history.ts       история пинга и скорости: кольцевой буфер, заменяемый источник
       i18n.ts          strings({ en, ru }), lang(), setLang()
     i18n/<name>.ts     словари RU/EN: один файл на вкладку (+ common, connect, tray, notifications)
     views/
       registry.ts      registerView(), интерфейс View
       index.ts         по строке import на вкладку
-      <name>.ts        вкладка: status, servers, subscriptions, access-points, settings, log
+      <name>.ts        вкладка: status, servers, subscriptions, access-points, settings, log,
+                       history, notifications
       connect.ts       экран роутеров и решений о сертификате (не вкладка)
     ui/                dom.ts (h, clear), errors.ts (errorText)
   src-tauri/src/
@@ -51,7 +54,7 @@ desktop/
     profiles.rs        profiles.json + keyring
     gateway.rs         шлюз по умолчанию (Linux /proc/net/route, Windows route print)
     tray.rs            трей — TODO(#78)
-    notifications.rs   уведомления — TODO(#80)
+    notifications.rs   уведомления: tauri-plugin-notification, команда notify_show
   tests/unit/          vitest, фейковый роутер (fake.ts)
   tests/stand/         тот же клиент против стенда scripts/luci.sh
   docker/Dockerfile    окружение сборки Linux
@@ -123,6 +126,34 @@ registerView({
 трея или уведомлений добавляется в свой модуль (`tauri::generate_handler!` в его
 `handler()`), `lib.rs` не трогается. У каждого модуля есть `init(app)`, вызывается из
 `setup`.
+
+## Уведомления и история
+
+`startNotifications(connection)` и `liveHistory.attach(connection)` подключаются к
+`connection.bus` один раз в `main.ts`. Решения принимает TS (`src/core/notify.ts`),
+Rust только показывает (`notify_show`).
+
+| тип            | когда | ключ (одно уведомление на событие) |
+|----------------|-------|------|
+| `vpn`          | рабочее (connected, degraded) → нерабочее (no_servers, xray_down, wan_down, error, passthrough, служба остановлена) и обратно; starting/failover — переходные, не в счёт; выключенный пользователем — не «упал» | номер сбоя |
+| `failover`     | новый `last_switch` не по выбору пользователя и не «faster server»: с какого на какой | `at` + `to` |
+| `router`       | `router-down` / первый ответ после него (или новое подключение к тому же роутеру) | `since` |
+| `subscription` | `subscription-userinfo`: до `expire` меньше N дней, израсходовано ≥ P % | `expire`, `total` |
+| `sub_error`    | у подписки `error` | `last_attempt` |
+
+Переходы помнятся по профилю, поэтому переподключение к тому же роутеру не повторяет
+сказанное. Ключи подписок хранятся между запусками (`xvpn.notify.sent`, 60 дней).
+Уведомление выключенного типа или в тихие часы не показывается и потом не догоняет.
+`luci.xvpn subscriptions` опрашивается отдельно от поллера: через 15 с после
+подключения, раз в 30 мин и сразу после конца обновления (`updating` true → false).
+Настройки (интервал поллера, тихие часы, типы, пороги) — вкладка «Уведомления»,
+`localStorage` `xvpn.notify`, общие для всех роутеров.
+
+История: каждый ответ поллера — отсчёт `{ at, ping, up, down }` (пинг активного
+сервера, `speed` из status), ошибка опроса — разрыв линии. Кольцевой буфер на 9600
+отсчётов (8 ч при 3 с), при смене роутера начинается заново. Вкладка читает
+`historySource()`; история с роутера (#34) подменит источник через
+`setHistorySource()`. Графики — SVG без библиотек.
 
 ## Подключение
 
