@@ -73,3 +73,4 @@ dl.props dd { margin: 0; }
 [data-state=connected] { color: var(--ok); }
 [data-state=degraded], [data-state=failover], [data-state=starting], [data-state=waiting_time] { color: var(--warn); }
 [data-state=no_servers], [data-state=wan_down], [data-state=xray_down], [data-state=error] { color: var(--error); }
+pre.notes { white-space: pre-wrap; font: inherit; }

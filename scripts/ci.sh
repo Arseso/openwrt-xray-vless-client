@@ -10,11 +10,18 @@
 #   itest        scripts/itest.sh; a hung run is killed after 15 min, the container
 #                state goes to the log
 #   build        scripts/build.sh, the packages are copied to dist/
+#   desktop      scripts/desktop-build.sh test, then the build: Linux binary, deb and
+#                AppImage, Windows NSIS setup (cross-built), copied to dist/desktop/; signed
+#                with latest.json when the updater key is there (~/.config/xvpn-desktop,
+#                scripts/desktop-build.sh). DESKTOP_TARGETS limits the build ("linux"),
+#                DESKTOP_ITEST=1 also runs scripts/desktop-itest.sh against the LuCI stand
 #
 #   sh scripts/ci.sh           check HEAD
 #   sh scripts/ci.sh release   check HEAD (must be origin/main), tag it v<PKG_VERSION>
 #                              (v<PKG_VERSION>-r<PKG_RELEASE> when PKG_RELEASE is not 1),
-#                              push the tag and publish a GitHub Release with the ipk
+#                              push the tag and publish a GitHub Release with the ipk and
+#                              the desktop app (all its packages signed, latest.json for
+#                              the updater; without the key a release is refused)
 #
 # Logs: .ci/<step>.log. Variables: DOCKER (default docker --context default), NAME
 # (itest container, by default unique per checkout, so worktrees do not collide),
@@ -45,6 +52,9 @@ if [ "$MODE" = release ]; then
 		|| die "HEAD is not origin/main: a release is made from the pushed main"
 	! git rev-parse -q --verify "refs/tags/$tag" >/dev/null \
 		|| die "tag $tag already exists: raise PKG_VERSION or PKG_RELEASE in luci-app-xvpn/Makefile"
+	[ -f "$HOME/.config/xvpn-desktop/updater.key" ] || [ -f "${KEYS:-}/updater.key" ] \
+		|| die "no updater key (~/.config/xvpn-desktop/updater.key): the desktop app would be unsigned"
+	command -v jq >/dev/null || die "jq is needed to check latest.json"
 elif [ -n "$(git status --porcelain)" ]; then
 	echo "ci: uncommitted changes are not checked, only HEAD $(git rev-parse --short HEAD)" >&2
 fi
@@ -132,6 +142,29 @@ build() {
 	mkdir -p dist && rm -f dist/*.ipk && cp "$SRC"/dist/*.ipk dist/
 }
 
+# the desktop app (#81): tests, then the packages of TARGETS; the version is PKG_VERSION
+desktop() {
+	sh "$SRC/scripts/desktop-build.sh" test || return 1
+	TARGETS="${DESKTOP_TARGETS:-linux windows}" TAG="$tag" sh "$SRC/scripts/desktop-build.sh" || return 1
+	if [ "${DESKTOP_ITEST:-0}" = 1 ]; then
+		(cd "$SRC" && sh scripts/desktop-itest.sh) || return 1
+	fi
+	rm -rf dist/desktop && mkdir -p dist && cp -r "$SRC/dist/desktop" dist/desktop
+}
+
+# what the release uploads besides the ipk; all of it, signed, or the release is refused
+desktop_assets() {
+	d=dist/desktop
+	for f in "$d"/xvpn_"$ver"_amd64.deb "$d"/xvpn_"$ver"_amd64.AppImage "$d"/xvpn_"$ver"_amd64.AppImage.sig \
+		"$d"/xvpn_"$ver"_x64-setup.exe "$d"/xvpn_"$ver"_x64-setup.exe.sig "$d"/latest.json; do
+		[ -s "$f" ] || { echo "ci: no $f (the updater key: scripts/desktop-build.sh)" >&2; return 1; }
+		echo "$f"
+	done
+	jq -e --arg v "$ver" --arg t "$tag" '.version == $v and (.platforms | length == 2)
+		and all(.platforms[]; .url | contains("/download/" + $t + "/"))' "$d/latest.json" >/dev/null \
+		|| { echo "ci: $d/latest.json is not for $ver / $tag" >&2; return 1; }
+}
+
 echo "ci: HEAD $(git rev-parse --short HEAD), package $ipk"
 step test sh "$SRC/scripts/test.sh" || failed="$failed test"
 if fetch_xray > "$CI/xray-download.log" 2>&1; then
@@ -148,13 +181,21 @@ elif [ "$latest" != "$XRAY_TAG" ] && [ "$(printf '%s\n%s\n' "$XRAY_TAG" "$latest
 fi
 step itest itest || failed="$failed itest"
 step build build || failed="$failed build"
+step desktop desktop || failed="$failed desktop"
 
 [ -z "$warned" ] || echo "ci: warning:$warned"
 [ -z "$failed" ] || die "failed:$failed"
 echo "ci: ok, dist/$ipk"
 
 if [ "$MODE" = release ]; then
+	assets=$(desktop_assets) || die "the desktop app is not ready for the release"
+	notes="Packages:
+- \`$ipk\` and \`luci-i18n-xvpn-*\` — the router (OpenWrt 24.10)
+- \`xvpn_${ver}_x64-setup.exe\` — the desktop app for Windows (NSIS setup)
+- \`xvpn_${ver}_amd64.AppImage\`, \`xvpn_${ver}_amd64.deb\` — the desktop app for Linux
+- \`*.sig\`, \`latest.json\` — signatures and the manifest of the app's updater"
 	git tag -a "$tag" -m "$tag"
 	git push origin "refs/tags/$tag"
-	gh release create "$tag" dist/*.ipk --repo "$REPO" --title "$tag" --generate-notes --verify-tag
+	# shellcheck disable=SC2086 # one asset per line, no spaces in the names
+	gh release create "$tag" dist/*.ipk $assets --repo "$REPO" --title "$tag" --notes "$notes" --generate-notes --verify-tag
 fi

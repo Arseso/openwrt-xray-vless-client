@@ -25,6 +25,9 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 sha2 = "0.10"
 keyring = { version = "3", features = ["windows-native", "sync-secret-service", "crypto-rust"] }
+# updates from the GitHub release (#81): rustls with ring as above, no OpenSSL
+tauri-plugin-updater = "2"
+time = { version = "0.3", features = ["formatting"] }
 
 [dev-dependencies]
 rcgen = "0.13"

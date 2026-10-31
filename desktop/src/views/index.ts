@@ -5,3 +5,4 @@ import './subscriptions';
 import './access-points';
 import './settings';
 import './log';
+import './about';
