@@ -15,6 +15,9 @@ IMAGE="${IMAGE:-openwrt/rootfs:x86-64-24.10.4}"
 NAME=${NAME:-xvpn-luci}
 PORT=${PORT:-8019}
 PASS=${PASS:-xvpn-luci-test}
+# docker copies the DNS of the host, often its router at 192.168.1.1: the very address of
+# br-lan in the container, so the stand would ask itself
+DNS=${DNS:-1.1.1.1}
 
 sync() {
 	$DOCKER exec $NAME sh -ec '
@@ -35,12 +38,12 @@ esac
 
 $DOCKER rm -f $NAME >/dev/null 2>&1 || true
 # --privileged: S11sysctl in the container would write the sysctls of the host
-$DOCKER run -d --name $NAME --privileged -p 127.0.0.1:$PORT:80 -v "$PWD:/src:ro" "$IMAGE" \
+$DOCKER run -d --name $NAME --privileged --dns "$DNS" -p 127.0.0.1:$PORT:80 -v "$PWD:/src:ro" "$IMAGE" \
 	sh -c 'rm -f /etc/rc.d/S11sysctl; exec /sbin/init' >/dev/null
 sleep 5
 NET=$($DOCKER inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}/{{.IPPrefixLen}} {{.Gateway}}{{end}}' $NAME)
 
-$DOCKER exec -i -e NET="$NET" -e PASS="$PASS" $NAME sh -e <<'IN'
+$DOCKER exec -i -e NET="$NET" -e PASS="$PASS" -e DNS="$DNS" $NAME sh -e <<'IN'
 UUID=11111111-2222-3333-4444-555555555555
 mkdir -p /var/lock
 i=0; until logread 2>/dev/null | grep -q 'init complete'; do [ $i -lt 30 ] || break; sleep 1; i=$((i+1)); done
@@ -54,6 +57,7 @@ set network.wan.device=eth0
 set network.wan.proto=static
 set network.wan.ipaddr=$1
 set network.wan.gateway=$2
+set network.wan.dns=$DNS
 commit network
 set firewall.@zone[1].input=ACCEPT
 commit firewall

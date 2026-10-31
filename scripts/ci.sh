@@ -127,7 +127,7 @@ build() {
 		[ "$lang" = templates ] || ls "$SRC/dist"/luci-i18n-xvpn-"$lang"_*.ipk >/dev/null 2>&1 ||
 			{ echo "no dist/luci-i18n-xvpn-${lang}_*.ipk: $(ls "$SRC/dist")"; return 1; }
 	done
-	rm -rf dist && cp -r "$SRC/dist" dist
+	mkdir -p dist && rm -f dist/*.ipk && cp "$SRC"/dist/*.ipk dist/
 }
 
 echo "ci: HEAD $(git rev-parse --short HEAD), package $ipk"

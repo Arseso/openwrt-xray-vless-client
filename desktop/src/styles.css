@@ -1,0 +1,73 @@
+:root {
+  color-scheme: light dark;
+  --bg: #f6f7f9;
+  --fg: #1d232b;
+  --muted: #6b7480;
+  --card: #ffffff;
+  --border: #d9dde3;
+  --accent: #2f6fde;
+  --warn: #b26b00;
+  --warn-bg: #fff4e0;
+  --error: #c62828;
+  --error-bg: #fdecec;
+  --ok: #2e7d32;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-size: 14px;
+  color: var(--fg);
+  background: var(--bg);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #15181d;
+    --fg: #e4e7eb;
+    --muted: #8d96a3;
+    --card: #1e2229;
+    --border: #333a44;
+    --accent: #5b8ff0;
+    --warn: #f0b04a;
+    --warn-bg: #3a2c12;
+    --error: #ef6b6b;
+    --error-bg: #3b1c1c;
+    --ok: #66bb6a;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); }
+header.top { display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--card); }
+.brand { font-weight: 700; font-size: 16px; }
+.spacer { flex: 1; }
+.phase { color: var(--muted); }
+.phase-online { color: var(--ok); }
+.phase-offline, .phase-connecting { color: var(--warn); }
+.phase-failed { color: var(--error); }
+nav.tabs { display: flex; gap: 4px; padding: 0 12px; border-bottom: 1px solid var(--border); background: var(--card); }
+nav.tabs a { padding: 8px 12px; color: var(--muted); text-decoration: none; border-bottom: 2px solid transparent; }
+nav.tabs a.active { color: var(--fg); border-bottom-color: var(--accent); }
+main { padding: 16px; max-width: 960px; }
+.banner p { margin: 0; padding: 8px 16px; }
+.muted { color: var(--muted); }
+.warn { color: var(--warn); background: var(--warn-bg); padding: 8px 12px; border-radius: 6px; }
+.error { color: var(--error); background: var(--error-bg); padding: 8px 12px; border-radius: 6px; }
+.card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px; margin: 12px 0; }
+.warn-card { border-color: var(--warn); }
+.error-card { border-color: var(--error); }
+.error-card h3 { color: var(--error); }
+code.fp { font-size: 12px; word-break: break-all; }
+button, select, input { font: inherit; color: inherit; }
+select { padding: 4px 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--card); color: var(--fg); }
+button { padding: 5px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--card); cursor: pointer; }
+button:disabled { opacity: .5; cursor: default; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.danger { background: var(--error); border-color: var(--error); color: #fff; }
+input:not([type=checkbox]) { width: 100%; padding: 5px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); }
+.profile-form label { display: block; margin: 8px 0; }
+.profile-form label.check { display: flex; gap: 6px; align-items: center; }
+.row { display: flex; gap: 8px; margin-top: 12px; }
+.profile { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--border); }
+.profile-actions { display: flex; gap: 6px; }
+dl.props { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; }
+dl.props dt { color: var(--muted); }
+dl.props dd { margin: 0; }
+[data-state=connected] { color: var(--ok); }
+[data-state=degraded], [data-state=failover], [data-state=starting], [data-state=waiting_time] { color: var(--warn); }
+[data-state=no_servers], [data-state=wan_down], [data-state=xray_down], [data-state=error] { color: var(--error); }
