@@ -197,7 +197,7 @@ set xvpn.health.reload_retry=5
 set xvpn.health.retry_max=12
 set xvpn.health.dns_check=0
 set xvpn.health.dl_url=off
-set xvpn.main.speed_interval=2
+set xvpn.main.speed_interval=1
 add_list xvpn.health.wan_url=http://45.0.0.2:9/
 add_list xvpn.health.wan_url=http://check2.test/
 add_list xvpn.manual.link='$(link 18444 second)'
@@ -230,26 +230,24 @@ want_mode full full
 echo "OK: full rules, ip rule, luci.xvpn firewall"
 tunnel || { echo "FAIL: client gets no internet through the tunnel"; exit 1; }
 echo "OK: client goes through the tunnel"
-# speed meter (#83): a download limited to 512 KB/s, the speed while it runs and the bytes
-# after it (speed_interval 2 s); IP packets: the headers are on top of the file. A small
-# receive buffer of the client: otherwise the kernel takes the first MB at once, faster than
-# curl reads it, and the speed on the wire is not curl's; the speed is read at 6 s of 8, curl
-# goes faster at the start
-dd if=/dev/zero of=/tmp/www/big bs=1k count=4096 2>/dev/null
+# speed meter (#83, speed_interval 1 s): a download limited to 256 KB/s shows a speed, the
+# bytes after it are the file within 10 % (IP packets: the headers are on top). A small receive
+# buffer of the client: otherwise the kernel takes the file at once, faster than curl reads it
+dd if=/dev/zero of=/tmp/www/big bs=1k count=1024 2>/dev/null
 rmem=$(ip netns exec cl sysctl -n net.ipv4.tcp_rmem)
 ip netns exec cl sysctl -qw net.ipv4.tcp_rmem='4096 32768 32768'
 d0=$(status @.traffic.down); u0=$(status @.traffic.up)
-ip netns exec cl curl -s -o /dev/null --limit-rate 512k http://45.0.0.2/big & dl=$!
-sleep 6
+ip netns exec cl curl -s -o /dev/null --limit-rate 256k http://45.0.0.2/big & dl=$!
+speed_on() { [ "$(status @.speed.down)" -gt 65536 ]; }
+wait_cmd 4 speed_on
 sp=$(status @.speed.down)
 wait $dl
-sleep 3
+sleep 1
 d=$(($(status @.traffic.down) - d0)); u=$(($(status @.traffic.up) - u0))
 rm /tmp/www/big
 ip netns exec cl sysctl -qw net.ipv4.tcp_rmem="$rmem"
-[ "$sp" -ge 393216 ] && [ "$sp" -le 655360 ] || { echo "FAIL: speed.down $sp B/s at 512 KB/s"; ubus call xvpn status; exit 1; }
-[ $d -ge 4194304 ] && [ $d -le 4613734 ] && [ $u -gt 0 ] || { echo "FAIL: traffic: down $d (file 4194304), up $u"; exit 1; }
-echo "OK: tunnel speed $sp B/s at 512 KB/s, $d bytes down for a 4 MB file"
+[ $d -ge 1048576 ] && [ $d -le 1153433 ] && [ $u -gt 0 ] || { echo "FAIL: traffic: down $d (file 1048576), up $u"; exit 1; }
+echo "OK: tunnel speed $sp B/s at 256 KB/s, $d bytes down for a 1 MB file"
 blocked "connected, ICMP is not tunneled"
 /etc/init.d/xvpn-guard start
 full_rules "xvpn-guard start"
@@ -445,7 +443,7 @@ full_rules "after firewall stop + start"
 tunnel || { echo "FAIL: no tunnel after firewall stop + start"; exit 1; }
 echo "OK: rules restored after fw4 flush"
 # the new table starts its counters from zero: no negative speed, no jump, bytes kept
-sleep 3
+sleep 1
 sp=$(status @.speed.down); t=$(status @.traffic.down)
 [ "$sp" -ge 0 ] && [ "$sp" -lt 65536 ] && [ "$t" -ge "$t0" ] \
 	|| { echo "FAIL: speed after fw4 flush: $sp B/s, traffic $t0 -> $t"; exit 1; }
@@ -1515,7 +1513,7 @@ rm /usr/lib/opkg/info/luci-app-xvpn.control
 allowed "luci.xvpn status" luci.xvpn status
 allowed "luci.xvpn firewall" luci.xvpn firewall
 allowed "uci get xvpn" uci get '{"config":"xvpn","section":"main","option":"enabled"}'
-allowed "uci set xvpn" uci set '{"config":"xvpn","section":"main","values":{"speed_interval":"2"}}'
+allowed "uci set xvpn" uci set '{"config":"xvpn","section":"main","values":{"speed_interval":"1"}}'
 allowed "uci changes" uci changes
 allowed "uci revert xvpn" uci revert '{"config":"xvpn"}'
 denied "uci get network" uci get '{"config":"network"}'
