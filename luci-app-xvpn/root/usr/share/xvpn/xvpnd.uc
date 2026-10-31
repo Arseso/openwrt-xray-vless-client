@@ -80,6 +80,7 @@ let st = {
 	udp: null,	// UDP passes through the active server (#10); null: not checked yet
 	dl_at: null,	// the last download (#11) through the active server that went through (monotonic)
 	dl_failing: false,	// the last one stalled: tried again at every check
+	streak: 0,	// failed checks in a row: counts up when one passes, see failed()
 };
 let test_waiters = [], testq = null, test_resume = null, test_abort = null;
 let timers = {}, settling = false, reload = null;
@@ -1015,6 +1016,7 @@ function switch_to(id, reason, manual) {
 	st.switches++;
 	st.udp = st.dl_at = null;	// the new one is checked at once
 	st.dl_failing = false;
+	deep = null;	// those of the old one do not hold up its checks
 	// a newer choice wins over decisions put off (#70): the choice by hand, or one of two
 	// choose_best() waiting for the same test of all, whose sibling switched first
 	st.xray_choose = st.choose_pending = null;
@@ -1218,6 +1220,7 @@ function up(e, ms) {
 	st.latency[e.id] = { ms, at: time() };
 	xray_up();
 	st.fails = 0;
+	st.streak++;
 	set_passthrough(false);
 	set_state('connected', null);
 }
@@ -1231,8 +1234,8 @@ function failed(e, gen, kind, why) {
 	// no live servers: the pause was the wait, straight to failover
 	if (st.fails < H.fail_threshold && st.state != 'no_servers')
 		return set_state('degraded', `${st.fails} failed checks${why ? `: ${why}` : ''}`);
-	// a check passed meanwhile (up() resets fails): this verdict is old
-	let stale = () => !valid(gen) || st.active != e.id || st.fails == 0;
+	// a check passed meanwhile, even if the next one failed again: this verdict is old
+	let streak = st.streak, stale = () => !valid(gen) || st.active != e.id || st.streak != streak;
 	wan_probe((wan) => {
 		if (stale() || wan == null)
 			return;
@@ -1244,9 +1247,13 @@ function failed(e, gen, kind, why) {
 			if (stale() || ok == null)
 				return;
 			if (ok)
-				failover(`"${e.name}": ${why}`);
-			else
-				set_state('degraded', `${why}, and through another server and directly too: not the server's fault`);
+				return failover(`"${e.name}": ${why}`);
+			// not the server: the download waits dl_interval again, not every check
+			if (kind == 'dl') {
+				st.dl_failing = false;
+				st.dl_at = now();
+			}
+			set_state('degraded', `${why}, and through another server and directly too: not the server's fault`);
 		});
 	});
 }

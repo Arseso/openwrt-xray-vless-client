@@ -91,6 +91,15 @@ stop_service() {
 # start and every reload, whoever runs it (the daemon, rpcd, UCI triggers): the rules are
 # applied and procd restarts xray now, so the daemon re-reads the index and settles from here
 service_started() {
+	# procd keeps xray when only the active server changed (XVPN_XRAY): its balancer is pointed
+	# at the server of the new config (#13). A restarted xray took it from the config already
+	# (or is not listening yet: the call fails at once)
+	local port tag
+	port="$(jsonfilter -i /var/etc/xvpn/index.json -e @.ports.control 2>/dev/null)"
+	tag="$(jsonfilter -i "$CONF" -e '@.routing.balancers[0].selector[0]' 2>/dev/null)"
+	if [ -n "$port" ] && [ -n "$tag" ]; then
+		"$(uci -q get xvpn.main.xray_bin || echo /usr/bin/xray)" api bo -s "127.0.0.1:$port" -t 3 -b active "$tag" >/dev/null 2>&1 || true
+	fi
 	ubus -t 2 call xvpn reindex >/dev/null 2>&1 || true
 }
 
