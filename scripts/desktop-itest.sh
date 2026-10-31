@@ -1,7 +1,8 @@
 #!/bin/sh
 # The TS client of the desktop app (desktop/src/api) against the LuCI stand of
 # scripts/luci.sh: login, every read method of luci.xvpn, uci, a lost session, rpcd
-# restart and uhttpd down/up. Starts the stand when its container is not running.
+# restart and uhttpd down/up; the tabs of #79 (apply / confirm / rollback seen by LuCI, the
+# rpcd user without root, the diagnostics). Starts the stand when its container is not running.
 #
 #   sh scripts/desktop-itest.sh        NAME (default xvpn-luci) and PORT (8019) as in luci.sh
 #

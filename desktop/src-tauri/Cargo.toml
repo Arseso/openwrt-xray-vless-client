@@ -25,6 +25,10 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 sha2 = "0.10"
 keyring = { version = "3", features = ["windows-native", "sync-secret-service", "crypto-rust"] }
+# the tabs of #79 (src/screens.rs)
+tauri-plugin-clipboard-manager = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
 
 [dev-dependencies]
 rcgen = "0.13"

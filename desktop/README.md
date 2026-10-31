@@ -36,13 +36,18 @@ desktop/
       poller.ts        общий поллер status
       connection.ts    подключение к профилю: фазы, AppContext для вкладок
       i18n.ts          strings({ en, ru }), lang(), setLang()
+      apply.ts         сохранение UCI: stage → apply с откатом → проверка связи → confirm
+      diagnostics.ts   файл диагностики вкладки «Журнал» и маскировка секретов
+    forms/             формы вкладок: validate.ts (проверки как в LuCI и load_config),
+                       diff.ts (что форма пишет в UCI), form.ts (UciForm, saveBar)
     i18n/<name>.ts     словари RU/EN: один файл на вкладку (+ common, connect, tray, notifications)
     views/
       registry.ts      registerView(), интерфейс View
       index.ts         по строке import на вкладку
       <name>.ts        вкладка: status, servers, subscriptions, access-points, settings, log
       connect.ts       экран роутеров и решений о сертификате (не вкладка)
-    ui/                dom.ts (h, clear), errors.ts (errorText)
+    ui/                dom.ts (h, clear), errors.ts (errorText), format.ts (байты, сроки),
+                       native.ts (буфер обмена, диалог сохранения через плагины)
   src-tauri/src/
     lib.rs             сборка приложения, маршрутизация команд по префиксу
     commands.rs        команды ядра: ubus_request, ubus_login, profile_*, default_gateway
@@ -52,6 +57,8 @@ desktop/
     gateway.rs         шлюз по умолчанию (Linux /proc/net/route, Windows route print)
     tray.rs            трей — TODO(#78)
     notifications.rs   уведомления — TODO(#80)
+    screens.rs         плагины вкладок #79: clipboard-manager, dialog, fs
+                       (права — capabilities/screens.json)
   tests/unit/          vitest, фейковый роутер (fake.ts)
   tests/stand/         тот же клиент против стенда scripts/luci.sh
   docker/Dockerfile    окружение сборки Linux
@@ -116,13 +123,33 @@ registerView({
 Всё, что бросают `api/*`, — `XvpnError` с `code` (`src/api/errors.ts`); текст для
 пользователя — `errorText(e)` (`src/ui/errors.ts`), для каждого кода есть строка RU/EN.
 
+### Сохранение настроек
+
+Вкладки «Подписки», «Точки доступа» и «Настройки» пишут конфиг `xvpn` так же, как LuCI:
+изменения ставятся в сессию (`uci set/add/delete`), `uci apply` с `rollback: true` и таймером
+60 с, затем приложение проверяет, что роутер отвечает (`luci.xvpn version`), и шлёт `confirm`.
+Если после применения роутер недоступен (настройка отрезала ПК), `confirm` не приходит и rpcd
+сам откатывает изменения; поздний `confirm` получает ubus-статус 5 — это тоже «откатилось».
+Перед записью форма перечитывает конфиг: если изменённое поле тем временем поменяли в LuCI,
+форма не перезаписывает его, а показывает текущие значения. `apply`, пока роутер ждёт
+`confirm` от другой сессии (LuCI), получает статус 6 (`acl`) — форма просит повторить позже.
+Общий код: `src/core/apply.ts` (`save`, `applyStaged`), `src/forms/form.ts` (`UciForm`,
+`saveBar`). Порты, метки и таблица маршрутизации в приложении не правятся — только в LuCI.
+
+Диагностика (вкладка «Журнал», `src/core/diagnostics.ts`): версии, `status`, `firewall`,
+подписки, раздельное туннелирование, точки доступа, конфиг `xvpn` и журнал одним текстовым
+файлом через диалог сохранения. Ссылки серверов становятся `scheme://***@host:port`, у URL
+остаются схема и хост (путь и query URL подписки — её токен), UUID заменяются; URL проверок
+`health.*` публичны и остаются. `system board` — только под root: остальным его не даёт ACL.
+
 ### Rust-модули
 
 Команды маршрутизируются по префиксу имени: `tray_*` → `tray::handler()`,
 `notify_*` → `notifications::handler()`, остальное — ядро (`commands.rs`). Новая команда
 трея или уведомлений добавляется в свой модуль (`tauri::generate_handler!` в его
 `handler()`), `lib.rs` не трогается. У каждого модуля есть `init(app)`, вызывается из
-`setup`.
+`setup`; плагины Tauri модуль регистрирует там же (`app.handle().plugin(...)`, как
+`screens.rs`), их права — в своём файле `capabilities/<модуль>.json`.
 
 ## Подключение
 
