@@ -1522,9 +1522,17 @@ denied "uci set firewall" uci set '{"config":"firewall","section":"xvpn","values
 denied "file exec" file exec '{"command":"/bin/id"}'
 denied "file read" file read '{"path":"/etc/shadow"}'
 denied "system reboot" system reboot
+# the app logs out; a new password (add again) and del end the sessions open
+sid=$(login "$pass"); allowed "session destroy" session destroy
+denied "a destroyed session" luci.xvpn version
+sid=$(login "$pass")
+pass=$(sh /usr/share/xvpn/rpcd-user.sh add | sed -n 's/^user xvpn, password //p')
+denied "a session after a new password" luci.xvpn version
+sid=$(login "$pass"); allowed "the new password" luci.xvpn version
 sh /usr/share/xvpn/rpcd-user.sh del >/dev/null
+denied "a session after del" luci.xvpn version
 [ -z "$(login "$pass")" ] || { echo "FAIL: rpcd user logs in after del"; exit 1; }
-echo "OK: rpcd user: luci.xvpn and uci xvpn, no file exec or other configs"
+echo "OK: rpcd user: luci.xvpn and uci xvpn, no file exec or other configs; logout, sessions end on add and del"
 
 # package removal: default_prerm disables, then stops
 uci set xvpn.main.enabled=1; uci commit xvpn

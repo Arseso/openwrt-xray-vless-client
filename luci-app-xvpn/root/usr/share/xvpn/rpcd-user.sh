@@ -9,8 +9,11 @@
 #   sh /usr/share/xvpn/rpcd-user.sh del [name]
 #
 # name is xvpn by default. The login is the section xvpn_<name> in /etc/config/rpcd; rpcd
-# reads it at every login. The hash is uhttpd -m (MD5 crypt without salt): with the random
-# password (96 bits) that is no weakness, a password of your own should be as long.
+# reads it at every login. add and del end the sessions the user has open: the app polls
+# every few seconds, they would never expire. The hash is uhttpd -m, MD5 crypt without salt
+# (the base system has nothing with $5$/$6$): with the random password (96 bits) that is no
+# weakness, a password of your own must be at least 16 characters. uhttpd -m takes it as an
+# argument: for that moment it is in the process list of the router.
 set -e
 cmd=$1 name=${2:-xvpn}
 case "$name" in
@@ -21,11 +24,20 @@ esac
 case "$name" in *[!a-z0-9_]*) echo "bad name: $name (a-z, 0-9, _)" >&2; exit 1 ;; esac
 sec=xvpn_$name
 
+# the sessions of the user (session list prints one object per session)
+revoke() {
+	for sid in $(ubus call session list 2>/dev/null | awk -v u="\"$name\"" '
+		/"ubus_rpc_session":/ { s = $2; gsub(/[",]/, "", s) }
+		/"username":/ { v = $2; sub(/,$/, "", v); if (v == u) print s }'); do
+		ubus call session destroy "{\"ubus_rpc_session\":\"$sid\"}" >/dev/null 2>&1 || true
+	done
+}
+
 case "$cmd" in
 add)
 	if [ "$3" = - ]; then
 		IFS= read -r pass || true
-		[ ${#pass} -ge 8 ] || { echo "the password is shorter than 8" >&2; exit 1; }
+		[ ${#pass} -ge 16 ] || { echo "the password is shorter than 16" >&2; exit 1; }
 	else
 		pass=$(hexdump -n 12 -e '12/1 "%02x"' /dev/urandom)
 	fi
@@ -46,13 +58,15 @@ add_list rpcd.$sec.write=luci-app-xvpn
 add_list rpcd.$sec.write=luci-app-xvpn-remote
 commit rpcd
 UCI
+	revoke
 	[ "$3" = - ] && echo "user $name is ready" || echo "user $name, password $pass"
 	;;
 del)
 	uci -q get rpcd.$sec >/dev/null || { echo "no user $name" >&2; exit 1; }
 	uci delete rpcd.$sec
 	uci commit rpcd
-	echo "user $name deleted (sessions it has open expire after rpcd's timeout)"
+	revoke
+	echo "user $name deleted, its sessions ended"
 	;;
 *)
 	sed -n '5,8s/^#   //p' "$0" >&2

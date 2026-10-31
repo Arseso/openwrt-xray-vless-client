@@ -232,7 +232,7 @@ function spawn(cmd, args, cb) {
 // Calls cb(ms, code), ms < 0 on failure, code is the curl exit code (-1: curl did not start).
 function probe(port, cb, url) {
 	let out = `${RUN_DIR}/probe-${++probe_seq}`;
-	let cmd = sprintf("/usr/bin/curl -s -o /dev/null --connect-timeout %d --max-time %d -w '%%{http_code} %%{time_starttransfer}' %s %s > %s 2>/dev/null",
+	let cmd = sprintf("/usr/bin/curl -s --proto =http,https -o /dev/null --connect-timeout %d --max-time %d -w '%%{http_code} %%{time_starttransfer}' %s %s > %s 2>/dev/null",
 		H.timeout, H.timeout, port ? `-x socks5h://127.0.0.1:${port}` : '', shq(url ?? H.url), shq(out));
 
 	spawn('/bin/sh', [ '-c', cmd ], (code) => {
@@ -250,7 +250,7 @@ function probe(port, cb, url) {
 // code is the curl exit code (-1: curl did not start), fields what -w wrote.
 function curl_w(port, url, max_time, fmt, extra, cb) {
 	let out = `${RUN_DIR}/probe-${++probe_seq}`;
-	let cmd = sprintf("/usr/bin/curl -s -o /dev/null --connect-timeout %d --max-time %d -w %s %s %s %s > %s 2>/dev/null",
+	let cmd = sprintf("/usr/bin/curl -s --proto =http,https -o /dev/null --connect-timeout %d --max-time %d -w %s %s %s %s > %s 2>/dev/null",
 		H.timeout, max_time, shq(fmt), extra, port ? `-x socks5h://127.0.0.1:${port}` : '', shq(url), shq(out));
 	spawn('/bin/sh', [ '-c', cmd ], (code) => {
 		let r = (code < 0) ? [] : split(trim(readfile(out) ?? ''), ' ');
@@ -310,24 +310,40 @@ function now() {
 
 // One nft (no process stays) reads the counters of the table: cheap enough for every few
 // seconds, unlike `luci.xvpn stats` (xray's own counters). No table (block, stopped
-// firewall) is zero speed; a new table starts its counters over, see counter_step().
+// firewall) is zero speed; a new table starts its counters over, see counter_step(). A nft
+// that fails otherwise keeps the base; one that hangs is killed after 3 intervals and the
+// speed is unknown (null) meanwhile.
 function speed() {
 	if (tun.reading)
 		return;
 	tun.reading = true;
-	let p = run_process('/bin/sh', [ '-c', `exec /usr/sbin/nft -j list counters table inet xvpn > ${COUNTERS_FILE} 2>/dev/null` ], (code) => {
+	let t = null, killed = false, p;
+	p = run_process('/bin/sh', [ '-c', `exec /usr/sbin/nft -j list counters table inet xvpn > ${COUNTERS_FILE} 2>&1` ], (code) => {
+		t?.cancel();
 		tun.reading = false;
-		let c = clock(true);
-		let s = counter_step(tun.last, (code == 0) ? counters(readfile(COUNTERS_FILE)) : null, c[0] + c[1] / 1e9);
+		if (killed)
+			return;	// uloop reports a signal as 0, what it wrote is no answer
+		let out = readfile(COUNTERS_FILE), c = clock(true);
+		// nft says "No such file or directory" for a table that is not there
+		let cur = (code == 0) ? counters(out) : match(out ?? '', /No such file or directory/) ? false : null;
+		let s = counter_step(tun.last, cur, c[0] + c[1] / 1e9);
 		tun.last = s.last;
 		if (s.add) {
 			tun.traffic.up += s.add.up;
 			tun.traffic.down += s.add.down;
-			tun.speed = s.speed;
 		}
+		if (s.speed)
+			tun.speed = s.speed;
 	});
-	if (!p)
+	if (!p) {
 		tun.reading = false;	// out of memory: the next tick tries again
+		return;
+	}
+	t = uloop.timer(3 * SPEED * 1000, () => {
+		tun.speed = null;
+		killed = true;
+		system([ '/bin/kill', '-9', `${p.pid()}` ]);
+	});
 }
 
 // Health checks are going on: see watchdog().

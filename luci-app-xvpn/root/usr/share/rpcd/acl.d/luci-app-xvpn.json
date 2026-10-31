@@ -18,7 +18,8 @@
 		"description": "Grant the ubus uci calls for the XVPN config without luci-base (rpcd user of the desktop app)",
 		"read": {
 			"ubus": {
-				"uci": [ "get", "changes" ]
+				"uci": [ "get", "changes" ],
+				"session": [ "destroy" ]
 			}
 		},
 		"write": {

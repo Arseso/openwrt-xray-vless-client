@@ -7,7 +7,7 @@
 #                servers that xray forbids (XRAY_REJECT) are rejected one by one by cli.uc
 #                generate (#14). The tag is pinned, so a new xray release does not fail
 #                every branch; a newer release than XRAY_TAG is only a warning
-#   itest        scripts/itest.sh; a hung run is killed after 12 min, the container
+#   itest        scripts/itest.sh; a hung run is killed after 15 min, the container
 #                state goes to the log
 #   build        scripts/build.sh, the packages are copied to dist/
 #
@@ -109,9 +109,11 @@ latest_xray() {
 
 itest() {
 	rc=0
-	timeout -k 10 720 sh "$SRC/scripts/itest.sh" || rc=$?
+	# 15 min: a whole run takes ~12 on a busy host (716 s in #85, the speed meter and the rpcd
+	# user added), 12 min killed runs that were about to pass; a hang still stops here
+	timeout -k 10 900 sh "$SRC/scripts/itest.sh" || rc=$?
 	if [ $rc = 124 ] || [ $rc = 137 ]; then
-		echo "itest hangs, killed after 12 min"
+		echo "itest hangs, killed after 15 min"
 		timeout 60 $DOCKER exec "$NAME" sh -c 'ps w; ubus -t 3 call xvpn status; ubus -t 3 call service list "{\"name\":\"xvpn\"}"; logread | tail -80' || true
 		$DOCKER rm -f "$NAME" >/dev/null 2>&1 || true
 	fi

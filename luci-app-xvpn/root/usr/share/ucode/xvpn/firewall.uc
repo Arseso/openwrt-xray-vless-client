@@ -323,24 +323,31 @@ export function render(cfg, res, opts) {
 };
 
 // Bytes of the tunnel counters from `nft -j list counters table inet xvpn`: { up, down }
-// (IP packets: headers included), null without them (no table, block, minimal).
+// (IP packets: headers included); false when the table has none (block, minimal); null
+// when it is no answer of nft at all (a failed read: not the same as no counters).
 export function counters(out) {
 	let r = {}, j = null;
 	try { j = json(out ?? ''); } catch (e) {}
-	for (let o in j?.nftables ?? [])
+	if (type(j?.nftables) != 'array')
+		return null;
+	for (let o in j.nftables)
 		if (o?.counter?.table == 'xvpn' && o.counter.name in [ 'tun_up', 'tun_down' ] && type(o.counter.bytes) == 'int')
 			r[substr(o.counter.name, 4)] = o.counter.bytes;
-	return (r.up != null && r.down != null) ? r : null;
+	return (r.up != null && r.down != null) ? r : false;
 };
 
-// One step of the speed meter (#83). last: { up, down, t } of the previous sample or null,
-// cur: counters() (null: no counters now), t: monotonic s (fractional). The counters start
-// from zero with the table (fw-apply, fw4 flush and a new table): a value below the last
-// one counts from zero, no counters count as zeros, so a new table is no jump and nothing
-// goes negative. The first sample is only the base: the counters may be older than us.
+// One step of the speed meter (#83). last: { up, down, t } of the previous sample or null;
+// cur: counters() — an object, false (no table or no counters: zeros) or null (the read
+// failed: the base stays as it is, the next good sample covers the time since it); t:
+// monotonic s (fractional). The counters start from zero with the table (fw-apply, fw4
+// flush): a value below the last one counts from zero, so a new table is no jump and nothing
+// goes negative; what the old table counted after the last sample is lost (at most one
+// interval). The first sample is only the base: the counters may be older than us.
 // Returns { last, add: { up, down } bytes since last or null, speed: { up, down } B/s or null }.
 export function counter_step(last, cur, t) {
-	let c = cur ?? { up: 0, down: 0 };
+	if (cur == null)
+		return { last, add: null, speed: last ? { up: 0, down: 0 } : null };
+	let c = cur || { up: 0, down: 0 };
 	let next = { up: c.up, down: c.down, t };
 	if (!last || t <= last.t)
 		return { last: next, add: null, speed: null };
