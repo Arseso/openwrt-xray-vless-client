@@ -167,6 +167,19 @@ export function stream_settings(p, address) {
 	return { stream: ss };
 };
 
+// Short transport label for the UI: network, security and the vision flow, e.g.
+// "grpc+reality", "tcp+tls+vision". Takes outbounds of links and of xray json items.
+export function transport(ob) {
+	let ss = ob?.streamSettings ?? {}, s = ob?.settings ?? {};
+	let net = lc(ss.network ?? 'tcp');
+	let parts = [ NETWORKS[net] ?? net ];
+	if (ss.security && ss.security != 'none')
+		push(parts, ss.security);
+	if (index(s.vnext?.[0]?.users?.[0]?.flow ?? '', 'vision') >= 0)
+		push(parts, 'vision');
+	return join('+', parts);
+};
+
 function server(proto, name, address, port, outbound, key) {
 	return {
 		// the connection itself: dedupes servers listed twice; the stable id comes from
@@ -348,6 +361,13 @@ function from_xray_config(c) {
 			out.streamSettings = { ...ob.streamSettings };
 			// chained proxies are not supported here
 			delete out.streamSettings.sockopt;
+			// a fixed HTTP/2 window turns off grpc-go's adaptive one: 5-10 Mbit/s
+			// instead of ~130 on an AX3000T (issue #68)
+			let g = out.streamSettings.grpcSettings;
+			if (type(g) == 'object' && g.initial_windows_size != null) {
+				out.streamSettings.grpcSettings = { ...g };
+				delete out.streamSettings.grpcSettings.initial_windows_size;
+			}
 		}
 		if (ob.mux)
 			out.mux = ob.mux;

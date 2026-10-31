@@ -513,6 +513,14 @@ echo /usr/local/bin/xray >> /etc/sysupgrade.conf   # чтобы sysupgrade ег�
   Сессия без трафика закрывается через 120 с (у xray по умолчанию 300): так торрент-клиент держит
   меньше сессий. Скрытые опции `xvpn.main.conn_idle`, `handshake`, `uplink_only`, `downlink_only`
   (секунды) и `buffer_size` (КБ на соединение, по умолчанию как у xray) — DESIGN.md, §6.4.
+- **Скорость упирается в CPU роутера.** xray шифрует весь трафик туннеля на процессоре, и на AX3000T
+  (два ядра Cortex-A53) транспорт **gRPC** даёт около 130 Мбит/с, сколько бы потоков ни было: все
+  соединения идут через одно HTTP/2-соединение, которое обрабатывает одно ядро. Тот же сервер на ПК
+  выдавал 350. Если провайдер даёт выбор, на слабом роутере лучше TCP + REALITY/TLS + Vision: там на
+  каждое соединение своё TCP-соединение, и нагрузка ложится на оба ядра. Транспорт каждого сервера
+  виден на вкладке «Статус» под протоколом (`grpc+reality`, `tcp+reality+vision`). Настройки
+  `bufferSize` и `multiMode` заметного выигрыша не дали, а `initial_windows_size` роняет gRPC до
+  5–10 Мбит/с. Замеры — [#68](https://github.com/Arseso/openwrt-xray-vless-client/issues/68).
 - **Проверено на AX3000T** (OpenWrt 24.10.5, в том числе с аппаратным offload PPE) по чек-листу
   [#25](https://github.com/Arseso/openwrt-xray-vless-client/issues/25), кроме VPN-SSID, dnsleaktest
   и IPv6 — их ещё нужно пройти на устройстве.
