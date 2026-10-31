@@ -52,7 +52,8 @@ describe.skipIf(!CONTAINER)(`tray against ${URL}`, () => {
       expect((await conn.connect(profile)).phase).toBe('online');
       const st = await until(() => {
         const s = conn.context?.poller.status;
-        return s?.running && s.state === 'connected' && s.active ? s : null;
+        // degraded: the stand often fails the DNS check of the outside world, the tunnel works
+        return s?.running && (s.state === 'connected' || s.state === 'degraded') && s.active ? s : null;
       }, 60_000, 'connected') as StatusUp;
       // another live server: both manual-live (18443) and sub-live (18445) answer
       const target = st.servers.find((s) => s.id !== st.active && /live/.test(s.name))!;
@@ -67,28 +68,33 @@ describe.skipIf(!CONTAINER)(`tray against ${URL}`, () => {
       // failover: its remote end goes away
       stopped = target.port;
       const t0 = Date.now();
-      inStand(`start-stop-daemon -K -p /var/run/remote-${target.port}.pid`);
+      // busybox of the stand has no pkill
+      inStand(`kill $(ps w | grep '[r]emote-${target.port}.json' | awk '{print $1}')`);
       // the moment the router reports it, asked directly beside the poller
       const direct = new Connection({ transport: () => new NodeTransport(URL, USER, PASS), intervalMs: 200 });
       await direct.connect({ ...profile, id: 'direct' });
       const seen = await until(() => {
         const s = direct.context?.poller.status;
-        return s?.running && (s.state !== 'connected' || s.active !== target.id) ? Date.now() : null;
-      }, 90_000, 'the router reports the failover');
+        // the same event on both sides: another server, or none left (degraded and failover
+        // share the yellow icon with the DNS trouble of the stand)
+        return s?.running && (s.active !== target.id || s.state === 'no_servers') ? Date.now() : null;
+      }, 240_000, 'the router reports the failover'); // health interval 30 s x fail_threshold 3
       direct.disconnect();
       const trayAt = await until(() => {
         const last = models.at(-1);
-        return last && last.at >= t0 && (last.m.icon !== 'connected' || !last.m.servers.find((s) => s.id === target.id)?.active)
+        return last && last.at >= t0 && (last.m.icon === 'xray_down' || !last.m.servers.find((s) => s.id === target.id)?.active)
           ? last.at : null;
       }, 10_000, 'tray reacts');
       console.log(`failover: router ${seen - t0} ms after the stop, tray ${trayAt - seen} ms after the router`);
+      // the direct poll runs every 200 ms, so the tray may also be a little ahead
       expect(trayAt - seen).toBeLessThanOrEqual(INTERVAL + 500);
+      expect(trayAt - seen).toBeGreaterThan(-500);
     }
     finally {
       if (stopped)
-        inStand(`start-stop-daemon -S -b -m -p /var/run/remote-${stopped}.pid -x /usr/bin/xray -- run -c /tmp/remote-${stopped}.json`);
+        inStand(`ps w | grep -q '[r]emote-${stopped}.json' || start-stop-daemon -S -b -m -p /var/run/remote-${stopped}.pid -x /usr/bin/xray -- run -c /tmp/remote-${stopped}.json`);
       stop();
       conn.disconnect();
     }
-  });
+  }, 330_000);
 });
