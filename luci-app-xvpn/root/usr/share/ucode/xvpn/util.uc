@@ -216,6 +216,9 @@ export function load_config(confdir) {
 			downlink_only: num(m.downlink_only, 5),
 			// KB a connection; null: xray's own (4 on arm64, 512 on amd64)
 			buffer_size: num(m.buffer_size, null),
+			// s between reads of the tunnel counters for the speed in status (#83), 0: off;
+			// not in the default config
+			speed_interval: num(m.speed_interval, 3),
 		},
 		access: {
 			networks: list(a.network),

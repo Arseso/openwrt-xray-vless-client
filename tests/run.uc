@@ -8,7 +8,7 @@ import { parse_link, parse_subscription } from 'xvpn.links';
 import { parse_userinfo, assign_ids, list_change, known_ids, prune_no_auto, NO_AUTO_GRACE } from 'xvpn.subscription';
 import { load_config, fastest, auto_pick, retry_delay, no_auto_ids, set_no_auto, mkdir_p, read_json, SUBS_DIR } from 'xvpn.util';
 import { build_index, generate, ports_error, config_key, set_active } from 'xvpn.xrayconf';
-import { render, resolve, fix_ifnames, ifnames_applied, table_names, rule_prefs, stale_routes } from 'xvpn.firewall';
+import { render, resolve, fix_ifnames, ifnames_applied, table_names, rule_prefs, stale_routes, counters, counter_step } from 'xvpn.firewall';
 import { ipv6_up, busy_ports } from 'xvpn.host';
 import { cidr, parse_nets, domain_rule, direct_domains, direct_nets, lists_due_in } from 'xvpn.split';
 import { cursor } from 'uci';
@@ -314,6 +314,23 @@ cfg.access.killswitch = false;
 writefile(`${OUT}/tunnel.nft`, render(cfg, { nets: [], ports: [] }));
 writefile(`${OUT}/passthrough.nft`, render(cfg, res, { passthrough: true }));
 ok('passthrough has no tproxy', index(render(cfg, res, { passthrough: true }), 'tproxy ip') < 0);
+ok('nft counts the tunnel', index(nft, 'counter name tun_up meta mark') >= 0 && index(nft, 'fib saddr type != local counter name tun_down') >= 0);
+ok('passthrough counts nothing', index(render(cfg, res, { passthrough: true }), 'counter name') < 0);
+
+// speed meter (#83): counters from nft -j, a reset (new table) is no jump and never negative
+let cj = '{"nftables": [{"metainfo": {"version": "1.1.1"}}, {"counter": {"family": "inet", "name": "tun_up", "table": "xvpn", "handle": 3, "packets": 2, "bytes": 120}}, {"counter": {"family": "inet", "name": "tun_down", "table": "xvpn", "handle": 4, "packets": 9, "bytes": 9000}}]}';
+eq('counters', counters(cj), { up: 120, down: 9000 });
+ok('counters: no table', counters('') == null && counters('{"nftables": [{"metainfo": {}}]}') == null && counters('junk') == null);
+let cs = counter_step(null, { up: 120, down: 9000 }, 10.0);
+ok('speed: the first sample is the base', cs.add == null && cs.speed == null);
+cs = counter_step(cs.last, { up: 420, down: 15000 }, 12.0);
+eq('speed: B/s over the interval', [ cs.add, cs.speed ], [ { up: 300, down: 6000 }, { up: 150, down: 3000 } ]);
+cs = counter_step(cs.last, { up: 100, down: 2000 }, 14.0);
+eq('speed: a new table counts from zero', cs.add, { up: 100, down: 2000 });
+cs = counter_step(cs.last, null, 16.0);
+eq('speed: no table is zero', cs.speed, { up: 0, down: 0 });
+cs = counter_step(cs.last, { up: 50, down: 70 }, 18.0);
+eq('speed: the table back counts from zero', cs.add, { up: 50, down: 70 });
 
 // ip rules: busybox prints them all, the mark without leading zeros, a trailing space and
 // the table name from rt_tables; only `from all` with the exact pair is ours

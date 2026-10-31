@@ -16,6 +16,7 @@ import {
 import { due_in } from 'xvpn.subscription';
 import { dns_via_module, set_active } from 'xvpn.xrayconf';
 import { lists_due_in } from 'xvpn.split';
+import { counters, counter_step } from 'xvpn.firewall';
 
 const CLI = '/usr/share/xvpn/cli.uc';
 const SUB_CHECK = 300;
@@ -42,6 +43,8 @@ const DNS = cfg.access.dns_server;
 const DOH = H.dns_check && dns_via_module(cfg) && match(DNS, /^https:/) ? DNS : null;
 const UDP_DNS = H.dns_check && !dns_via_module(cfg);
 // RFC 8484 GET: A of www.gstatic.com, ID 0
+const SPEED = cfg.main.speed_interval;	// s between reads of the tunnel counters, see speed()
+const COUNTERS_FILE = `${RUN_DIR}/counters.json`;
 const DOH_QUERY = replace(replace(replace(b64enc('\x00\x00\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x03www\x07gstatic\x03com\x00\x00\x01\x00\x01'), '+', '-'), '/', '_'), '=', '');
 
 let index = { servers: [] }, index_raw = null;
@@ -89,6 +92,8 @@ let deep = null;	// deep_check() running: { at } (monotonic)
 let bo = null;	// `xray api bo` running: { again }, see apply_active()
 let no_auto_sig = null, no_auto_set = {};
 let conn;
+// speed meter (#83): the last sample, bytes through the tunnel since xvpnd started, B/s
+let tun = { last: null, reading: false, traffic: { up: 0, down: 0 }, speed: null };
 // ucode does not hoist functions: these call each other in a cycle, defined below
 let reload_service, reindex, choose_best, check, reload_failed;
 
@@ -301,6 +306,28 @@ function wan_probe(cb) {
 // Monotonic: grace and retries must not jump with the clock set by NTP at boot.
 function now() {
 	return clock(true)[0];
+}
+
+// One nft (no process stays) reads the counters of the table: cheap enough for every few
+// seconds, unlike `luci.xvpn stats` (xray's own counters). No table (block, stopped
+// firewall) is zero speed; a new table starts its counters over, see counter_step().
+function speed() {
+	if (tun.reading)
+		return;
+	tun.reading = true;
+	let p = run_process('/bin/sh', [ '-c', `exec /usr/sbin/nft -j list counters table inet xvpn > ${COUNTERS_FILE} 2>/dev/null` ], (code) => {
+		tun.reading = false;
+		let c = clock(true);
+		let s = counter_step(tun.last, (code == 0) ? counters(readfile(COUNTERS_FILE)) : null, c[0] + c[1] / 1e9);
+		tun.last = s.last;
+		if (s.add) {
+			tun.traffic.up += s.add.up;
+			tun.traffic.down += s.add.down;
+			tun.speed = s.speed;
+		}
+	});
+	if (!p)
+		tun.reading = false;	// out of memory: the next tick tries again
 }
 
 // Health checks are going on: see watchdog().
@@ -1444,6 +1471,9 @@ function status() {
 		// no live servers: the next test of all (router clock) and the pause before it
 		retry: (st.state == 'no_servers' && st.dead)
 			? { at: time() + max(0, st.dead.next - now()), delay: st.dead.delay } : null,
+		// the tunnel (#83): { up, down } B/s over the last main.speed_interval (null: not
+		// measured yet or off) and bytes since xvpnd started; IP packets, headers included
+		speed: tun.speed, traffic: SPEED > 0 ? tun.traffic : null,
 	};
 }
 
@@ -1600,6 +1630,10 @@ every('check', H.interval, check);
 every('rank', H.rank_interval, rank);
 every('subs', SUB_CHECK, auto_update);
 every('watchdog', 30, watchdog);
+if (SPEED > 0) {
+	every('speed', SPEED, speed);
+	speed();
+}
 // generate failed at start (a port taken): tried again every RELOAD_RETRY
 if (readfile(GENERATE_ERROR_FILE))
 	reload_failed(trim(readfile(GENERATE_ERROR_FILE)));

@@ -38,7 +38,31 @@ function daemon(method, args) {
 	return r;
 }
 
+// The version of the API of luci.xvpn: raised by one with every change of its answers
+// or arguments that an older client cannot handle (a field gone or renamed, its meaning
+// or type changed, a method gone). New fields and methods keep it. Clients (the desktop
+// app, #82) compare it with the one they know.
+const API = 1;
+const PKG = 'luci-app-xvpn';
+
+// "<PKG_VERSION>-r<PKG_RELEASE>" of the installed package: its control file from opkg
+// (apk keeps all packages in one database, OpenWrt 25.x); 'unknown' when it is not
+// installed as a package (files copied by hand, scripts/luci.sh)
+function pkg_version() {
+	let v = match(readfile(`/usr/lib/opkg/info/${PKG}.control`) ?? '', /(^|\n)Version: *([^\n]+)/);
+	if (v)
+		return trim(v[2]);
+	v = match(readfile('/lib/apk/db/installed') ?? '', regexp(`(^|\n)P:${PKG}\nV:([^\n]+)`));
+	return v ? trim(v[2]) : 'unknown';
+}
+
 const methods = {
+	version: {
+		call: function() {
+			return { version: pkg_version(), api: API };
+		}
+	},
+
 	status: {
 		call: function() {
 			let d = daemon('status');

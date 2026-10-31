@@ -233,7 +233,10 @@ export function render(cfg, res, opts) {
 		'table inet xvpn {',
 		`\tset nets { type ifname; flags interval; auto-merge; ${elements(res.nets, true)}}`,
 		`\tset bypass4 { type ipv4_addr; flags interval; auto-merge; ${elements(BYPASS4)}}`,
-		`\tset bypass6 { type ipv6_addr; flags interval; auto-merge; ${elements(BYPASS6)}}`);
+		`\tset bypass6 { type ipv6_addr; flags interval; auto-merge; ${elements(BYPASS6)}}`,
+		// tunnel traffic for the speed in status (#83), see counters()
+		'\tcounter tun_up { }',
+		'\tcounter tun_down { }');
 	if (!block)
 		push(r,
 			`\tset direct4 { type ipv4_addr; flags interval; auto-merge; ${elements(d4)}}`,
@@ -257,9 +260,9 @@ export function render(cfg, res, opts) {
 			'\t\tip6 daddr @bypass6 return',
 			...direct);
 		if (intercept) {
-			push(r, `\t\tmeta nfproto ipv4 meta l4proto { tcp, udp } meta mark set meta mark | ${tm} tproxy ip to :${m.tproxy_port} accept`);
+			push(r, `\t\tmeta nfproto ipv4 meta l4proto { tcp, udp } counter name tun_up meta mark set meta mark | ${tm} tproxy ip to :${m.tproxy_port} accept`);
 			if (v6 == 'tunnel')
-				push(r, `\t\tmeta nfproto ipv6 meta l4proto { tcp, udp } meta mark set meta mark | ${tm} tproxy ip6 to :${m.tproxy_port} accept`);
+				push(r, `\t\tmeta nfproto ipv6 meta l4proto { tcp, udp } counter name tun_up meta mark set meta mark | ${tm} tproxy ip6 to :${m.tproxy_port} accept`);
 		}
 		push(r, '\t}', '',
 			'\tchain dns_hijack {',
@@ -267,6 +270,16 @@ export function render(cfg, res, opts) {
 		if (hijack)
 			push(r, `\t\tmeta mark & ${cm} == ${cm} meta l4proto { tcp, udp } th dport 53 redirect to :${m.dns_port}`);
 		push(r, '\t}', '');
+		// xray answers the clients from the addresses they asked for (transparent sockets):
+		// what the router sends from an address not its own is the tunnel's download. Its
+		// own traffic (LuCI, dnsmasq, xray to the server) and DNS replies (redirect) come
+		// from local addresses; the direct networks are forwarded and never pass output
+		if (intercept)
+			push(r,
+				'\tchain count_down {',
+				'\t\ttype filter hook output priority mangle; policy accept;',
+				'\t\tmeta l4proto { tcp, udp } fib saddr type != local counter name tun_down',
+				'\t}', '');
 	}
 	push(r,
 		'\tchain guard_forward {',
@@ -307,6 +320,36 @@ export function render(cfg, res, opts) {
 			'}', '');
 
 	return join('\n', r);
+};
+
+// Bytes of the tunnel counters from `nft -j list counters table inet xvpn`: { up, down }
+// (IP packets: headers included), null without them (no table, block, minimal).
+export function counters(out) {
+	let r = {}, j = null;
+	try { j = json(out ?? ''); } catch (e) {}
+	for (let o in j?.nftables ?? [])
+		if (o?.counter?.table == 'xvpn' && o.counter.name in [ 'tun_up', 'tun_down' ] && type(o.counter.bytes) == 'int')
+			r[substr(o.counter.name, 4)] = o.counter.bytes;
+	return (r.up != null && r.down != null) ? r : null;
+};
+
+// One step of the speed meter (#83). last: { up, down, t } of the previous sample or null,
+// cur: counters() (null: no counters now), t: monotonic s (fractional). The counters start
+// from zero with the table (fw-apply, fw4 flush and a new table): a value below the last
+// one counts from zero, no counters count as zeros, so a new table is no jump and nothing
+// goes negative. The first sample is only the base: the counters may be older than us.
+// Returns { last, add: { up, down } bytes since last or null, speed: { up, down } B/s or null }.
+export function counter_step(last, cur, t) {
+	let c = cur ?? { up: 0, down: 0 };
+	let next = { up: c.up, down: c.down, t };
+	if (!last || t <= last.t)
+		return { last: next, add: null, speed: null };
+	let add = {}, speed = {}, dt = t - last.t;
+	for (let k in [ 'up', 'down' ]) {
+		add[k] = (c[k] >= last[k]) ? c[k] - last[k] : c[k];
+		speed[k] = int(add[k] / dt);
+	}
+	return { last: next, add, speed };
 };
 
 // The names `ip rule list` prints for the table: its number, or its name when
