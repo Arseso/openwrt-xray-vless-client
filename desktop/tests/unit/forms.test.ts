@@ -3,7 +3,8 @@
 
 import { describe, expect, it } from 'vitest';
 import { UciSection } from '../../src/api/uci';
-import { changedSince, editsFor } from '../../src/forms/diff';
+import { changedSince, editsFor, uciBool } from '../../src/forms/diff';
+import { nameFromUrl } from '../../src/views/subscriptions';
 import {
   cidr, dnsServer, domain, eachLine, httpUrl, integer, ipv6, number, regex, required, secondUrl, shareLink,
   subscriptionUrl, timeoutShorter,
@@ -118,6 +119,13 @@ describe('subscriptions', () => {
     expect(regex('')).toBe(ok);
     expect(regex('^(NL|DE)')).toBe(ok);
     expect(regex('(')).toMatch(/Invalid regular expression/);
+    // POSIX ERE of ucode regexp(): the router would drop these filters silently
+    for (const v of ['^(?!.*RU)', 'a.*?b', 'x+?', '\\d+', 'NL\\b', '\\w', '(a)\\1', '(?<=x)y'])
+      expect(regex(v), v).toMatch(/POSIX/);
+    for (const v of ['^(NL|DE)', '[0-9]+', 'a(b)?c', '[[:alnum:]_]+', '\\.ru$', '[(?]', 'x{2,3}', '\\*?', 'a|b'])
+      expect(regex(v), v).toBe(ok);
+    expect(nameFromUrl('https://TOKEN@panel.example.com:8443/sub/abc')).toBe('panel.example.com');
+    expect(nameFromUrl('not a url')).toBe('');
     expect(shareLink('vless://uuid@host:443#x')).toBe(ok);
     expect(shareLink('VMESS://eyJ2IjoyfQ==')).toBe(ok);
     expect(shareLink('hysteria2://x@h:1')).not.toBe(ok);
@@ -139,7 +147,7 @@ describe('what a form writes', () => {
       { section: 'health', type: 'health', option: 'url', value: 'https://a.example/x' },
       { section: 'health', type: 'health', option: 'interval', value: '' },
       { section: 'health', type: 'health', option: 'timeout', value: '7' },
-      { section: 'health', type: 'health', option: 'auto_best', value: '1', def: '0' },
+      { section: 'health', type: 'health', option: 'auto_best', value: '1', def: '0', flag: true },
       { section: 'access', type: 'access', option: 'network', value: ['lan'] },
       { section: 'access', type: 'access', option: 'port', value: [] },
     ]);
@@ -148,10 +156,27 @@ describe('what a form writes', () => {
     ]);
   });
 
+  it('a flag is read as util.uc bool(): an untouched one is never rewritten', () => {
+    const s = { access: sec('access', 'access', { killswitch: 'yes', dns_hijack: 'on', ipv6: 'block', sniffing: '', bad: 'maybe' }) };
+    const flag = (option: string, value: string, def: string) => ({ section: 'access', type: 'access', option, value, def, flag: true });
+    // what the checkboxes show for them, saved untouched: nothing to write
+    expect(editsFor(s, [flag('killswitch', '1', '1'), flag('dns_hijack', '1', '1'), flag('sniffing', '1', '1'),
+      flag('bad', '0', '1'), flag('missing', '0', '0')])).toEqual([]);
+    // turned off: '0'; turned on where the router reads false: '1'
+    expect(editsFor(s, [flag('killswitch', '0', '1'), flag('bad', '1', '1')])).toEqual([
+      { section: 'access', type: 'access', add: false, set: { killswitch: '0', bad: '1' }, unset: [] },
+    ]);
+    expect(uciBool('enabled', '0')).toBe(true);
+    expect(uciBool('0', '1')).toBe(false);
+    expect(uciBool(undefined, '1')).toBe(true);
+    expect(uciBool('', '0')).toBe(false);
+    expect(uciBool('no', '1')).toBe(false);
+  });
+
   it('a flag left at its default is not written; a list changes as a whole', () => {
     const edits = editsFor(loaded, [
-      { section: 'access', type: 'access', option: 'killswitch', value: '1', def: '1' },
-      { section: 'access', type: 'access', option: 'dns_hijack', value: '0', def: '1' },
+      { section: 'access', type: 'access', option: 'killswitch', value: '1', def: '1', flag: true },
+      { section: 'access', type: 'access', option: 'dns_hijack', value: '0', def: '1', flag: true },
       { section: 'access', type: 'access', option: 'network', value: ['lan', 'guest'] },
     ]);
     expect(edits).toEqual([

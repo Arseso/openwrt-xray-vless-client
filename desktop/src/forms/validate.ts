@@ -140,16 +140,26 @@ export function required(v: string): Check {
   return v.trim() ? null : t('required');
 }
 
+/**
+ * include / exclude of a subscription: the router compiles them with ucode regexp(), POSIX
+ * extended (ERE), and drops a filter it cannot compile without a word (subscription.uc).
+ * So beside a valid JS RegExp: none of the Perl additions — (?…) groups and lookarounds,
+ * lazy quantifiers, \d \w \s \b and the like, backreferences.
+ */
 export function regex(v: string): Check {
   if (!v)
     return null;
   try {
     new RegExp(v, 'i');
-    return null;
   }
   catch (e) {
     return t('regex', { message: (e as Error).message });
   }
+  if (/\\[bBdDwWsSpPkK0-9]/.test(v))
+    return t('regex_ere');
+  // without escaped characters and bracket expressions, where ( ? * are literal
+  const bare = v.replace(/\\./g, '').replace(/\[\^?\]?[^\]]*\]/g, '');
+  return /\(\?|[*+?}]\?/.test(bare) ? t('regex_ere') : null;
 }
 
 /** one link per line: the scheme here, the rest by luci.xvpn parse_links */

@@ -5,12 +5,12 @@
 
 import { isXvpnError } from '../api/errors';
 import { UciSection, UciValue } from '../api/uci';
-import { ApplyResult, CONFIG, Edit, applyStaged, stage } from '../core/apply';
+import { ApplyResult, Edit, applyStaged, exclusive, isEmpty, readConfig, saving, stage } from '../core/apply';
 import { AppContext } from '../core/connection';
 import { t } from '../i18n/forms';
 import { Child, h } from '../ui/dom';
 import { errorText } from '../ui/errors';
-import { FieldValue, changedSince, editsFor, optionValue } from './diff';
+import { FieldValue, changedSince, editsFor, optionValue, uciBool } from './diff';
 import { Check, lines } from './validate';
 
 interface Bound {
@@ -18,6 +18,7 @@ interface Bound {
   type: string;
   option: string;
   def?: string;
+  flag?: boolean;
   get(): UciValue;
   check(): Check;
   error: HTMLElement;
@@ -107,13 +108,13 @@ export class UciForm {
   flag(section: string, option: string, o: FieldOpts & { def: '0' | '1' }): HTMLElement {
     const v = this.stored(section, option);
     const box = h('input', {
-      type: 'checkbox', checked: (typeof v === 'string' ? v : o.def) === '1', onchange: () => this.validateAll(),
+      type: 'checkbox', checked: uciBool(v, o.def), onchange: () => this.validateAll(),
     });
     const error = h('small', { class: 'field-error' });
     const row = h('div', { class: 'field' },
       h('label', { class: 'check' }, box, o.label), o.help ? h('small', { class: 'muted' }, o.help) : null, error);
     this.fields.push({
-      section, type: this.types[section], option, def: o.def, error, row, visible: o.visible,
+      section, type: this.types[section], option, def: o.def, flag: true, error, row, visible: o.visible,
       get: () => (box.checked ? '1' : '0'),
       check: () => null,
     });
@@ -167,17 +168,19 @@ export class UciForm {
   }
 
   edits(): Edit[] {
-    const values: FieldValue[] = this.fields.map((f) => ({ section: f.section, type: f.type, option: f.option, value: f.get(), def: f.def }));
+    const values: FieldValue[] = this.fields.map((f) => ({ section: f.section, type: f.type, option: f.option, value: f.get(), def: f.def, flag: f.flag }));
     return editsFor(this.sections, values);
   }
 }
 
-export type SaveOutcome = ApplyResult | 'invalid' | 'changed' | 'error';
+export type SaveOutcome = ApplyResult | 'invalid' | 'changed' | 'busy' | 'error';
 
 /**
  * The save button row of a form: validates, re-reads the config, stages extra edits
- * (beside the form's) and applies. reload() is called after applied, rolled_back,
- * changed and session_lost: the form is drawn again from the router.
+ * (beside the form's) and applies, one save of the session at a time (exclusive in
+ * src/core/apply.ts): while another runs, it says so and saves nothing. reload() is
+ * called after applied, rolled_back, changed and session_lost: the form is drawn again
+ * from the router.
  */
 export function saveBar(ctx: AppContext, o: {
   form: () => UciForm | null;
@@ -190,9 +193,8 @@ export function saveBar(ctx: AppContext, o: {
   label?: string;
   /** after each save from the button */
   onDone?: (r: SaveOutcome) => void;
-}): { el: HTMLElement; save: (edits?: Edit[]) => Promise<SaveOutcome>; busy: () => boolean } {
+}): { el: HTMLElement; save: (edits?: Edit[]) => Promise<SaveOutcome> } {
   const msg = h('span', { class: 'save-msg' });
-  let busy = false;
   const say = (text: string, cls = 'muted') => {
     msg.textContent = text;
     msg.className = `save-msg ${cls}`;
@@ -201,8 +203,10 @@ export function saveBar(ctx: AppContext, o: {
   const reset = h('button', { onclick: () => o.reload() }, t('reset'));
 
   const save = async (only?: Edit[]): Promise<SaveOutcome> => {
-    if (busy)
-      return 'error';
+    if (saving(ctx.uci)) {
+      say(t('busy'), 'warn-text');
+      return 'busy';
+    }
     const form = o.form();
     if (!only && form && !form.validateAll()) {
       say(t('invalid'), 'error-text');
@@ -213,28 +217,25 @@ export function saveBar(ctx: AppContext, o: {
       say(pending, 'error-text');
       return 'invalid';
     }
-    busy = true;
     btn.disabled = reset.disabled = true;
     say(t('saving'));
     try {
-      const edits = only ?? [...(form?.edits() ?? []), ...(await o.extra?.() ?? [])].filter((e) =>
-        e.add || e.remove || Object.keys(e.set ?? {}).length || e.unset?.length);
+      const edits = only ?? [...(form?.edits() ?? []), ...(await o.extra?.() ?? [])].filter((e) => !isEmpty(e));
       if (!edits.length) {
         say(t('nothing'));
         return 'nothing';
       }
-      if (form) {
-        const now = await ctx.uci.getAll(CONFIG);
-        if (changedSince(form.sections, now, edits).length) {
-          say(t('changed'), 'warn-text');
-          o.reload();
+      const r = await exclusive(ctx.uci, async (): Promise<SaveOutcome> => {
+        if (form && changedSince(form.sections, await readConfig(ctx.uci), edits).length)
           return 'changed';
-        }
-      }
-      await stage(ctx.uci, edits);
-      const r = await applyStaged(ctx.uci, ctx.xvpn, { onWaiting: () => say(t('waiting')) });
-      say(r === 'applied' ? t('applied') : r === 'nothing' ? t('nothing') : t('rolled_back'),
-        r === 'rolled_back' ? 'error-text' : 'ok-text');
+        await stage(ctx.uci, edits);
+        return applyStaged(ctx.uci, ctx.xvpn, { onWaiting: () => say(t('waiting')) });
+      });
+      if (r === 'changed')
+        say(t('changed'), 'warn-text');
+      else
+        say(r === 'applied' ? t('applied') : r === 'nothing' ? t('nothing') : t('rolled_back'),
+          r === 'rolled_back' ? 'error-text' : 'ok-text');
       ctx.poller.refresh();
       o.reload();
       return r;
@@ -246,11 +247,10 @@ export function saveBar(ctx: AppContext, o: {
       return 'error';
     }
     finally {
-      busy = false;
       btn.disabled = reset.disabled = false;
     }
   };
 
   const el = o.buttons === false ? h('div', { class: 'row save-bar' }, msg) : h('div', { class: 'row save-bar' }, btn, reset, msg);
-  return { el, save, busy: () => busy };
+  return { el, save };
 }

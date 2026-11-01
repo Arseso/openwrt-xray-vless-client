@@ -8,6 +8,7 @@ import { UciSection } from '../api/uci';
 import { ParsedLink, Subscription, SubscriptionsReply } from '../api/xvpn';
 import { Edit, loadConfig } from '../core/apply';
 import { AppContext } from '../core/connection';
+import { optionValue, uciBool } from '../forms/diff';
 import { SaveOutcome, UciForm, saveBar } from '../forms/form';
 import { DEFAULTS, SHARE_LINK, integer, lines, regex, required, subscriptionUrl } from '../forms/validate';
 import { t as tf } from '../i18n/forms';
@@ -28,6 +29,21 @@ export function newSubscriptionName(): string {
   const rnd = new Uint8Array(4);
   crypto.getRandomValues(rnd);
   return `sub_${Array.from(rnd, (b) => b.toString(16).padStart(2, '0')).join('')}`;
+}
+
+/** the name of a new subscription from its URL: the host only, user info before @ may be its token */
+export function nameFromUrl(url: string): string {
+  try {
+    return new URL(url.trim()).hostname;
+  }
+  catch {
+    return '';
+  }
+}
+
+function manualText(s: UciSection | undefined): string {
+  const v = optionValue(s, 'link');
+  return (v == null ? [] : Array.isArray(v) ? v : [v]).join('\n');
 }
 
 function updateError(err: string | undefined): string {
@@ -188,6 +204,8 @@ registerView({
     let editor: { form: UciForm; sid: string } | null = null;
     let linksForm: UciForm | null = null;
     let links: LinksCheck | null = null;
+    /** the manual links as drawn from the router */
+    let manualShown: string | null = null;
     const busy = new Set<string>();
 
     const notice = h('p', { class: 'save-msg' });
@@ -292,12 +310,19 @@ registerView({
         }, 4000);
         return;
       }
-      void actions.save([{ section: sid, type: 'subscription', remove: true }]);
+      void actions.save([{ section: sid, type: 'subscription', remove: true }]).then(redrawUnlessDone);
+    };
+
+    // another save of the session was running (busy) or this one failed: the cards show
+    // the router again (a toggled checkbox goes back)
+    const redrawUnlessDone = (r: SaveOutcome) => {
+      if (r === 'busy' || r === 'error')
+        reload();
     };
 
     const toggle = (sid: string, on: boolean) => {
       const e: Edit = { section: sid, type: 'subscription', set: { enabled: on ? '1' : '0' } };
-      void actions.save([e]);
+      void actions.save([e]).then(redrawUnlessDone);
     };
 
     const card = (s: UciSection) => {
@@ -313,7 +338,7 @@ registerView({
       return h('div', { class: 'card sub' },
         h('div', { class: 'sub-head' },
           h('label', { class: 'check' },
-            h('input', { type: 'checkbox', checked: s.enabled !== '0', title: t('enabled'), onchange: (e: Event) => toggle(sid, (e.target as HTMLInputElement).checked) }),
+            h('input', { type: 'checkbox', checked: uciBool(optionValue(s, 'enabled'), '1'), title: t('enabled'), onchange: (e: Event) => toggle(sid, (e.target as HTMLInputElement).checked) }),
             h('strong', {}, name)),
           title && title !== name ? h('span', { class: 'muted' }, title) : null,
           h('span', { class: 'spacer' }),
@@ -332,7 +357,7 @@ registerView({
       const nameRow = f.text(name, 'name', { label: t('name'), check: required });
       if (url) {
         urlRow.querySelector('input')!.value = url;
-        nameRow.querySelector('input')!.value = url.replace(/^https?:\/\/([^/:?#]+).*$/i, '$1');
+        nameRow.querySelector('input')!.value = nameFromUrl(url);
       }
       clear(editBox, h('div', { class: 'card editor' },
         h('h3', {}, sid ? t('edit_title', { name: String(sections[sid]?.name ?? sid) }) : t('add_title')),
@@ -354,6 +379,7 @@ registerView({
     };
 
     const drawManual = () => {
+      manualShown = manualText(sections.manual);
       links?.stop();
       linksForm = new UciForm(sections.manual ? { manual: sections.manual } : {}, { manual: 'manual' });
       const results = h('div', { class: 'link-check' });
@@ -420,7 +446,11 @@ registerView({
         clear(list, subs.length ? subs.map(card) : h('p', { class: 'muted' }, t('none')));
         if (editor && !editor.form.sections[editor.sid] && sections[editor.sid])
           editor = null;
-        drawManual();
+        // the manual links being edited stay, unless the router has just the same now
+        const area = manualBox.querySelector('textarea');
+        const typed = area ? lines(area.value).join('\n') : null;
+        if (typed == null || typed === manualShown || typed === manualText(all.manual))
+          drawManual();
         fill();
       }
       catch (e) {

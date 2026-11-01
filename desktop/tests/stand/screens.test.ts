@@ -73,6 +73,8 @@ describe(`tabs of #79 against ${URL}`, () => {
   it.skipIf(!CONTAINER)('the app logs in as the rpcd user without root', async () => {
     await app.xvpn.status();
     expect(app.ubus.session).toBeTruthy();
+    // session access: the client tells a live session from a dead one (ACL luci-app-xvpn-remote)
+    await expect(app.ubus.call('session', 'access', {})).resolves.toBeTypeOf('object');
     // no rights beyond luci-app-xvpn: another config is refused
     await expect(app.uci.get('network', 'lan', 'proto')).rejects.toMatchObject({ code: 'acl' });
   });

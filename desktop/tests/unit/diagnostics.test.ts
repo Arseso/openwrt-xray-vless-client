@@ -38,11 +38,16 @@ describe('masking', () => {
     expect(maskLink(TROJAN)).toBe('trojan://***@tr.example:443');
     expect(maskLink(SS)).toBe('ss://***@ss.example:8388');
     expect(maskLink(VMESS)).toBe('vmess://***');
+    // the router takes the last @ before / ? #: no part of the password stays
+    expect(maskLink('trojan://p@ss@host.example:443?sni=x#n')).toBe('trojan://***@host.example:443');
+    expect(maskLink('trojan://pa/ss@host.example:443')).toBe('trojan://***');
+    expect(maskLink('vless://id@h:1#name@x')).toBe('vless://***@h:1');
   });
 
   it('URLs keep the scheme and the host; the check URLs stay', () => {
     expect(maskUrl(SUB)).toBe('https://panel.example.com/***');
     expect(maskUrl('https://user:pw@panel.example.com/')).toBe('https://panel.example.com');
+    expect(maskUrl('https://to@ken@panel.example.com/x')).toBe('https://panel.example.com/***');
     expect(maskUrl('https://check.example/ok', new Set(['https://check.example/ok']))).toBe('https://check.example/ok');
   });
 

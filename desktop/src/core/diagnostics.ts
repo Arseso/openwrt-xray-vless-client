@@ -15,22 +15,36 @@ const UUID = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/g
 /** options that hold a secret whatever the section */
 const SECRET_OPTION = /pass|secret|token|key|uuid/i;
 
+/** scheme://, the authority (up to the first / ? #) and the rest; null: not scheme://… */
+function split(url: string): { scheme: string; auth: string; rest: string } | null {
+  const m = /^([a-z][a-z0-9+.-]*):\/\/([^/?#]*)(.*)$/is.exec(url.trim());
+  return m ? { scheme: m[1], auth: m[2], rest: m[3] } : null;
+}
+
+/** the host:port of an authority: after its last @, as the parser of the router (links.uc) takes it */
+function hostOf(auth: string): { host: string; userinfo: boolean } {
+  const at = auth.lastIndexOf('@');
+  return { host: auth.slice(at + 1), userinfo: at >= 0 };
+}
+
 /** scheme://***@host:port, or scheme://*** when the host is inside the encoded part (vmess, ss) */
 export function maskLink(link: string): string {
-  const m = /^([a-z0-9]+):\/\/(?:([^@/?#]*)@)?([^/?#]*)/i.exec(link.trim());
-  if (!m)
+  const u = split(link);
+  if (!u)
     return '***';
-  return m[2] != null && m[3] ? `${m[1]}://***@${m[3]}` : `${m[1]}://***`;
+  const { host, userinfo } = hostOf(u.auth);
+  return userinfo && host ? `${u.scheme}://***@${host}` : `${u.scheme}://***`;
 }
 
 /** scheme://host/*** (no user info, path or query); a URL in keep stays as is */
 export function maskUrl(url: string, keep: ReadonlySet<string> = new Set()): string {
   if (keep.has(url))
     return url;
-  const m = /^(https?):\/\/(?:[^@/?#]*@)?([^/?#]*)(.*)$/i.exec(url);
-  if (!m)
+  const u = split(url);
+  if (!u)
     return '***';
-  return m[3] && m[3] !== '/' ? `${m[1]}://${m[2]}/***` : `${m[1]}://${m[2]}`;
+  const { host } = hostOf(u.auth);
+  return u.rest && u.rest !== '/' ? `${u.scheme}://${host}/***` : `${u.scheme}://${host}`;
 }
 
 export function maskText(text: string, keep: ReadonlySet<string> = new Set()): string {
