@@ -14,6 +14,10 @@
 //! and takes an asset only with its line in SHA256SUMS, and only if the bytes match it (and
 //! the digest of the API, when it gives one). Downloads follow at most a few redirects, over
 //! https and to the hosts of GitHub only; the size is limited.
+//!
+//! The API allows an IP 60 anonymous requests an hour. Over the limit pkg_latest does without
+//! it: the tag comes from the redirect of github.com/<repo>/releases/latest, the ipk files from
+//! the names in the signed SHA256SUMS (their sizes are unknown then, MAX_SIZE limits them).
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -40,6 +44,11 @@ const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(60);
 
 fn api_url() -> String {
     format!("https://api.github.com/repos/{REPO}/releases/latest")
+}
+
+/// redirects to the page of the latest release, .../releases/tag/<tag>; not the API
+fn latest_page_url() -> String {
+    format!("https://github.com/{REPO}/releases/latest")
 }
 
 /// where the assets of the release may come from (the API gives these URLs; GitHub
@@ -71,7 +80,8 @@ struct ApiAsset {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Asset {
     pub name: String,
-    pub size: u64,
+    /// None: unknown (the release without the API)
+    pub size: Option<u64>,
     pub url: String,
     /// the digest of the API, lowercase hex
     pub digest: Option<String>,
@@ -102,7 +112,7 @@ pub struct ReleaseInfo {
 #[serde(rename_all = "camelCase")]
 pub struct AssetInfo {
     pub name: String,
-    pub size: u64,
+    pub size: Option<u64>,
     /// false: not in the signed SHA256SUMS, it is not downloaded
     pub verified: bool,
     /// from SHA256SUMS: the router checks the file against it before opkg
@@ -130,7 +140,7 @@ pub fn parse_release(body: &[u8], prefix: &str) -> Result<Release> {
             SUMS => rel.sums = Some((a.size, a.browser_download_url)),
             SUMS_SIG => rel.sums_sig = Some((a.size, a.browser_download_url)),
             n if is_package(n) => rel.assets.push(Asset {
-                digest: digest(a.digest.as_deref()), sha256: None, name: a.name, size: a.size, url: a.browser_download_url,
+                digest: digest(a.digest.as_deref()), sha256: None, name: a.name, size: Some(a.size), url: a.browser_download_url,
             }),
             _ => {}
         }
@@ -262,14 +272,15 @@ pub async fn download(http: &reqwest::Client, a: &Asset) -> Result<Vec<u8>> {
     let Some(sha) = &a.sha256 else {
         return Err(TransportError::new("release_no_digest", format!("{}: not in the signed {SUMS}", a.name)));
     };
-    if a.size > MAX_SIZE {
-        return Err(TransportError::new("release_too_big", format!("{}: {} bytes", a.name, a.size)));
+    let size = a.size.unwrap_or(MAX_SIZE);
+    if size > MAX_SIZE {
+        return Err(TransportError::new("release_too_big", format!("{}: {size} bytes", a.name)));
     }
     let r = http.get(&a.url).timeout(DOWNLOAD_TIMEOUT).send().await.map_err(|e| net_error(&a.name, e))?;
     if !r.status().is_success() {
         return Err(status_error(&a.name, &r));
     }
-    let data = read_limited(r, a.size, &a.name).await?;
+    let data = read_limited(r, size, &a.name).await?;
     check_sha256(&data, sha)?;
     Ok(data)
 }
@@ -285,15 +296,51 @@ async fn get_small(http: &reqwest::Client, what: &str, (size, url): &(u64, Strin
     read_limited(r, *size, what).await
 }
 
+/// the tag in the URL of the page of a release, .../releases/tag/<tag>
+pub fn tag_of_page(url: &reqwest::Url) -> Option<String> {
+    let mut seg: Vec<_> = url.path_segments()?.collect();
+    let tag = seg.pop()?;
+    let ok = !tag.is_empty() && tag.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.+".contains(&b)) && !tag.starts_with('.');
+    (ok && seg.last() == Some(&"tag")).then(|| tag.to_string())
+}
+
+/// the latest release without the API: the tag from the redirect of page (the client follows
+/// it), SHA256SUMS and its signature from prefix<tag>/; no assets yet, from_sums adds them
+pub async fn fetch_release_page(http: &reqwest::Client, page: &str, prefix: &str) -> Result<Release> {
+    let r = http.get(page).timeout(API_TIMEOUT).send().await.map_err(|e| net_error("GitHub", e))?;
+    if !r.status().is_success() {
+        return Err(status_error("GitHub", &r));
+    }
+    let url = r.url().clone();
+    drop(r);
+    let tag = tag_of_page(&url)
+        .ok_or_else(|| TransportError::new("release_bad", format!("GitHub: the latest release is at {url}")))?;
+    let small = |name: &str| Some((64 << 10, format!("{prefix}{tag}/{name}")));
+    Ok(Release { url: url.to_string(), assets: vec![], sums: small(SUMS), sums_sig: small(SUMS_SIG), tag })
+}
+
+/// a release without the API knows its ipk files from the signed SHA256SUMS only
+pub fn from_sums(release: &mut Release, sums: &HashMap<String, String>, prefix: &str) {
+    let mut names: Vec<_> = sums.keys().filter(|n| is_package(n)).collect();
+    names.sort();
+    release.assets = names.into_iter().map(|n| Asset {
+        name: n.clone(), size: None, url: format!("{prefix}{}/{n}", release.tag), digest: None, sha256: None,
+    }).collect();
+}
+
 /// the release with the sha256 of the signed SHA256SUMS; release_unsigned without it,
 /// release_signature with a signature not of pubkey
-pub async fn verify_release(http: &reqwest::Client, mut r: Release, pubkey: &str) -> Result<Release> {
+/// prefix: Some for a release of fetch_release_page, its assets come from SHA256SUMS
+pub async fn verify_release(http: &reqwest::Client, mut r: Release, pubkey: &str, prefix: Option<&str>) -> Result<Release> {
     let (Some(sums), Some(sig)) = (&r.sums, &r.sums_sig) else {
         return Err(TransportError::new("release_unsigned", format!("{}: no {SUMS} with {SUMS_SIG}", r.tag)));
     };
     let body = get_small(http, SUMS, sums).await?;
     let sig = get_small(http, SUMS_SIG, sig).await?;
     let map = verify_sums(&body, &String::from_utf8_lossy(&sig), pubkey)?;
+    if let Some(prefix) = prefix {
+        from_sums(&mut r, &map, prefix);
+    }
     apply_sums(&mut r, &map)?;
     Ok(r)
 }
@@ -315,8 +362,14 @@ pub fn handler() -> impl Fn(Invoke<Wry>) -> bool + Send + Sync + 'static {
 #[tauri::command]
 async fn pkg_latest(latest: State<'_, Latest>) -> Result<ReleaseInfo> {
     let http = client()?;
-    let r = fetch_release(&http, &api_url(), &download_prefix()).await?;
-    let r = verify_release(&http, r, &updater_pubkey()).await?;
+    let prefix = download_prefix();
+    let r = match fetch_release(&http, &api_url(), &prefix).await {
+        Err(e) if e.kind == "release_rate_limit" => {
+            let r = fetch_release_page(&http, &latest_page_url(), &prefix).await?;
+            verify_release(&http, r, &updater_pubkey(), Some(&prefix)).await?
+        }
+        r => verify_release(&http, r?, &updater_pubkey(), None).await?,
+    };
     let info = ReleaseInfo {
         tag: r.tag.clone(),
         url: r.url.clone(),
@@ -484,8 +537,8 @@ mod tests {
         ]).await;
         let r = fetch_release(&plain(), &base, &base).await.unwrap();
         let unsigned = Release { sums: None, ..r.clone() };
-        assert_eq!(verify_release(&plain(), unsigned, TEST_PUB).await.unwrap_err().kind, "release_unsigned");
-        let r = verify_release(&plain(), r, TEST_PUB).await.unwrap();
+        assert_eq!(verify_release(&plain(), unsigned, TEST_PUB, None).await.unwrap_err().kind, "release_unsigned");
+        let r = verify_release(&plain(), r, TEST_PUB, None).await.unwrap();
         assert_eq!(r.assets[0].sha256.as_deref(), Some(SHA_ABC));
 
         let file = serve(vec![http("200 OK", "", b"abc"), http("200 OK", "", b"abd"), http("200 OK", "", b"abcd")]).await;
@@ -499,8 +552,40 @@ mod tests {
         let mut unlisted = r.assets[1].clone();
         unlisted.url = "http://127.0.0.1:1/".into();
         assert_eq!(download(&plain(), &unlisted).await.unwrap_err().kind, "release_no_digest");
-        a.size = MAX_SIZE + 1;
+        a.size = Some(MAX_SIZE + 1);
         assert_eq!(download(&plain(), &a).await.unwrap_err().kind, "release_too_big");
+    }
+
+    #[test]
+    fn page_tags() {
+        let t = |s: &str| tag_of_page(&reqwest::Url::parse(s).unwrap());
+        assert_eq!(t("https://github.com/Arseso/openwrt-xray-vless-client/releases/tag/v0.4.1").as_deref(), Some("v0.4.1"));
+        // no release yet: /releases/latest leads to /releases
+        assert_eq!(t("https://github.com/Arseso/openwrt-xray-vless-client/releases"), None);
+        assert_eq!(t("https://github.com/x/releases/tag/"), None);
+        assert_eq!(t("https://github.com/x/releases/tag/.."), None);
+        assert_eq!(t("https://github.com/x/releases/tag/v1%2F..%2Fx"), None);
+    }
+
+    #[tokio::test]
+    async fn release_without_api() {
+        // in order: the page (a redirect to its tag), SHA256SUMS, its signature
+        let base = serve_at(|url| vec![
+            http("302 Found", &format!("Location: {url}x/releases/tag/v0.3.0\r\n"), b""),
+            http("200 OK", "", b"<html>"),
+            http("200 OK", "", &sums()),
+            http("200 OK", "", TEST_SIG.as_bytes()),
+        ]).await;
+        let r = fetch_release_page(&plain(), &format!("{base}x/releases/latest"), &base).await.unwrap();
+        assert_eq!(r.tag, "v0.3.0");
+        assert_eq!(r.sums.as_ref().unwrap().1, format!("{base}v0.3.0/SHA256SUMS"));
+        let r = verify_release(&plain(), r, TEST_PUB, Some(&base)).await.unwrap();
+        assert_eq!(r.assets, [Asset {
+            name: "luci-app-xvpn_0.3.0-r1_all.ipk".into(), size: None, url: format!("{base}v0.3.0/luci-app-xvpn_0.3.0-r1_all.ipk"),
+            digest: None, sha256: Some(SHA_ABC.into()),
+        }]);
+        let page = serve(vec![http("200 OK", "", b"<html>")]).await;
+        assert_eq!(fetch_release_page(&plain(), &page, &base).await.unwrap_err().kind, "release_bad");
     }
 
     #[tokio::test]
