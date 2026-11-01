@@ -37,7 +37,11 @@ desktop/
       poller.ts        общий поллер status
       connection.ts    подключение к профилю: фазы, AppContext для вкладок
       i18n.ts          strings({ en, ru }), lang(), setLang()
-      updater.ts       UpdateFlow: проверка по кнопке, установка после подтверждения
+      updater.ts       UpdateFlow: проверка по кнопке, установка после нативного вопроса Rust
+      apply.ts         сохранение UCI: stage → apply с откатом → проверка связи → confirm
+      diagnostics.ts   файл диагностики вкладки «Журнал» и маскировка секретов
+    forms/             формы вкладок: validate.ts (проверки как в LuCI и load_config),
+                       diff.ts (что форма пишет в UCI), form.ts (UciForm, saveBar)
     i18n/<name>.ts     словари RU/EN: один файл на вкладку (+ common, connect, tray, notifications)
     views/
       registry.ts      registerView(), интерфейс View
@@ -45,7 +49,8 @@ desktop/
       <name>.ts        вкладка: status, servers, subscriptions, access-points, settings, log
       connect.ts       экран роутеров и решений о сертификате (не вкладка)
       about.ts         «О программе»: версии, обновление приложения (#81)
-    ui/                dom.ts (h, clear), errors.ts (errorText)
+    ui/                dom.ts (h, clear), errors.ts (errorText), format.ts (байты, сроки),
+                       native.ts (буфер обмена, диалог сохранения через плагины)
   src-tauri/src/
     lib.rs             сборка приложения, маршрутизация команд по префиксу
     commands.rs        команды ядра: ubus_request, ubus_login, profile_*, default_gateway
@@ -56,6 +61,8 @@ desktop/
     tray.rs            трей — TODO(#78)
     notifications.rs   уведомления — TODO(#80)
     updater.rs         обновление приложения: tauri-plugin-updater (#81)
+    screens.rs         плагины вкладок #79: clipboard-manager, dialog, fs
+                       (права — capabilities/screens.json)
   tests/unit/          vitest, фейковый роутер (fake.ts)
   tests/stand/         тот же клиент против стенда scripts/luci.sh
   docker/Dockerfile    окружение сборки: Linux и кросс-сборка Windows (cargo-xwin, NSIS)
@@ -120,13 +127,40 @@ registerView({
 Всё, что бросают `api/*`, — `XvpnError` с `code` (`src/api/errors.ts`); текст для
 пользователя — `errorText(e)` (`src/ui/errors.ts`), для каждого кода есть строка RU/EN.
 
+### Сохранение настроек
+
+Вкладки «Подписки», «Точки доступа» и «Настройки» пишут конфиг `xvpn` так же, как LuCI:
+изменения ставятся в сессию (`uci set/add/delete`), `uci apply` с `rollback: true` и таймером
+60 с, затем, после паузы 4 с на перезагрузку служб (как `apply_holdoff` LuCI), приложение
+ждёт двух ответов `luci.xvpn version` подряд по новым соединениям (`fresh`: keep-alive
+соединение может пережить правило firewall, которое режет новые) и шлёт `confirm`. Нет
+таких ответов за 50 с — приложение само вызывает `uci rollback` (пока роутер недоступен —
+до истечения таймера rpcd с запасом) и только потом перечитывает форму. Откат возвращает
+изменения в сессию как staged: формы читают конфиг через `loadConfig()`, который их
+сбрасывает (`revert`). Сохранения и `loadConfig()` одной сессии идут по одному
+(`exclusive`): пока идёт одно, кнопки других форм говорят «сохраняется другое изменение».
+Перед записью форма перечитывает конфиг: если изменённое поле тем временем поменяли в LuCI,
+форма не перезаписывает его, а показывает текущие значения. Флаги сравниваются так, как их
+читает роутер (`bool()`: 1/true/yes/on/enabled, пусто — умолчание): нетронутый флаг не
+переписывается. `apply`, пока роутер ждёт `confirm` от другой сессии (LuCI), получает
+статус 6 (`acl`) — форма просит повторить позже. Общий код: `src/core/apply.ts` (`save`,
+`applyStaged`, `loadConfig`, `exclusive`), `src/forms/form.ts` (`UciForm`, `saveBar`).
+Порты, метки и таблица маршрутизации в приложении не правятся — только в LuCI.
+
+Диагностика (вкладка «Журнал», `src/core/diagnostics.ts`): версии, `status`, `firewall`,
+подписки, раздельное туннелирование, точки доступа, конфиг `xvpn` и журнал одним текстовым
+файлом через диалог сохранения. Ссылки серверов становятся `scheme://***@host:port`, у URL
+остаются схема и хост (путь и query URL подписки — её токен), UUID заменяются; URL проверок
+`health.*` публичны и остаются. `system board` — только под root: остальным его не даёт ACL.
+
 ### Rust-модули
 
 Команды маршрутизируются по префиксу имени: `tray_*` → `tray::handler()`,
 `notify_*` → `notifications::handler()`, `updater_*` → `updater::handler()`, остальное — ядро (`commands.rs`). Новая команда
 трея или уведомлений добавляется в свой модуль (`tauri::generate_handler!` в его
 `handler()`), `lib.rs` не трогается. У каждого модуля есть `init(app)`, вызывается из
-`setup`.
+`setup`; плагины Tauri модуль регистрирует там же (`app.handle().plugin(...)`, как
+`screens.rs`), их права — в своём файле `capabilities/<модуль>.json`.
 
 ## Подключение
 
@@ -154,8 +188,10 @@ registerView({
   ожидающий confirm остаются). Мертва — один повторный вход и повтор вызова. Статус 6 от
   `uci` (нет прав на этот конфиг) — сразу `acl`. Сессия rpcd продлевается каждым
   вызовом, поллер держит её живой. Пользователю приложения на роутере нужен доступ к
-  `session access` (ACL-группа `unauthenticated`, у root есть); без него живую сессию не
-  отличить от мёртвой и отказ ACL будет стоить лишнего входа.
+  `session access` (у root есть, у rpcd-пользователя `luci-app-xvpn-remote` — с этой
+  версии пакета). Есть ли он, клиент проверяет сразу после входа; без него живую сессию не
+  отличить от мёртвой: отказ стоит повторного входа, а пока в сессии staged-изменения или
+  ожидающий confirm — сразу `acl`, без входа, чтобы их не потерять.
 - UCI: rpcd хранит staged-изменения и ожидающий `confirm` в сессии. Если повторный вход
   случился, пока они были, следующий вызов uci (кроме `get`) падает с `session_lost` —
   вместо `apply` пустоты или `confirm`, которого роутер уже не ждёт.

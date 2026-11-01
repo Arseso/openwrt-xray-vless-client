@@ -216,7 +216,7 @@ if [ "$MODE" = release ]; then
 	notes="Пакеты:
 - \`$ipk\` и \`luci-i18n-xvpn-*\` — роутер (OpenWrt 24.10)
 - \`xvpn_${ver}_x64-setup.exe\` — приложение для Windows (установщик NSIS)
-- \`xvpn_${ver}_amd64.AppImage\`, \`xvpn_${ver}_amd64.deb\` — приложение для Linux (обновляется само только AppImage)
+- \`xvpn_${ver}_amd64.AppImage\`, \`xvpn_${ver}_amd64.deb\` — приложение для Linux (оба обновляются из приложения)
 - \`*.sig\`, \`latest.json\` — подписи и манифест автообновления приложения"
 	# a draft first: gh creates the tag only when it is published, so a failed upload leaves
 	# no tag behind, and the next run uploads into the same draft

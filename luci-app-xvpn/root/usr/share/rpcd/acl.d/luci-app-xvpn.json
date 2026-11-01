@@ -19,7 +19,7 @@
 		"read": {
 			"ubus": {
 				"uci": [ "get", "changes" ],
-				"session": [ "destroy" ]
+				"session": [ "access", "destroy" ]
 			}
 		},
 		"write": {

@@ -26,7 +26,8 @@ struct Pending(Mutex<Option<Update>>);
 
 pub fn init(app: &mut App) -> tauri::Result<()> {
     app.handle().plugin(tauri_plugin_updater::Builder::new().build())?;
-    app.handle().plugin(tauri_plugin_dialog::init())?;
+    // the dialog plugin is registered by screens.rs (lib.rs calls it first); a plugin
+    // registered twice would fail the start
     app.manage(Pending::default());
     Ok(())
 }

@@ -40,10 +40,14 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T> + Send + 'sta
         .map_err(|e| TransportError::new("keyring", e.to_string()))?
 }
 
-/// one JSON-RPC request (call or list) to /ubus of the profile, the answer as is
+/// one JSON-RPC request (call or list) to /ubus of the profile, the answer as is;
+/// fresh: over a new connection instead of the kept-alive one
 #[tauri::command]
-pub async fn ubus_request(core: State<'_, Core>, profile_id: String, body: Value, timeout_ms: u64) -> Result<Value> {
+pub async fn ubus_request(core: State<'_, Core>, profile_id: String, body: Value, timeout_ms: u64, fresh: Option<bool>) -> Result<Value> {
     let p = core.profiles.get(&profile_id)?;
+    if fresh.unwrap_or(false) {
+        return core.http.post_fresh(&p.url, p.fingerprint.as_deref(), &body, timeout_ms).await;
+    }
     core.http.post(&p.id, &p.url, p.fingerprint.as_deref(), &body, timeout_ms).await
 }
 
