@@ -7,7 +7,7 @@ LUCI_DEPENDS:=+luci-base +xray-core +curl +kmod-nft-tproxy +kmod-nft-socket +kmo
 	+ucode +ucode-mod-fs +ucode-mod-uci +ucode-mod-ubus +ucode-mod-uloop +ucode-mod-socket
 LUCI_PKGARCH:=all
 
-PKG_VERSION:=0.4.0
+PKG_VERSION:=0.4.1
 PKG_RELEASE:=1
 PKG_LICENSE:=MIT
 PKG_MAINTAINER:=Artem Sokolov <arseso.main@gmail.com>

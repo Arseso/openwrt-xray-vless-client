@@ -154,6 +154,27 @@ function log(msg) {
 		flush_log();
 }
 
+// write_file() dies when a write fails: a full overlay would stop the daemon and procd
+// would restart it in a loop (#18). Here the daemon goes on without the file: logged once,
+// status shows error until a write to it goes through. fn: write_file or write_json.
+let write_errors = {};
+function put(fn, path, data) {
+	try {
+		fn(path, data);
+	}
+	catch (e) {
+		if (!write_errors[path])
+			log(`cannot write ${path} (no space left?), going on without it`);
+		write_errors[path] = true;
+		return false;
+	}
+	if (write_errors[path]) {
+		delete write_errors[path];
+		log(`${path} is written again`);
+	}
+	return true;
+}
+
 function server(id) {
 	return filter(index.servers, (e) => e.id == id)[0];
 }
@@ -206,7 +227,7 @@ function valid(gen) {
 
 function save() {
 	mkdir_p(RUN_DIR);
-	write_json(STATE_FILE, {
+	put(write_json, STATE_FILE, {
 		last_switch: st.last_switch, last_test: st.last_test,
 		latency: st.latency, quarantine: st.quarantine,
 		limited: st.limited, limited_url: URL2,
@@ -1017,10 +1038,12 @@ function save_active(e) {
 	if (!conf)
 		return;
 	set_active(conf, e.tag);
-	write_json(CONFIG_FILE, conf);
+	// the index must not point at another server than the config
+	if (!put(write_json, CONFIG_FILE, conf))
+		return;
 	index.active = e.id;
 	index.moved_from = null;
-	write_json(INDEX_FILE, index);
+	put(write_json, INDEX_FILE, index);
 	index_raw = readfile(INDEX_FILE);
 }
 
@@ -1078,9 +1101,9 @@ function switch_to(id, reason, manual) {
 	st.xray_choose = st.choose_pending = null;
 	delete st.quarantine[id];
 	mkdir_p(ETC_DIR);
-	write_file(ACTIVE_FILE, id);
+	put(write_file, ACTIVE_FILE, id);
 	if (manual)
-		write_file(MANUAL_FILE, id);
+		put(write_file, MANUAL_FILE, id);
 	// the choice by hand gives way to the daemon's, unless it is gone from the list for now:
 	// once it is back, check() returns to it
 	else if (server(manual_id()))
@@ -1609,7 +1632,8 @@ function status() {
 	// generate failed past the daemon (start, rpcd: a port taken) and a config error in
 	// the index (ipv6 = tunnel without IPv6 on the router)
 	let fw_error = readfile(FW_ERROR_FILE), gen_error = readfile(GENERATE_ERROR_FILE);
-	let error = fw_error ?? st.reload_error ?? (gen_error ? trim(gen_error) : null) ?? index.config_error;
+	let write_error = length(write_errors) ? `cannot write ${join(', ', keys(write_errors))}: no space left on the router?` : null;
+	let error = fw_error ?? st.reload_error ?? (gen_error ? trim(gen_error) : null) ?? index.config_error ?? write_error;
 	// the active server is limited and there is nothing better: not kept in last_error, a check would clear it
 	let limited_error = (st.state == 'connected' && st.limited[st.active] && !best()) ? only_limited() : null;
 	return {
@@ -1833,7 +1857,7 @@ if (H.time_wait > 0 && !access(TIME_FLAG) && ntp_on()) {
 	let until = int(readfile(TIME_UNTIL) ?? 0);
 	if (!until) {
 		until = now() + H.time_wait;
-		write_file(TIME_UNTIL, `${until}`);
+		put(write_file, TIME_UNTIL, `${until}`);
 	}
 	if (now() < until) {
 		st.time_wait = until;
