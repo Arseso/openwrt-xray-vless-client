@@ -808,6 +808,10 @@ printf '#!/bin/sh\nprintf "Content-Type: application/octet-stream\\r\\n\\r\\n"\n
 chmod +x /tmp/www/cgi-bin/dl /tmp/freeze/cgi-bin/dl
 ip netns exec wan uhttpd -f -p 45.0.0.2:8098 -h /tmp/www -x /cgi-bin >/dev/null 2>&1 &
 ip netns exec wan uhttpd -f -p 45.0.0.2:8099 -h /tmp/freeze -x /cgi-bin >/dev/null 2>&1 &
+# the step needs "second" active: auto picks by ping, and both are on 127.0.0.1 (0 or 1 ms
+# each, either may win); a choice by hand still fails over
+wait_cmd 15 select_ok "$id2"
+wait_cmd 10 active_is second
 dp=$(xvpnd_pid)
 uci batch <<UCI
 set xvpn.access.dns_server=45.0.0.2
