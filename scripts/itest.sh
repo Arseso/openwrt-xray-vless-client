@@ -760,8 +760,15 @@ wait_for @.state connected 30
 wait_cmd 15 select_ok "$id2"
 wait_cmd 10 active_is second
 [ "$(xray_pid)" = "$xp" ] || { echo "FAIL: select back restarted xray"; exit 1; }
-rm -f /etc/xvpn/active_manual	# the daemon's choice, as before
 echo "OK: a reload keeps xray and the choice, back to second without a restart"
+# status says the choice is by hand; auto (also through luci.xvpn, the desktop app) drops it
+[ "$(status @.manual)" = true ] || { echo "FAIL: status.manual after select: $(ubus call xvpn status)"; exit 1; }
+[ "$(ubus call luci.xvpn auto | jsonfilter -e @.ok)" = true ] || { echo "FAIL: luci.xvpn auto"; exit 1; }
+[ ! -e /etc/xvpn/active_manual ] && [ "$(status @.manual)" = false ] \
+	|| { echo "FAIL: auto kept the choice by hand: $(ubus call xvpn status)"; exit 1; }
+logread | grep -q 'back to auto selection' || { echo "FAIL: auto did not choose again"; exit 1; }
+wait_for @.state connected 60
+echo "OK: status.manual, auto drops the choice by hand"
 
 # #10: the DNS server of the clients as an IP (dnsmasq in wan): their queries go over UDP
 # through the server, so does the check. "second" drops UDP: names do not resolve through it,

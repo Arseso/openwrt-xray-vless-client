@@ -1488,6 +1488,9 @@ function status() {
 		testing: st.testing, tests: st.tests, updating: st.updating || !!update_running(), passthrough: st.passthrough,
 		lists_updating: st.lists_updating,
 		last_error: error ?? st.last_error ?? limited_error, last_switch: st.last_switch, last_test: st.last_test,
+		// the active server was chosen by hand (select): failover does not leave it while it
+		// answers, until the method auto
+		manual: by_hand(st.active),
 		xray_restarts: st.xray.restarts ?? 0, url2: URL2, servers,
 		// UDP through the active server (#10); null: not checked
 		udp: (st.state == 'connected' || st.state == 'degraded') ? st.udp : null,
@@ -1585,6 +1588,20 @@ conn.publish('xvpn', {
 			if (st.reloading)
 				return { ok: false, error: 'busy' };
 			return { ok: switch_to(req.args.id, 'manual selection', true) };
+		},
+	},
+	// back to auto selection after select: the choice by hand is dropped and the daemon
+	// chooses again (a test of all, as at start)
+	auto: {
+		call: () => {
+			if (st.reloading)
+				return { ok: false, error: 'busy' };
+			if (!manual_id())
+				return { ok: true };
+			unlink(MANUAL_FILE);
+			log('back to auto selection');
+			choose_best('back to auto selection');
+			return { ok: true };
 		},
 	},
 	// the server takes part in auto selection or not (health.no_auto): UCI only, xray and

@@ -8,6 +8,7 @@ import { LANGS, lang, onLangChange, setLang } from './core/i18n';
 import { t } from './i18n/common';
 import { clear, h } from './ui/dom';
 import { errorText } from './ui/errors';
+import { currentNotices, dismiss, onNotices } from './ui/notice';
 import { mountConnect } from './views/connect';
 import { allViews, findView } from './views/registry';
 import './views';
@@ -59,6 +60,10 @@ export function startApp(root: HTMLElement, conn: Connection): void {
     clear(banner);
     if (ctx && st.phase === 'offline')
       banner.append(h('p', { class: 'warn' }, `${t('phase.offline')} ${errorText(st.error)}`));
+    // messages of the tray and others without a view (src/ui/notice.ts)
+    for (const n of currentNotices())
+      banner.append(h('p', { class: n.kind === 'error' ? 'error notice' : 'notice' }, n.text, ' ',
+        h('button', { class: 'link', onclick: () => dismiss(n.id) }, '×')));
 
     if (!ctx || showProfiles) {
       clear(nav);
@@ -85,6 +90,7 @@ export function startApp(root: HTMLElement, conn: Connection): void {
     render();
   });
   addEventListener('hashchange', () => render());
+  onNotices(() => render());
   onLangChange(() => render(true));
   render();
 

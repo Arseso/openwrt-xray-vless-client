@@ -87,6 +87,14 @@ export interface StatusUp extends StatusBase {
   udp?: boolean | null;
   /** no live servers: the next test of all and the pause before it */
   retry?: { at: number; delay: number } | null;
+  /** through the tunnel, B/s over the last main.speed_interval (#83); null until the
+   * second reading or while the counters fail; absent in packages before #83 */
+  speed?: { up: number; down: number } | null;
+  /** bytes through the tunnel since xvpnd started; null with speed_interval 0 */
+  traffic?: { up: number; down: number } | null;
+  /** the active server was chosen by hand (select) and stays until auto(); absent in
+   * packages before #78 */
+  manual?: boolean;
 }
 
 export type Status = StatusUp | StatusDown;
@@ -273,6 +281,11 @@ export class XvpnApi {
 
   select(id: string): Promise<OkReply> {
     return this.call('select', { id });
+  }
+
+  /** back to auto selection after select: the daemon chooses again */
+  auto(): Promise<OkReply> {
+    return this.call('auto');
   }
 
   setAuto(id: string, auto: boolean): Promise<OkReply> {

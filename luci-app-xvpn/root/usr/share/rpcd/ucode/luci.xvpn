@@ -96,6 +96,13 @@ const methods = {
 		}
 	},
 
+	// back to auto selection after select
+	auto: {
+		call: function() {
+			return daemon('auto') ?? { ok: false, error: daemon_error };
+		}
+	},
+
 	// takes part in auto selection or not (health.no_auto): the daemon writes UCI and
 	// restarts nothing
 	set_auto: {

@@ -73,6 +73,25 @@ dl.props dd { margin: 0; }
 [data-state=connected] { color: var(--ok); }
 [data-state=degraded], [data-state=failover], [data-state=starting], [data-state=waiting_time] { color: var(--warn); }
 [data-state=no_servers], [data-state=wan_down], [data-state=xray_down], [data-state=error] { color: var(--error); }
+.ok { color: var(--ok); }
+.error-text { color: var(--error); }
+.state-line { display: flex; align-items: center; gap: 8px; font-size: 16px; margin-bottom: 8px; }
+.state-dot { font-size: 20px; }
+.card h3 { margin: 0 0 8px; font-size: 14px; }
+.toolbar { display: flex; align-items: center; gap: 12px; }
+.toolbar h2 { margin: 0; }
+input[type=search] { margin: 12px 0; }
+.servers table { width: 100%; border-collapse: collapse; }
+.servers th, .servers td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+.servers th { color: var(--muted); font-weight: normal; }
+.servers tr.active td { background: color-mix(in srgb, var(--ok) 10%, transparent); }
+.servers small { display: block; }
+.num { text-align: right; white-space: nowrap; }
+.mono { font-family: ui-monospace, monospace; font-size: 12px; }
+.badge { display: inline-block; padding: 0 6px; margin-right: 4px; border-radius: 8px; border: 1px solid var(--border); font-size: 12px; color: var(--muted); }
+.badge.ok { color: var(--ok); border-color: var(--ok); }
+.badge.warn { color: var(--warn); border-color: var(--warn); }
+label.check { display: flex; gap: 6px; align-items: center; margin-bottom: 8px; }
 input.short { width: 7em; }
 .notify-settings label { display: block; margin: 8px 0; }
 .notify-settings label.check { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
@@ -111,4 +130,7 @@ progress { width: 140px; vertical-align: middle; }
 .log-tools { flex-wrap: wrap; align-items: center; }
 .log-tools .log-query { width: 18em; }
 pre.log { height: 60vh; overflow: auto; white-space: pre-wrap; word-break: break-all; margin: 8px 0 0; padding: 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--card); }
+button.link { border: none; background: none; color: var(--accent); padding: 0 4px; }
+ul.plain { list-style: none; padding: 0; margin: 4px 0; }
+.banner .notice { display: flex; justify-content: space-between; align-items: center; margin: 0; }
 pre.notes { white-space: pre-wrap; font: inherit; }
