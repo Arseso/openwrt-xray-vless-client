@@ -45,6 +45,8 @@ export interface LastSwitch {
   to: string;
   reason: string;
   at: number;
+  /** away from a server that failed (absent: a daemon before #80) */
+  failover?: boolean;
 }
 
 interface StatusBase {

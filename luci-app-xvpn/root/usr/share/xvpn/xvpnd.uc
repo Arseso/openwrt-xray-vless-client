@@ -64,6 +64,7 @@ let st = {
 	reload_error: null,	// the last reload hung or failed: status shows error until one goes through
 	choose_pending: null,	// choose_best() decision put off until the reload settles
 	switches: 0,		// switch_to() calls: a choose_best() older than the last switch is dropped
+	failing_over: false,	// failover() began: its switch_to() marks last_switch.failover (desktop notifications)
 	passthrough: false,
 	last_error: null,
 	last_switch: prev.last_switch,
@@ -211,6 +212,9 @@ function set_state(s, err) {
 		log(`state: ${st.state} -> ${s}${err ? ` (${err})` : ''}`);
 	st.state = s;
 	st.last_error = err;
+	// the failed server works again: the failover is over without a switch
+	if (s == 'connected')
+		st.failing_over = false;
 	// a live server or WAN back: no pause before the next test of all (see check())
 	if (s == 'connected' || s == 'wan_down')
 		st.dead = null;
@@ -1052,7 +1056,9 @@ function switch_to(id, reason, manual) {
 	if (!e)
 		return false;
 	log(`switching to "${e.name}" (${reason})`);
-	st.last_switch = { from: st.active, to: id, reason, at: time() };
+	// failover: away from a server that failed, not by hand, a faster one, the list or the start
+	st.last_switch = { from: st.active, to: id, reason, at: time(), failover: !manual && st.failing_over };
+	st.failing_over = false;
 	st.active = id;
 	st.since = time();
 	st.fails = 0;
@@ -1182,6 +1188,7 @@ function leave_limited() {
 function failover(reason) {
 	if (st.active)
 		st.quarantine[st.active] = time() + H.quarantine;
+	st.failing_over = true;
 	set_state('failover', reason);
 	choose_best(reason);
 }

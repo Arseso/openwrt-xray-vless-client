@@ -35,18 +35,25 @@ export const tauriTray: TrayBackend = {
   },
 };
 
+/** the error of an action the user just clicked: a system notification (notify_show of
+ * #80, not filtered by quiet hours: the user is right there) and a line in the window */
+export function notifyError(text: string): void {
+  notice('error', text);
+  invoke('notify_show', { title: 'xvpn', body: text }).catch((e) => console.error('notify_show', e));
+}
+
 /** polls failing this many intervals in a row: the last status is not shown as current */
 export const STALE_INTERVALS = 3;
 
 export interface TrayOptions {
   now?: () => number;
-  /** where the error of a menu action goes besides the menu (the window shows it) */
+  /** where the error of a menu action goes besides the menu (notifyError by default) */
   onError?: (text: string) => void;
 }
 
 export function startTray(conn: Connection, backend: TrayBackend = tauriTray, opts: TrayOptions = {}): () => void {
   const now = opts.now ?? Date.now;
-  const onError = opts.onError ?? ((text: string) => notice('error', text));
+  const onError = opts.onError ?? notifyError;
   let last = '';
   let error: string | null = null;
   let busy = false;
