@@ -704,6 +704,18 @@ sh scripts/i18n.sh
 вливает его в `po/*/xvpn.po`; новые строки там появляются непереведёнными — их нужно перевести
 в `po/ru/xvpn.po`. Пакеты `luci-i18n-xvpn-<язык>` собирает `luci.mk` из `po/` сам.
 
+```bash
+systemd-inhibit --what=sleep:idle python3 scripts/stress.py run --duration 24h
+```
+
+Долгий стресс-тест туннеля на живом роутере с клиента в туннелируемой сети (ПК на VPN-SSID или
+порту): HTTPS через туннель и мимо него, ping до роутера и прямого хоста, DNS, сырой UDP, выходной
+IP, пачки параллельных запросов, замеры скорости раз в 30 мин, одно долгое соединение, Wi-Fi
+клиента, а по ssh — CPU, память и RSS xray, conntrack и статус xvpn. Всё пишется в
+`stress/<дата>/metrics.jsonl` (журнал роутера — `router.log`), по завершении (Ctrl+C или
+`--duration`) — сводка `report.md`; `python3 scripts/stress.py report stress/<дата>` строит её
+в любой момент. Опции — `python3 scripts/stress.py run -h`.
+
 `DOCKER_CONTEXT=default` нужен, если docker по умолчанию смотрит в другой контекст (например,
 незапущенный Docker Desktop). `scripts/build.sh` и `scripts/luci.sh` сами вызывают
 `docker --context default`; все скрипты принимают переменную `DOCKER`.
