@@ -415,7 +415,7 @@ npm ci
 npx tauri build --bundles msi,nsis          # src-tauri\target\release\bundle\{msi,nsis}
 ```
 
-Версию из `PKG_VERSION` на Windows подставьте сами: `npx tauri build --config '{"version":"0.3.0"}'`.
+Версию из `PKG_VERSION` на Windows подставьте сами: `npx tauri build --config '{"version":"0.4.0"}'`.
 
 ### Обновления
 

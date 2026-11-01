@@ -6,7 +6,7 @@
 import { readfile, writefile, mkdir, stat } from 'fs';
 import { parse_link, parse_subscription, transport } from 'xvpn.links';
 import { parse_userinfo, assign_ids, list_change, known_ids, prune_no_auto, NO_AUTO_GRACE } from 'xvpn.subscription';
-import { load_config, valid_bin, valid_url, fastest, auto_pick, retry_delay, no_auto_ids, set_no_auto, mkdir_p, read_json, SUBS_DIR } from 'xvpn.util';
+import { load_config, valid_bin, valid_url, fastest, auto_pick, best_of, balanced_scores, better, mbps, retry_delay, no_auto_ids, set_no_auto, mkdir_p, read_json, SUBS_DIR } from 'xvpn.util';
 import { build_index, generate, ports_error, config_key, set_active } from 'xvpn.xrayconf';
 import { render, resolve, fix_ifnames, ifnames_applied, table_names, rule_prefs, stale_routes, counters, counter_step } from 'xvpn.firewall';
 import { ipv6_up, busy_ports } from 'xvpn.host';
@@ -540,11 +540,58 @@ eq('auto_pick: only limited ones answer: the fastest of them', pk({}, {}, { a: 1
 eq('auto_pick: limited out of quarantine first', pk({}, { b: true }, { a: 1, b: 1, c: 1 }), [ 'c', true ]);
 eq('auto_pick: no_auto stays out', pk({ b: true, c: true }, {}, { a: 1 }), [ 'a', true ]);
 eq('auto_pick: none', pk({ a: true, b: true, c: true }, {}, {}), null);
+
+// auto_mode (#95): AX3000T, 2026-11-01: the best ping was the slowest download
+let lat2 = { ee: { ms: 165 }, ee2: { ms: 450 }, nl: { ms: 500 }, de: { ms: 300 }, x: { ms: -1 } };
+let sp2 = { ee: { mbps: 18 }, ee2: { mbps: 75 }, nl: { mbps: 92 }, x: { mbps: 99 } };
+let srv2 = map([ 'ee', 'ee2', 'nl', 'de', 'x' ], (id) => ({ id }));
+let bo = (mode, sp, skip) => best_of(srv2, lat2, sp, mode, skip)?.id;
+eq('best_of ping', bo('ping', sp2), 'ee');
+eq('best_of speed: the fastest download of the live ones', bo('speed', sp2), 'nl');
+eq('best_of balanced: the speed outweighs three times the ping', bo('balanced', sp2), 'nl');
+eq('best_of balanced: equal speeds, the ping decides', bo('balanced', { ee: { mbps: 90 }, nl: { mbps: 90 } }), 'ee');
+eq('best_of speed: unmeasured ones only after the measured', bo('speed', { de: { mbps: 1 } }), 'de');
+eq('best_of speed: a failed download is no speed', bo('speed', { ee: { mbps: -1 }, de: { mbps: 5 } }), 'de');
+eq('best_of speed/balanced: no speeds, by ping', [ bo('speed', {}), bo('balanced', {}), bo('speed', null) ], [ 'ee', 'ee', 'ee' ]);
+eq('best_of speed skips', bo('speed', sp2, (e) => e.id == 'nl'), 'ee2');
+eq('best_of balanced skips', bo('balanced', sp2, (e) => e.id == 'nl'), 'ee2');
+eq('mbps', [ mbps(sp2, 'nl'), mbps({ a: { mbps: -1 } }, 'a'), mbps(sp2, 'de'), mbps(null, 'a') ], [ 92, null, null, null ]);
+let sc2 = balanced_scores(srv2, lat2, sp2);
+eq('balanced_scores: the dead are left out, the best ping with the best speed is 1', [ sc2.x, int(sc2.nl * 1000 + 0.5), int(sc2.ee * 1000 + 0.5) ], [ null, 799, 437 ]);
+eq('balanced_scores: no speeds, the ping weight alone', balanced_scores(srv2, lat2, {}).ee, 0.3);
+let pk2 = (mode, q, lim) => auto_pick(srv2, lat2, { de: true }, q, lim, sp2, mode)?.server.id;
+eq('auto_pick by mode', [ pk2('ping', {}, {}), pk2('speed', {}, {}), pk2('balanced', {}, {}) ], [ 'ee', 'nl', 'nl' ]);
+eq('auto_pick speed: quarantine and limited as with ping', [ pk2('speed', { nl: true }, {}), pk2('speed', {}, { nl: 1, ee2: 1 }) ], [ 'ee2', 'ee' ]);
+eq('auto_pick without a mode: ping', auto_pick(srv2, lat2, {}, {}, {}, sp2)?.server.id, 'ee');
+let hy = { hysteresis: 150, speed_hysteresis: 20 };
+let btr = (mode, cur, b, sp) => better(mode, srv2, { id: cur }, { id: b }, lat2, sp ?? sp2, hy);
+eq('better ping: by the hysteresis in ms', [ btr('ping', 'ee2', 'ee'), btr('ping', 'nl', 'de') ], [ 'faster server: 165 ms vs 450 ms', 'faster server: 300 ms vs 500 ms' ]);
+eq('better ping: within the hysteresis', btr('ping', 'nl', 'ee2'), null);
+eq('better speed', btr('speed', 'ee', 'nl'), 'faster download: 92 vs 18 Mbit/s');
+eq('better speed: within the hysteresis', btr('speed', 'ee2', 'nl', { ...sp2, nl: { mbps: 85 } }), null);
+eq('better speed: past the hysteresis', btr('speed', 'ee2', 'nl'), 'faster download: 92 vs 75 Mbit/s');
+eq('better speed: the active one failed its download', btr('speed', 'de', 'nl', { ...sp2, de: { mbps: -1 } }), 'faster download: 92 Mbit/s, the speed test fails through the active server');
+eq('better speed: the active one is not measured yet', btr('speed', 'de', 'nl'), null);
+eq('better speed: b not measured, by ping', btr('speed', 'nl', 'de', {}), 'faster server: 300 ms vs 500 ms');
+eq('better balanced', btr('balanced', 'ee', 'nl'), 'better ping and speed: 500 ms, 92 Mbit/s vs 165 ms, 18 Mbit/s');
+eq('better balanced: within the hysteresis', btr('balanced', 'ee2', 'nl'), null);
+eq('better: the same, a dead one', [ btr('speed', 'nl', 'nl'), btr('speed', 'ee', 'x'), btr('ping', 'x', 'ee') ], [ null, null, null ]);
 for (let v in [ [ null, 'https://cp.cloudflare.com/generate_204' ], [ 'off', null ], [ 'http://check2.test/', 'http://check2.test/' ] ]) {
 	writefile(`${OUT}/dnscfg/xvpn`, "config health 'health'\n" + (v[0] ? `\toption url2 '${v[0]}'\n` : ''));
 	eq(`url2 ${v[0]}`, load_config(`${OUT}/dnscfg`).health.url2, v[1]);
 }
 eq('url2_cdn by default', load_config(`${OUT}/dnscfg`).health.url2_cdn, 3);
+// #95: auto_mode and the speed test
+let hs = load_config(`${OUT}/dnscfg`).health;
+eq('auto_mode and the speed test by default', [ hs.auto_mode, hs.speedtest_url, hs.speedtest_interval, hs.speedtest_time, hs.speedtest_busy, hs.speed_hysteresis ],
+	[ 'ping', 'https://proof.ovh.net/files/10Mb.dat', 21600, 10, 2, 20 ]);
+writefile(`${OUT}/dnscfg/xvpn`, "config health 'health'\n\toption auto_mode 'balanced'\n\toption speedtest_url 'off'\n\toption speedtest_interval '5'\n\toption speedtest_time '600'\n");
+hs = load_config(`${OUT}/dnscfg`).health;
+eq('auto_mode, speedtest off, limits', [ hs.auto_mode, hs.speedtest_url, hs.speedtest_interval, hs.speedtest_time ], [ 'balanced', null, 60, 60 ]);
+writefile(`${OUT}/dnscfg/xvpn`, "config health 'health'\n\toption auto_mode 'fastest'\n\toption speedtest_url '-o /etc/passwd'\n");
+hs = load_config(`${OUT}/dnscfg`).health;
+eq('an unknown auto_mode is ping, a bad URL the default', [ hs.auto_mode, hs.speedtest_url ], [ 'ping', 'https://proof.ovh.net/files/10Mb.dat' ]);
+writefile(`${OUT}/dnscfg/xvpn`, "config health 'health'\n");
 // #11: the download check and the direct internet by several URLs
 let hd = load_config(`${OUT}/dnscfg`).health;
 eq('dl_url by default', [ hd.dl_url, hd.dl_interval, hd.dl_timeout ], [ 'https://speed.cloudflare.com/__down?bytes=65536', 300, 15 ]);

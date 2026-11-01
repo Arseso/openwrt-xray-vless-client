@@ -67,10 +67,27 @@ registerView({
         f.text('health', 'concurrency', {
           label: t('concurrency'), help: t('concurrency_help'), placeholder: DEFAULTS.concurrency, check: int(1, 8),
         }),
+        // #95: the server with the best ping may be the slowest one for video and downloads
+        f.select('health', 'auto_mode', {
+          label: t('auto_mode'), help: t('auto_mode_help'), def: DEFAULTS.auto_mode,
+          choices: [['ping', t('mode_ping')], ['speed', t('mode_speed')], ['balanced', t('mode_balanced')]],
+        }),
+        f.text('health', 'speedtest_url', {
+          label: t('speedtest_url'), help: t('speedtest_url_help'), placeholder: DEFAULTS.speedtest_url, suggest: [DEFAULTS.speedtest_url, 'off'],
+          check: (x) => httpUrl(x, true),
+        }),
+        f.text('health', 'speedtest_interval', {
+          label: t('speedtest_interval'), help: t('speedtest_interval_help'), placeholder: DEFAULTS.speedtest_interval, check: int(1800, 604800),
+          visible: () => v('health', 'auto_mode') !== 'ping',
+        }),
         f.flag('health', 'auto_best', { label: t('auto_best'), help: t('auto_best_help'), def: '0' }),
         f.text('health', 'hysteresis', {
           label: t('hysteresis'), help: t('hysteresis_help'), placeholder: DEFAULTS.hysteresis, check: int(0, 10000),
           visible: () => v('health', 'auto_best') === '1',
+        }),
+        f.text('health', 'speed_hysteresis', {
+          label: t('speed_hysteresis'), help: t('speed_hysteresis_help'), placeholder: DEFAULTS.speed_hysteresis, check: int(0, 1000),
+          visible: () => v('health', 'auto_best') === '1' && v('health', 'auto_mode') !== 'ping',
         }));
 
       const protection = h('div', { class: 'card' },

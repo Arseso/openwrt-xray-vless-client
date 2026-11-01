@@ -184,6 +184,7 @@ function dns_server(v) {
 // (the rpcd user of the desktop app, #81) must not get more than the VPN with them. A bad
 // value is replaced by the default and logged; LuCI checks the same before it saves.
 const XRAY_BIN = '/usr/bin/xray';
+export const AUTO_MODES = [ 'ping', 'speed', 'balanced' ];
 const DEFAULT_URL = 'https://www.gstatic.com/generate_204';
 
 // an absolute path to a binary named xray*: not /sbin/reboot, not a shell with arguments
@@ -317,6 +318,20 @@ export function load_config(confdir) {
 			// DNS of the clients through the active server (#10): DoH through its test port,
 			// a DNS server given as an IP over UDP; the UDP check runs with the DNS one
 			dns_check: bool(h.dns_check, true),
+			// what the daemon chooses by (#95): ping, speed (the download of speedtest_url) or both
+			auto_mode: (h.auto_mode in AUTO_MODES) ? h.auto_mode : 'ping',
+			// downloaded through every live server in auto selection one at a time, at most
+			// speedtest_time s each (about 10 MB a server); 'off' turns it off (speed and balanced
+			// then go by ping)
+			speedtest_url: url('speedtest_url', h.speedtest_url, 'https://proof.ovh.net/files/10Mb.dat', true),
+			// s between runs (in the modes speed and balanced only; in ping a run by hand)
+			speedtest_interval: max(60, num(h.speedtest_interval, 21600)),
+			// not in the default config: s per server, Mbit/s of the clients that put a run
+			// off (at most one more speedtest_interval)
+			speedtest_time: min(max(num(h.speedtest_time, 10), 2), 60),
+			speedtest_busy: max(0, num(h.speedtest_busy, 2)),
+			// % a server must beat the active one by to switch to it (speed, balanced)
+			speed_hysteresis: max(0, num(h.speed_hysteresis, 20)),
 		},
 		// split tunneling (#67): checked and normalized by split.uc
 		split: {
@@ -387,17 +402,97 @@ export function fastest(servers, latency, skip) {
 	return b;
 };
 
-// The server the daemon chooses by itself: the fastest in auto selection (off: { id: true },
-// no_auto) out of quarantine (q) and not limited (#61: url2 fails through it). Else one
-// in quarantine that answered since, else a limited one: url2 failing everywhere is
-// likely its CDN, and a server with some sites beats none. { server, limited } or null.
-export function auto_pick(servers, latency, off, q, limited) {
+// Download speed of a server in Mbit/s (#95), null when it was not measured or the last
+// measurement failed (speed[id].mbps < 0).
+export function mbps(speed, id) {
+	let s = speed?.[id];
+	return (s && s.mbps >= 0) ? s.mbps : null;
+};
+
+function live_ms(latency, id) {
+	let l = latency[id];
+	return (l && l.ms >= 0) ? l.ms : null;
+}
+
+// The weight of the ping in balanced: video and downloads need the speed more, a server
+// three times further away still wins with twice the speed (DESIGN.md 6.13).
+export const PING_WEIGHT = 0.3;
+
+// balanced (#95): PING_WEIGHT * ping_min / ping + (1 - PING_WEIGHT) * speed / speed_max over
+// all live servers, { id: score } in 0..1. No speed (not measured, failed) adds 0; no server
+// with a speed: by the ping alone.
+export function balanced_scores(servers, latency, speed) {
+	let pmin = null, smax = 0, r = {};
+	for (let e in servers) {
+		let p = live_ms(latency, e.id);
+		if (p == null)
+			continue;
+		pmin = (pmin == null) ? max(1, p) : min(pmin, max(1, p));
+		smax = max(smax, mbps(speed, e.id) ?? 0);
+	}
+	for (let e in servers) {
+		let p = live_ms(latency, e.id);
+		if (p != null)
+			r[e.id] = PING_WEIGHT * pmin / max(1, p) + (smax > 0 ? (1 - PING_WEIGHT) * (mbps(speed, e.id) ?? 0) / smax : 0);
+	}
+	return r;
+};
+
+// The best live server by mode (AUTO_MODES), null when none. skip(e): left out.
+// speed: the fastest download; one without a speed only when none of the others has one,
+// then by ping. balanced: the highest balanced_scores().
+export function best_of(servers, latency, speed, mode, skip) {
+	let b = null;
+	if (mode == 'balanced') {
+		let sc = balanced_scores(servers, latency, speed);
+		for (let e in servers)
+			if (sc[e.id] != null && !skip?.(e) && (!b || sc[e.id] > sc[b.id]))
+				b = e;
+		return b;
+	}
+	if (mode == 'speed')
+		for (let e in servers) {
+			let s = mbps(speed, e.id);
+			if (s != null && live_ms(latency, e.id) != null && !skip?.(e) && (!b || s > mbps(speed, b.id)))
+				b = e;
+		}
+	return b ?? fastest(servers, latency, skip);
+};
+
+// The server the daemon chooses by itself: the best by mode (best_of(), ping by default) in
+// auto selection (off: { id: true }, no_auto) out of quarantine (q) and not limited (#61:
+// url2 fails through it). Else one in quarantine that answered since, else a limited one:
+// url2 failing everywhere is likely its CDN, and a server with some sites beats none.
+// { server, limited } or null.
+export function auto_pick(servers, latency, off, q, limited, speed, mode) {
 	for (let skip in [ [ q, limited ], [ limited ], [ q ], [] ]) {
-		let b = fastest(servers, latency, (e) => off[e.id] || length(filter(skip, (s) => s[e.id])) > 0);
+		let b = best_of(servers, latency, speed, mode ?? 'ping', (e) => off[e.id] || length(filter(skip, (s) => s[e.id])) > 0);
 		if (b)
 			return { server: b, limited: !!limited[b.id] };
 	}
 	return null;
+};
+
+// Why b is worth leaving the active server cur for in mode, null when it is not: a ping
+// shorter by h.hysteresis ms (ping); a download faster by h.speed_hysteresis % (speed);
+// a balanced score higher by it (balanced). Without a speed of b both go by the ping as in
+// best_of(). In speed an active server not measured yet stays until it is; one that failed
+// its measurement is left for any measured one.
+export function better(mode, servers, cur, b, latency, speed, h) {
+	let lc = live_ms(latency, cur.id), lb = live_ms(latency, b.id);
+	if (b.id == cur.id || lc == null || lb == null)
+		return null;
+	let k = 1 + h.speed_hysteresis / 100.0, sc = mbps(speed, cur.id), sb = mbps(speed, b.id);
+	if (mode == 'speed' && sb != null) {
+		if (sc == null)
+			return speed?.[cur.id] ? `faster download: ${sb} Mbit/s, the speed test fails through the active server` : null;
+		return (sb > sc * k) ? `faster download: ${sb} vs ${sc} Mbit/s` : null;
+	}
+	if (mode == 'balanced' && sb != null) {
+		let s = balanced_scores(servers, latency, speed);
+		return (s[b.id] > s[cur.id] * k) ? `better ping and speed: ${lb} ms, ${sb} Mbit/s vs ${lc} ms, ${sc ?? '?'} Mbit/s` : null;
+	}
+	return (lb + h.hysteresis < lc) ? `faster server: ${lb} ms vs ${lc} ms` : null;
 };
 
 // The pause before the next test of all servers while none is alive (#12): interval at

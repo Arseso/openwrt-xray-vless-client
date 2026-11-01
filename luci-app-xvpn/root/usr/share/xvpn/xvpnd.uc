@@ -1,6 +1,6 @@
 #!/usr/bin/ucode
 // SPDX-License-Identifier: MIT
-// xvpnd: health checks, failover to the fastest server by HTTP ping,
+// xvpnd: health checks, failover to the best server by HTTP ping and download speed,
 // subscription auto-update. Publishes the ubus object "xvpn".
 
 'use strict';
@@ -11,7 +11,7 @@ import { cursor } from 'uci';
 import { readfile, unlink, access, stat } from 'fs';
 import {
 	load_config, read_json, write_json, write_file, mkdir_p, shq, update_running, procs, tree, kill_tree,
-	no_auto_ids, set_no_auto, retry_delay, auto_pick, MANUAL_FILE, ETC_DIR, RUN_DIR, CONFIG_FILE, INDEX_FILE, ACTIVE_FILE, STATE_FILE, FW_ERROR_FILE, GENERATE_ERROR_FILE, STALE_FILE
+	no_auto_ids, set_no_auto, retry_delay, auto_pick, better, MANUAL_FILE, ETC_DIR, RUN_DIR, CONFIG_FILE, INDEX_FILE, ACTIVE_FILE, STATE_FILE, FW_ERROR_FILE, GENERATE_ERROR_FILE, STALE_FILE
 } from 'xvpn.util';
 import { due_in } from 'xvpn.subscription';
 import { dns_via_module, set_active } from 'xvpn.xrayconf';
@@ -70,6 +70,9 @@ let st = {
 	last_switch: prev.last_switch,
 	last_test: prev.last_test,
 	latency: prev.latency ?? {},
+	speeds: prev.speeds ?? {},	// { id: { mbps, at } } (#95), mbps -1: the download failed, see speed_run()
+	speed_last: prev.speed_last,	// the last run of the speed test ended (router clock)
+	speed_runs: 0,	// runs finished, see the ubus method speedtest
 	quarantine: prev.quarantine ?? {},
 	limited: (URL2 && prev.limited_url == URL2) ? (prev.limited ?? {}) : {},	// { id: since }, see limited_check()
 	url2_down: false,	// the last test found the CDN of url2 down, see limited_check()
@@ -177,6 +180,9 @@ function load_index() {
 	for (let id in keys(st.latency))
 		if (!ids[id])
 			delete st.latency[id];
+	for (let id in keys(st.speeds))
+		if (!ids[id])
+			delete st.speeds[id];
 	for (let id in keys(st.quarantine))
 		if (!ids[id])
 			delete st.quarantine[id];
@@ -204,6 +210,7 @@ function save() {
 		last_switch: st.last_switch, last_test: st.last_test,
 		latency: st.latency, quarantine: st.quarantine,
 		limited: st.limited, limited_url: URL2,
+		speeds: st.speeds, speed_last: st.speed_last,
 	});
 }
 
@@ -602,7 +609,7 @@ function pick() {
 	for (let e in index.servers)
 		if (quarantined(e.id))
 			q[e.id] = true;
-	return auto_pick(index.servers, st.latency, no_auto(), q, st.limited);
+	return auto_pick(index.servers, st.latency, no_auto(), q, st.limited, st.speeds, H.auto_mode);
 }
 
 // The best server with nothing against it, for a switch to a faster one; null when none.
@@ -1239,7 +1246,7 @@ function deep_check(e, cb) {
 	udp((ok) => (UDP_DNS && ok === false) ? end('dns', `DNS ${DNS} over UDP fails through it`) : dl());
 }
 
-// The fastest live server but e, for elsewhere_ok(); null when there is none.
+// The fastest live server but e by ping, for elsewhere_ok(); null when there is none.
 function other(e) {
 	let q = { [e.id]: true };
 	for (let s in index.servers)
@@ -1408,23 +1415,143 @@ check = function() {
 	});
 };
 
+// auto_best: to the best server by auto_mode once it beats the active one by the hysteresis
+// (better()), after a test of all and after a speed test.
+function to_better() {
+	// a server out of auto selection the user chose is not left for a faster one
+	if (no_auto()[st.active] && by_hand(st.active))
+		return;
+	let b = best(), cur = server(st.active);
+	let why = (b && cur) ? better(H.auto_mode, index.servers, cur, b, st.latency, st.speeds, H) : null;
+	if (!why)
+		return;
+	// measured at an old address (cli.uc update): choose again at the new ones
+	if (access(STALE_FILE))
+		return choose_best(`${why} at old addresses`);
+	switch_to(b.id, why);
+}
+
 function rank() {
 	if (st.testing || st.reloading || st.reload_error || st.state != 'connected' || st.time_wait != null)
 		return;
 	test_all((problem) => {
 		if (problem || st.reloading || leave_limited() || !H.auto_best)
 			return;
-		// a server out of auto selection the user chose is not left for a faster one
-		if (no_auto()[st.active] && by_hand(st.active))
-			return;
-		let b = best(), cur = st.latency[st.active];
-		if (!b || b.id == st.active || !cur || cur.ms < 0 || st.latency[b.id].ms + H.hysteresis >= cur.ms)
-			return;
-		// measured at an old address (cli.uc update): choose again at the new ones
-		if (access(STALE_FILE))
-			return choose_best(`faster server: ${st.latency[b.id].ms} ms vs ${cur.ms} ms at old addresses`);
-		switch_to(b.id, `faster server: ${st.latency[b.id].ms} ms vs ${cur.ms} ms`);
+		to_better();
 	});
+}
+
+// Download speed of the servers (#95): speedtest_url through the test port of each live
+// server in auto selection (and of the active one) in turn. One curl at a time, at most
+// speedtest_time s each, and not during a test of all or a reload: a download takes the CPU
+// of the router and the line, and it would slow the pings down. The speed counts from the
+// first byte: the ping is the other half of balanced. Clients that download more than
+// speedtest_busy Mbit/s put it off, at most for one more speedtest_interval.
+// cb(mbps, why): mbps -1 when it fails, null when curl did not start.
+const SPEED_MIN = 262144;	// bytes: less is no measurement
+let sq = null;	// the run going on: { queue, since (monotonic), done, ok, run, t }
+
+function speed_probe(port, cb) {
+	curl_w(port, H.speedtest_url, H.speedtest_time, '%{http_code} %{size_download} %{time_total} %{time_starttransfer}', '', (code, r) => {
+		if (code < 0)
+			return cb(null);
+		let http = int(r[0] ?? 0), size = +(r[1] ?? 0), t = +(r[2] ?? 0) - +(r[3] ?? 0);
+		// 28: speedtest_time is over, what came by then counts
+		if ((code == 0 || code == 28) && (http == 200 || http == 206) && size >= SPEED_MIN && t > 0)
+			return cb(int(size * 8 / t / 100000) / 10.0);
+		cb(-1, (http == 200 || http == 206) ? `${int(size / 1024)} KB in ${H.speedtest_time} s` : code ? `curl ${code}` : `HTTP ${http}`);
+	});
+}
+
+function speed_done(q) {
+	sq = null;
+	st.speed_runs++;
+	st.speed_last = time();
+	save();
+	log(`speed test: ${q.ok} of ${q.done} servers downloaded ${H.speedtest_url}`);
+	if (H.auto_best && H.auto_mode != 'ping' && st.state == 'connected' && !st.testing && !st.reloading && !st.reload_error)
+		to_better();
+}
+
+function speed_next(q) {
+	if (sq !== q)
+		return;
+	// the pings of a test of all and the config of a reload first
+	if (st.testing || st.reloading || st.time_wait != null) {
+		q.t = uloop.timer(5000, () => speed_next(q));
+		return;
+	}
+	let mbit = (tun.speed?.down ?? 0) * 8 / 1e6;
+	if (H.speedtest_busy > 0 && mbit >= H.speedtest_busy && now() - q.since < H.speedtest_interval) {
+		if (!q.waited)
+			log(`speed test put off: the clients download ${int(mbit)} Mbit/s`);
+		q.waited = true;
+		q.t = uloop.timer(60000, () => speed_next(q));
+		return;
+	}
+	let e = null;
+	while (!e && length(q.queue)) {
+		e = server(shift(q.queue));
+		// dead or failed since the run began: no download through it
+		if (e && ((st.latency[e.id]?.ms ?? -1) < 0 || quarantined(e.id)))
+			e = null;
+	}
+	if (!e)
+		return speed_done(q);
+	let gen = st.gen;
+	speed_probe(e.test_port, (mbps, why) => {
+		if (sq !== q)
+			return;
+		// through the config being replaced: the next run measures it
+		if (mbps != null && valid(gen) && server(e.id)) {
+			st.speeds[e.id] = { mbps, at: time() };
+			q.done++;
+			if (mbps >= 0)
+				q.ok++;
+			else
+				log(`speed test of "${e.name}" failed: ${why}`);
+		}
+		speed_next(q);
+	});
+}
+
+// Starts a run unless one goes on: false when there is nothing to measure.
+function speed_run(why) {
+	if (sq)
+		return true;
+	if (!H.speedtest_url)
+		return false;
+	let off = no_auto();
+	let queue = map(filter(index.servers, (e) => (!off[e.id] || e.id == st.active)
+		&& (st.latency[e.id]?.ms ?? -1) >= 0 && !quarantined(e.id)), (e) => e.id);
+	if (!length(queue))
+		return false;
+	log(`speed test of ${length(queue)} servers (${why})`);
+	sq = { queue, since: now(), done: 0, ok: 0, run: st.speed_runs + 1 };
+	speed_next(sq);
+	return true;
+}
+
+// Every speedtest_interval in the modes speed and balanced; without live servers (start,
+// no_servers) again in 5 minutes.
+function speed_schedule(sec) {
+	timers.speedtest?.cancel();
+	timers.speedtest = uloop.timer(sec * 1000, () => {
+		let ran = (st.state == 'connected' || st.state == 'degraded') && speed_run('scheduled');
+		speed_schedule(ran ? H.speedtest_interval : 300);
+	});
+}
+
+// The best server by balanced (#95), whatever the mode and the choice by hand: the badge
+// "optimal" of the UIs. null until a server has a speed: by the ping alone it says nothing new.
+function optimal() {
+	if (!length(filter(values(st.speeds), (v) => v.mbps >= 0)))
+		return null;
+	let q = {};
+	for (let e in index.servers)
+		if (quarantined(e.id))
+			q[e.id] = true;
+	return auto_pick(index.servers, st.latency, no_auto(), q, st.limited, st.speeds, 'balanced')?.server.id;
 }
 
 // Updates due (or all when force) subscriptions in one `cli.uc update` run, the only
@@ -1473,6 +1600,8 @@ function status() {
 		id: e.id, name: e.name, proto: e.proto, transport: e.transport, address: e.address, port: e.port,
 		sub: e.sub, sub_name: e.sub_name,
 		latency: st.latency[e.id]?.ms, tested: st.latency[e.id]?.at,
+		// Mbit/s of speedtest_url (#95): -1 the last download failed, null not measured
+		speed: st.speeds[e.id]?.mbps, speed_tested: st.speeds[e.id]?.at,
 		quarantined: quarantined(e.id), auto: !off[e.id], limited: !!st.limited[e.id],
 	}));
 	// cli.uc could not apply the rules and blocked the clients (fail closed)
@@ -1500,6 +1629,10 @@ function status() {
 		// the tunnel (#83): { up, down } B/s over the last main.speed_interval (null: not
 		// measured yet or off) and bytes since xvpnd started; IP packets, headers included
 		speed: tun.speed, traffic: SPEED > 0 ? tun.traffic : null,
+		// #95: what the daemon chooses by, the best server by ping and speed, the speed test
+		// (null: speedtest_url off; runs counts finished runs like tests)
+		auto_mode: H.auto_mode, optimal: optimal(),
+		speedtest: H.speedtest_url ? { running: !!sq, runs: st.speed_runs, last: st.speed_last, url: H.speedtest_url } : null,
 	};
 }
 
@@ -1573,6 +1706,19 @@ conn.publish('xvpn', {
 					if (!problem && !st.reloading)
 						leave_limited();
 				});
+			return { ok: true, run };
+		},
+	},
+	// the speed test of all live servers now (#95): over once status shows speedtest.runs >= run
+	speedtest: {
+		call: () => {
+			if (!H.speedtest_url)
+				return { ok: false, error: 'speed test is off' };
+			if (st.reload_error || st.time_wait != null)
+				return { ok: false, error: 'busy' };
+			let run = sq ? sq.run : st.speed_runs + 1;
+			if (!speed_run('by hand'))
+				return { ok: false, error: 'no live servers' };
 			return { ok: true, run };
 		},
 	},
@@ -1673,6 +1819,12 @@ every('watchdog', 30, watchdog);
 if (SPEED > 0) {
 	every('speed', SPEED, speed);
 	speed();
+}
+// the first run a while after the start (the servers are tested first), unless the last one
+// is recent: a restart of the daemon (a change of the config) does not download all again
+if (H.speedtest_url && H.auto_mode != 'ping') {
+	let age = st.speed_last ? time() - st.speed_last : null;
+	speed_schedule((age != null && age >= 0 && age < H.speedtest_interval) ? max(120, H.speedtest_interval - age) : 120);
 }
 // generate failed at start (a port taken): tried again every RELOAD_RETRY
 if (readfile(GENERATE_ERROR_FILE))

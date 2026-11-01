@@ -81,6 +81,14 @@ const methods = {
 		}
 	},
 
+	// the download speed of all live servers (#95), in the background: done once status
+	// shows speedtest.runs >= run
+	speedtest: {
+		call: function() {
+			return daemon('speedtest') ?? { ok: false, error: daemon_error };
+		}
+	},
+
 	select: {
 		args: { id: 'id' },
 		call: function(req) {

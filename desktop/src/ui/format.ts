@@ -56,6 +56,15 @@ export function ms(n: number): string {
   return lang() === 'ru' ? `${Math.round(n)} мс` : `${Math.round(n)} ms`;
 }
 
+/** download speed of a server in Mbit/s (#95): absent — not measured, negative — failed */
+export function mbit(v: number | null | undefined): string {
+  if (v == null)
+    return '—';
+  if (v < 0)
+    return lang() === 'ru' ? 'ошибка' : 'failed';
+  return `${num(v)} ${BIT_UNITS[lang()][2]}`;
+}
+
 /** latency of a server: absent — not tested yet, negative — the last test failed */
 export function ping(latency: number | null | undefined): string {
   if (latency == null)

@@ -98,6 +98,7 @@ ip -n wan addr add 45.0.0.2/24 dev vw1; ip -n wan link set vw1 up; ip -n wan lin
 ip -n wan route add default via 45.0.0.1
 sysctl -qw net.ipv4.ip_forward=1
 mkdir -p /tmp/www; echo hello > /tmp/www/index.html
+dd if=/dev/zero of=/tmp/www/speedtest bs=1k count=2048 2>/dev/null	# health.speedtest_url (#95)
 ip netns exec wan uhttpd -f -p 45.0.0.2:80 -h /tmp/www >/dev/null 2>&1 &
 # health.url2 (#61) by domain on its own address: the remotes resolve it, a whitelisting one
 # drops it, a DROP of 45.0.0.3 in wan stands for its CDN down
@@ -200,6 +201,7 @@ set xvpn.health.reload_retry=5
 set xvpn.health.retry_max=12
 set xvpn.health.dns_check=0
 set xvpn.health.dl_url=off
+set xvpn.health.speedtest_url=http://45.0.0.2/speedtest
 set xvpn.main.speed_interval=1
 add_list xvpn.health.wan_url=http://45.0.0.2:9/
 add_list xvpn.health.wan_url=http://check2.test/
@@ -251,6 +253,18 @@ rm /tmp/www/big
 ip netns exec cl sysctl -qw net.ipv4.tcp_rmem="$rmem"
 [ $d -ge 1048576 ] && [ $d -le 1153433 ] && [ $u -gt 0 ] || { echo "FAIL: traffic: down $d (file 1048576), up $u"; exit 1; }
 echo "OK: tunnel speed $sp B/s at 256 KB/s, $d bytes down for a 1 MB file"
+# speed test (#95): by hand in auto_mode ping, through the test port of the live server only
+# ("second" is dead), which is then the optimal one
+_run=$(ubus call xvpn speedtest | jsonfilter -e @.run)
+[ -n "$_run" ] || { echo "FAIL: ubus call xvpn speedtest started no run"; diag; exit 1; }
+speed_done() { [ "$(status @.speedtest.runs)" -ge "$1" ]; }
+wait_cmd 30 speed_done "$_run"
+sp=$(ubus call xvpn status | jsonfilter -e "@.servers[@.name='first'].speed")
+echo "$sp" | awk '{ exit !($1 > 0) }' || { echo "FAIL: no speed of first: $(ubus call xvpn status)"; exit 1; }
+[ -z "$(ubus call xvpn status | jsonfilter -e "@.servers[@.name='second'].speed")" ] || { echo "FAIL: dead second got a speed"; exit 1; }
+[ "$(status @.optimal)" = "$(status @.active)" ] && [ "$(status @.auto_mode)" = ping ] \
+	|| { echo "FAIL: optimal/auto_mode: $(ubus call xvpn status)"; exit 1; }
+echo "OK: speed test through the test port: first $sp Mbit/s, the optimal one"
 blocked "connected, ICMP is not tunneled"
 /etc/init.d/xvpn-guard start
 full_rules "xvpn-guard start"
