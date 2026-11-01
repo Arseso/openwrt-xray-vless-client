@@ -1,6 +1,6 @@
 [package]
 name = "xvpn"
-version = "0.2.0"
+version = "0.3.0"
 description = "Remote control of luci-app-xvpn on an OpenWrt router"
 authors = ["Artem Sokolov <arseso.main@gmail.com>"]
 license = "MIT"
