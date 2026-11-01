@@ -91,7 +91,7 @@ warned=
 # the xray release test-xray checks and the fixture links (tests/fixtures/links.txt) it
 # forbids: vless without TLS to a public address, allowInsecure. A newer release: check it
 # with XRAY_TAG=<tag> (and XRAY_REJECT), then update both here
-XRAY_PINNED=v26.10.29
+XRAY_PINNED=v26.10.31
 XRAY_PINNED_REJECT="HTTPUpgrade Insecure"
 XRAY_TAG=${XRAY_TAG:-$XRAY_PINNED}
 XRAY_REJECT=${XRAY_REJECT-$XRAY_PINNED_REJECT}
