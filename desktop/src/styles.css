@@ -133,3 +133,4 @@ pre.log { height: 60vh; overflow: auto; white-space: pre-wrap; word-break: break
 button.link { border: none; background: none; color: var(--accent); padding: 0 4px; }
 ul.plain { list-style: none; padding: 0; margin: 4px 0; }
 .banner .notice { display: flex; justify-content: space-between; align-items: center; margin: 0; }
+pre.notes { white-space: pre-wrap; font: inherit; }

@@ -30,6 +30,7 @@ desktop/
       uci.ts           uci get/set/add/delete/changes/revert/commit/apply/confirm/rollback
       version.ts       checkPackage(): версия пакета и совместимость API
       profiles.ts      профили роутеров (команды Rust)
+      updater.ts       обновление приложения (команды updater_*)
     core/
       bus.ts           типизированная шина событий
       store.ts         наблюдаемый стор
@@ -38,6 +39,7 @@ desktop/
       notify.ts        уведомления: переходы → уведомления, дедупликация, тихие часы, настройки
       history.ts       история пинга и скорости: кольцевой буфер, заменяемый источник
       i18n.ts          strings({ en, ru }), lang(), setLang()
+      updater.ts       UpdateFlow: проверка по кнопке, установка после нативного вопроса Rust
       apply.ts         сохранение UCI: stage → apply с откатом → проверка связи → confirm
       diagnostics.ts   файл диагностики вкладки «Журнал» и маскировка секретов
     forms/             формы вкладок: validate.ts (проверки как в LuCI и load_config),
@@ -49,9 +51,9 @@ desktop/
       <name>.ts        вкладка: status, servers, subscriptions, access-points, settings, log,
                        history, notifications
       connect.ts       экран роутеров и решений о сертификате (не вкладка)
+      about.ts         «О программе»: версии, обновление приложения (#81)
     tray/              модель меню трея (model.ts) и контроллер на connection.bus (index.ts)
-    ui/                dom.ts (h, clear), errors.ts (errorText), format.ts (скорость, байты)
-    ui/                dom.ts (h, clear), errors.ts (errorText), format.ts (байты, сроки),
+    ui/                dom.ts (h, clear), errors.ts (errorText), format.ts (скорость, байты, сроки),
                        native.ts (буфер обмена, диалог сохранения через плагины)
   src-tauri/src/
     lib.rs             сборка приложения, маршрутизация команд по префиксу
@@ -65,11 +67,12 @@ desktop/
     notifications.rs   уведомления — TODO(#80)
     tray.rs            трей — TODO(#78)
     notifications.rs   уведомления: tauri-plugin-notification, команда notify_show
+    updater.rs         обновление приложения: tauri-plugin-updater (#81)
     screens.rs         плагины вкладок #79: clipboard-manager, dialog, fs
                        (права — capabilities/screens.json)
   tests/unit/          vitest, фейковый роутер (fake.ts)
   tests/stand/         тот же клиент против стенда scripts/luci.sh
-  docker/Dockerfile    окружение сборки Linux
+  docker/Dockerfile    окружение сборки: Linux и кросс-сборка Windows (cargo-xwin, NSIS)
 ```
 
 ## Контракты для вкладок, трея и уведомлений
@@ -160,7 +163,7 @@ registerView({
 ### Rust-модули
 
 Команды маршрутизируются по префиксу имени: `tray_*` → `tray::handler()`,
-`notify_*` → `notifications::handler()`, остальное — ядро (`commands.rs`). Новая команда
+`notify_*` → `notifications::handler()`, `updater_*` → `updater::handler()`, остальное — ядро (`commands.rs`). Новая команда
 трея или уведомлений добавляется в свой модуль (`tauri::generate_handler!` в его
 `handler()`), `lib.rs` не трогается. У каждого модуля есть `init(app)`, вызывается из
 `setup`; плагины Tauri модуль регистрирует там же (`app.handle().plugin(...)`, как
@@ -295,11 +298,90 @@ npm run tauri dev      # нужен Rust и webkit2gtk-4.1 на хосте
 Сборка и тесты в docker (на хосте ничего, кроме docker):
 
 ```sh
-sh scripts/desktop-build.sh        # dist/desktop/xvpn и dist/desktop/xvpn_*.deb
+sh scripts/desktop-build.sh        # dist/desktop: xvpn, xvpn_*.deb, xvpn_*.AppImage, xvpn_*_x64-setup.exe
 sh scripts/desktop-build.sh test   # tsc, vitest, cargo test
 sh scripts/desktop-itest.sh        # клиент против стенда scripts/luci.sh (node на хосте)
 ```
 
-Кэш cargo, npm и target — в docker-томах `xvpn-desktop-cargo`, `xvpn-desktop-npm`,
-`xvpn-desktop-target`. Windows-сборка, AppImage, автообновление и шаг в
-`scripts/ci.sh` — #81.
+Кэш cargo, npm, target и MSVC SDK cargo-xwin — в docker-томах `xvpn-desktop-cargo`,
+`xvpn-desktop-npm`, `xvpn-desktop-target`, `xvpn-desktop-xwin`. `TARGETS=linux` — без
+Windows. Хост слабый: тяжёлые команды параллельные сессии запускают под общим замком
+`flock ~/.cache/xvpn-heavy.lock <команда>`.
+
+### Версия
+
+Одна на пакет роутера и приложение — `PKG_VERSION` из `luci-app-xvpn/Makefile` (только
+`x.y.z`). `desktop-build.sh` подставляет её в копию для сборки: `tauri.conf.json` через
+`--config`, `Cargo.toml`/`Cargo.lock` (User-Agent). Версии в самих файлах `desktop/`
+сборка не использует.
+
+### Windows
+
+NSIS-установщик собирается кросс-сборкой из Linux, как описано у Tauri: target
+`x86_64-pc-windows-msvc`, `cargo-xwin` (скачивает CRT и Windows SDK от Microsoft в свой
+кэш), clang/lld, `makensis` из Debian. Сборка проверяет, что `xvpn.exe` — PE32+ GUI x86-64
+и что он есть в установщике (`7z l`); запуск под Windows/wine в CI нет. WebView2 ставит
+установщик сам (bootstrapper, нужен интернет), на Windows 10/11 он обычно уже есть.
+
+MSI (WiX) собирается только на Windows. Там же можно собрать и NSIS:
+
+```powershell
+winget install Rustlang.Rustup OpenJS.NodeJS.LTS
+# Visual Studio Build Tools 2022 с «Desktop development with C++» (MSVC и Windows SDK)
+cd desktop
+npm ci
+npx tauri build --bundles msi,nsis          # src-tauri\target\release\bundle\{msi,nsis}
+```
+
+Версию из `PKG_VERSION` на Windows подставьте сами: `npx tauri build --config '{"version":"0.1.0"}'`.
+
+### Обновления
+
+`tauri-plugin-updater` (`src-tauri/src/updater.rs`, вкладка «О программе»): проверка — только
+по кнопке; установку команда `updater_install` начинает с нативного диалога со своим текстом
+(`tauri-plugin-dialog`) — без «Установить» в нём ничего не скачивается, и ни один скрипт в
+web view этот вопрос не обойдёт. Ставится только версия, найденная последней проверкой.
+Манифест — `latest.json` последнего релиза
+(`https://github.com/Arseso/openwrt-xray-vless-client/releases/latest/download/latest.json`),
+пакет проверяется подписью по публичному ключу из `tauri.conf.json` (`plugins.updater.pubkey`).
+Обновляются установка из NSIS (Windows, `installMode: passive`), AppImage и deb (Linux: плагин
+ставит deb через `dpkg` с `pkexec`); тип установки плагин берёт из бинаря (сборщик Tauri его туда
+записывает). MSI, собранный вручную, rpm и голый бинарь не обновляются — приложение показывает
+новую версию и ссылку на релиз. JS-API плагинов web view не выдан: у неё только команды
+`updater_check` и `updater_install`.
+
+Ключ подписи — вне репозитория: `~/.config/xvpn-desktop/updater.key` (600; другой каталог —
+`KEYS`), пароль — в `updater.pass` рядом (нет файла — пустой). Создан так:
+
+```sh
+npx tauri signer generate --ci -p "" -w ~/.config/xvpn-desktop/updater.key
+```
+
+Сборка ключа не видит: в ней работают npm-скрипты, `build.rs` сотен крейтов и скачанные
+инструменты. Готовые AppImage, deb и установщик подписывает второй контейнер того же образа
+(`desktop/docker/sign.sh`) — без сети, без томов, смонтирован только файл ключа — и там же
+пишет `dist/desktop/latest.json` со ссылками на релиз `TAG` (по умолчанию `v<PKG_VERSION>`, как
+тег `scripts/ci.sh release`) и проверяет каждую подпись `minisign` по ключу из `tauri.conf.json`.
+`sh scripts/desktop-build.sh verify` — только проверка. Без ключа ничего не подписывается, а
+`ci.sh release` отказывается выпускать релиз. Потеря ключа — новый ключ и новый `pubkey`:
+установленные версии со старым ключом новые подписи не примут, их придётся обновить вручную.
+
+### Воспроизводимость
+
+Образ сборки (`desktop/docker/Dockerfile`) закреплён: базовые образы node и rust — по digest,
+cargo-xwin и tauri CLI — по версии, MSVC CRT и Windows SDK — `XWIN_CRT_VERSION`/`XWIN_SDK_VERSION`,
+инструменты AppImage (AppRun, linuxdeploy, linuxdeploy-plugin-appimage), которые сборщик Tauri
+иначе качал бы при каждой сборке, а plugin-appimage — с движущегося тега `continuous`, лежат в
+образе по фиксированным URL с `sha256sum -c`. Плагины NSIS сборщик проверяет по хэшу сам.
+
+### CI и релиз
+
+`sh scripts/ci.sh` — шаг `desktop`: `desktop-build.sh test`, затем сборка Linux и Windows
+(`DESKTOP_TARGETS=linux` — только Linux) в `dist/desktop/`; `DESKTOP_ITEST=1` добавляет
+`desktop-itest.sh` (по умолчанию нет: стенд LuCI — ещё один контейнер, а itest и так
+идёт ~12 мин). `sh scripts/ci.sh release` кладёт в тот же GitHub Release, что и ipk: deb, AppImage, установщик,
+их `.sig` и `latest.json` — проверив подписи по ключу из `tauri.conf.json` и что `latest.json`
+ссылается на этот тег. Релиз сначала создаётся черновиком (тег GitHub ставит при публикации),
+поэтому сбой загрузки не оставляет тега без релиза, а повторный запуск догружает в тот же
+черновик и публикует. Версия приложения — `PKG_VERSION` без `PKG_RELEASE`: релиз `-rN`, в котором
+изменился `desktop/`, `ci.sh release` не выпустит — обновление с той же версией updater не увидит.

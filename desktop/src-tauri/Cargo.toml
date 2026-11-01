@@ -39,6 +39,10 @@ tauri-plugin-notification = "2"
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
+# updates from the GitHub release (#81): rustls with ring as above, no OpenSSL; it asks
+# with tauri-plugin-dialog above
+tauri-plugin-updater = "2"
+time = { version = "0.3", features = ["formatting"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # tray.rs: is there a StatusNotifierItem host (already in the tree through keyring)
