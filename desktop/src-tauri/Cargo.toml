@@ -26,6 +26,10 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 sha2 = "0.10"
 keyring = { version = "3", features = ["windows-native", "sync-secret-service", "crypto-rust"] }
 tauri-plugin-notification = "2"
+# the tabs of #79 (src/screens.rs)
+tauri-plugin-clipboard-manager = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
 
 [dev-dependencies]
 rcgen = "0.13"

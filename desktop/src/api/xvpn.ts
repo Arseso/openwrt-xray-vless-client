@@ -4,7 +4,7 @@
 // code is optional here as well. Times are seconds of the router clock (time in the
 // answers), not of the PC.
 
-import { UbusClient } from './ubus';
+import { CallOptions, UbusClient } from './ubus';
 
 export const OBJECT = 'luci.xvpn';
 
@@ -223,8 +223,9 @@ export class XvpnApi {
     return this.ubus.call<T>(OBJECT, method, args);
   }
 
-  version(): Promise<VersionReply> {
-    return this.call('version');
+  /** opts: the check after uci apply goes over a new connection (src/core/apply.ts) */
+  version(opts: CallOptions = {}): Promise<VersionReply> {
+    return this.ubus.call<VersionReply>(OBJECT, 'version', {}, opts);
   }
 
   status(): Promise<Status> {

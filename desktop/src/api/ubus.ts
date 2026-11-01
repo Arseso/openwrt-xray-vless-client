@@ -5,6 +5,9 @@
 // So a denied call first asks whether the session is alive (session access): alive,
 // the denial is the ACL (acl, the session and what it staged stay); dead, one new
 // login and a second try. uci answers 6 for a config without rights: acl at once.
+// A user without session access (an older luci-app-xvpn-remote) cannot tell the two
+// apart: whether it may is checked once after login, and without it a denial while
+// changes are staged is acl at once — a new login would lose them.
 //
 // rpcd keeps staged UCI changes and the pending confirm of apply in the session: a new
 // login loses them. UciApi marks them (staged); after a new login with staged changes
@@ -37,6 +40,8 @@ export interface UbusOptions {
 
 export interface CallOptions {
   timeoutMs?: number;
+  /** over a new connection (Transport RequestOptions.fresh) */
+  fresh?: boolean;
 }
 
 /** marks a denied call that may be a dead session: retried once after a new login */
@@ -50,6 +55,8 @@ export class UbusClient {
   private staged = false;
   /** a new login dropped them; reported by the next uci call */
   private lost = false;
+  /** session access is allowed for this user; null: not known (the check failed) */
+  private canAsk: boolean | null = null;
   readonly timeoutMs: number;
 
   constructor(private readonly transport: Transport, opts: UbusOptions = {}) {
@@ -88,7 +95,19 @@ export class UbusClient {
     if (typeof sid !== 'string' || !sid)
       throw new XvpnError('bad_response', 'session login returned no session');
     this.sid = sid;
+    this.canAsk = await this.mayAsk(sid);
     return sid;
+  }
+
+  /** whether this user may call session access: true, false, null when unknown */
+  private async mayAsk(sid: string): Promise<boolean | null> {
+    try {
+      await this.callWith(sid, 'session', 'access', {}, {});
+      return true;
+    }
+    catch (e) {
+      return e instanceof Denied ? false : null;
+    }
   }
 
   /** drops the session (and what it staged), the next call logs in */
@@ -127,6 +146,12 @@ export class UbusClient {
     let fresh: string;
     if (this.sid && this.sid !== sid)
       fresh = this.sid; // another call logged in meanwhile
+    else if (this.canAsk === false) {
+      // no way to ask: keep what the session holds rather than log in on a guess
+      if (this.staged)
+        throw acl();
+      fresh = await this.login();
+    }
     else if (await this.alive(sid))
       throw acl();
     else
@@ -163,7 +188,8 @@ export class UbusClient {
   }
 
   private async callWith<T>(sid: string, object: string, method: string, args: Record<string, unknown>, opts: CallOptions): Promise<T> {
-    const r = await this.transport.request(this.body('call', [sid, object, method, args]), opts.timeoutMs ?? this.timeoutMs);
+    const r = await this.transport.request(this.body('call', [sid, object, method, args]), opts.timeoutMs ?? this.timeoutMs,
+      opts.fresh ? { fresh: true } : undefined);
     if (r.error) {
       if (r.error.code === RPC_ACCESS_DENIED || r.error.code === RPC_SESSION_NOT_FOUND)
         throw new Denied('acl', r.error.message, { rpcCode: r.error.code, object, method });

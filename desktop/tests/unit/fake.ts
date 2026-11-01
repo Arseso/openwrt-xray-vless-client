@@ -2,7 +2,7 @@
 // luci.xvpn methods as functions, and transport failures on demand.
 
 import { XvpnError } from '../../src/api/errors';
-import { RpcRequest, RpcResponse, Transport } from '../../src/api/transport';
+import { RequestOptions, RpcRequest, RpcResponse, Transport } from '../../src/api/transport';
 
 type Method = (args: Record<string, unknown>) => [number, unknown?] | unknown;
 
@@ -11,7 +11,7 @@ export class FakeRouter implements Transport {
   given = 'secret';
   sessions = new Set<string>();
   logins = 0;
-  calls: { object: string; method: string; args: Record<string, unknown> }[] = [];
+  calls: { object: string; method: string; args: Record<string, unknown>; fresh?: boolean }[] = [];
   /** object.method → handler; [code, data] is a ubus answer, anything else is data */
   methods = new Map<string, Method>();
   /** object.method the ACL of the user does not allow */
@@ -50,7 +50,7 @@ export class FakeRouter implements Transport {
     return { jsonrpc: '2.0', id: 0, result: [0, { ubus_rpc_session: sid, timeout: 300 }] };
   }
 
-  async request(body: RpcRequest): Promise<RpcResponse> {
+  async request(body: RpcRequest, _timeoutMs?: number, opts?: RequestOptions): Promise<RpcResponse> {
     const f = this.failures.shift();
     if (f)
       throw f;
@@ -64,7 +64,7 @@ export class FakeRouter implements Transport {
     }
     const [sid, object, method, args] = body.params as [string, string, string, Record<string, unknown>];
     const name = `${object}.${method}`;
-    this.calls.push({ object, method, args });
+    this.calls.push({ object, method, args, ...(opts?.fresh ? { fresh: true } : {}) });
     if (!this.sessions.has(sid) || this.denied.has(name)) {
       if (this.rpcDenied)
         return { jsonrpc: '2.0', id: body.id, error: { code: -32002, message: 'Access denied' } };
