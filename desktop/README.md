@@ -36,6 +36,8 @@ desktop/
       store.ts         наблюдаемый стор
       poller.ts        общий поллер status
       connection.ts    подключение к профилю: фазы, AppContext для вкладок
+      notify.ts        уведомления: переходы → уведомления, дедупликация, тихие часы, настройки
+      history.ts       история пинга и скорости: кольцевой буфер, заменяемый источник
       i18n.ts          strings({ en, ru }), lang(), setLang()
       updater.ts       UpdateFlow: проверка по кнопке, установка после нативного вопроса Rust
       apply.ts         сохранение UCI: stage → apply с откатом → проверка связи → confirm
@@ -46,7 +48,8 @@ desktop/
     views/
       registry.ts      registerView(), интерфейс View
       index.ts         по строке import на вкладку
-      <name>.ts        вкладка: status, servers, subscriptions, access-points, settings, log
+      <name>.ts        вкладка: status, servers, subscriptions, access-points, settings, log,
+                       history, notifications
       connect.ts       экран роутеров и решений о сертификате (не вкладка)
       about.ts         «О программе»: версии, обновление приложения (#81)
     ui/                dom.ts (h, clear), errors.ts (errorText), format.ts (байты, сроки),
@@ -59,7 +62,7 @@ desktop/
     profiles.rs        profiles.json + keyring
     gateway.rs         шлюз по умолчанию (Linux /proc/net/route, Windows route print)
     tray.rs            трей — TODO(#78)
-    notifications.rs   уведомления — TODO(#80)
+    notifications.rs   уведомления: tauri-plugin-notification, команда notify_show
     updater.rs         обновление приложения: tauri-plugin-updater (#81)
     screens.rs         плагины вкладок #79: clipboard-manager, dialog, fs
                        (права — capabilities/screens.json)
@@ -161,6 +164,37 @@ registerView({
 `handler()`), `lib.rs` не трогается. У каждого модуля есть `init(app)`, вызывается из
 `setup`; плагины Tauri модуль регистрирует там же (`app.handle().plugin(...)`, как
 `screens.rs`), их права — в своём файле `capabilities/<модуль>.json`.
+
+## Уведомления и история
+
+`startNotifications(connection)` и `liveHistory.attach(connection)` подключаются к
+`connection.bus` один раз в `main.ts`. Решения принимает TS (`src/core/notify.ts`),
+Rust только показывает (`notify_show`).
+
+| тип            | когда | ключ (одно уведомление на событие) |
+|----------------|-------|------|
+| `vpn`          | рабочее (connected, degraded) → нерабочее (no_servers, xray_down, wan_down, error, passthrough, служба остановлена) и обратно; starting/failover — переходные; выключенный пользователем — не «упал»; служба не запущена — сбой только через 45 с, остановка из приложения (`service stop`) и 2 мин после возврата роутера — не сбой; «восстановился» — только после показанного «упал» | номер сбоя |
+| `failover`     | новый `last_switch` с `failover: true` (демон ставит его в `failover()`; у старого демона без поля — если поллер видел state failover); не старше 2 мин и не с прошлого подключения; если VPN был «упал», переключение говорит «восстановился» | `at` + `to` |
+| `router`       | `router-down` / первый ответ после него; при подключении — 2 неудачные попытки `connect()` и затем online | `since` |
+| `subscription` | `subscription-userinfo`: до `expire` меньше N дней / уже истекла, израсходовано ≥ P % | `expire` + фаза, `total` |
+| `sub_error`    | у подписки `error`: одно уведомление до следующего успешного обновления | `error` + `last_ok` |
+
+Переходы помнятся по профилю, поэтому переподключение к тому же роутеру не повторяет
+сказанное. Ключи подписок хранятся между запусками (`xvpn.notify.sent`, 60 дней).
+Уведомление выключенного типа или в тихие часы не показывается и не помечается
+отправленным: условие (подписка) скажется на следующем опросе после тихих часов, переход
+(VPN, роутер, failover) — нет. Окно `main` без `backgroundThrottling`: таймеры поллера
+не замедляются, пока окно скрыто в трей.
+`luci.xvpn subscriptions` опрашивается отдельно от поллера: через 15 с после
+подключения, раз в 30 мин и сразу после конца обновления (`updating` true → false).
+Настройки (интервал поллера, тихие часы, типы, пороги) — вкладка «Уведомления»,
+`localStorage` `xvpn.notify`, общие для всех роутеров.
+
+История: каждый ответ поллера — отсчёт `{ at, ping, up, down }` (пинг активного
+сервера, `speed` из status), ошибка опроса — разрыв линии. Кольцевой буфер на 9600
+отсчётов (8 ч при 3 с), при смене роутера или переводе часов ПК назад начинается заново. Вкладка читает
+`historySource()`; история с роутера (#34) подменит источник через
+`setHistorySource()`. Графики — SVG без библиотек.
 
 ## Подключение
 

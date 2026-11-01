@@ -5,4 +5,6 @@ import './subscriptions';
 import './access-points';
 import './settings';
 import './log';
+import './history';
+import './notifications';
 import './about';

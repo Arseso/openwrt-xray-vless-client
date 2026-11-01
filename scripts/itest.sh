@@ -720,6 +720,7 @@ kill $(cat /tmp/remote-18443.pid); remote 18444
 sleep 8
 wait_for @.state connected 60
 [ "$(active_name)" = second ] || { echo "FAIL: failover expected second, got $(active_name)"; exit 1; }
+[ "$(status @.last_switch.failover)" = true ] || { echo "FAIL: last_switch.failover: $(status @.last_switch)"; exit 1; }
 echo "OK: failover to the other server"
 logread | grep xvpn | grep -E 'switching|state' | tail -5
 # the first WAN URL refuses (blocked): the failover above went on with the second (#11)
@@ -740,6 +741,7 @@ id1=$(id_of first); id2=$(id_of second); xp=$(xray_pid)
 ip netns exec cl curl -s -m 30 --limit-rate 16k -o /tmp/dl.out http://45.0.0.2/dl & dlp=$!
 sleep 1
 select_ok "$id1" && active_is first || { echo "FAIL: select first"; ubus call xvpn status; exit 1; }
+[ "$(status @.last_switch.failover)" = false ] || { echo "FAIL: a choice by hand is a failover: $(status @.last_switch)"; exit 1; }
 d0=$(down_of "$id1")
 tunnel || { echo "FAIL: no tunnel right after the switch"; diag; exit 1; }
 wait $dlp || true
