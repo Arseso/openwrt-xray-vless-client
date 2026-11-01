@@ -8,7 +8,7 @@ import { Status, StatusUp } from '../api/xvpn';
 import { ConnectionState } from '../core/connection';
 import { t } from '../i18n/tray';
 import { t as ts } from '../i18n/status';
-import { ping, speed } from '../ui/format';
+import { mbit, ping, speed } from '../ui/format';
 
 /** the icon files src-tauri/icons/tray/<icon>.png */
 export type TrayIcon = 'connected' | 'failover' | 'wan_down' | 'xray_down' | 'offline' | 'stopped';
@@ -125,7 +125,8 @@ export function trayModel(i: TrayInput): TrayModel {
   const servers: TrayServer[] = all.slice(0, MAX_SERVERS).map((s) => ({
     id: s.id,
     active: s.id === up?.active,
-    label: [s.name, ping(s.latency), s.quarantined ? t('quarantined') : null].filter(Boolean).join(' · '),
+    label: [s.name, ping(s.latency), s.speed != null ? mbit(s.speed) : null, s.quarantined ? t('quarantined') : null,
+      s.id === up?.optimal ? t('optimal') : null].filter(Boolean).join(' · '),
   }));
   // the active one is always there
   if (active && !servers.some((s) => s.active))

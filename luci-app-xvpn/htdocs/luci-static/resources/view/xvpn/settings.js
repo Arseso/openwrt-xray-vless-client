@@ -17,6 +17,7 @@ const DEFAULTS = {
 	url: 'https://www.gstatic.com/generate_204', url2: 'https://cp.cloudflare.com/generate_204',
 	dl_url: 'https://speed.cloudflare.com/__down?bytes=65536', interval: 30, timeout: 5, fail_threshold: 3,
 	rank_interval: 600, hysteresis: 150, quarantine: 300, concurrency: 4,
+	auto_mode: 'ping', speed_hysteresis: 20, speedtest_url: 'https://proof.ovh.net/files/10Mb.dat', speedtest_interval: 21600,
 };
 
 const PORTS = [ 'tproxy_port', 'dns_port', 'api_port', 'control_port' ];
@@ -145,6 +146,33 @@ return view.extend({
 		o.placeholder = DEFAULTS.concurrency;
 		o.validate = integer(1, 8);
 
+		// #95: the server with the best ping may be the slowest one for video and downloads
+		o = s.option(form.ListValue, 'auto_mode', _('Server choice'),
+			_('What the server is chosen by at start, on failover and when switching to a faster one. Download speed is measured through every live server (about 10 MB each) every few hours; until then the ping decides.'));
+		o.value('ping', _('By ping'));
+		o.value('speed', _('By download speed'));
+		o.value('balanced', _('By ping and speed'));
+		o.default = DEFAULTS.auto_mode;
+
+		o = s.option(form.Value, 'speedtest_url', _('Speed test URL'),
+			_('A large file (10 MB or more) downloaded through each server for its speed, at most 10 s a server. "off" turns the speed test off.'));
+		o.placeholder = DEFAULTS.speedtest_url;
+		o.value('https://proof.ovh.net/files/10Mb.dat');
+		o.value('off', _('off'));
+		o.validate = (sid, v) => {
+			v = (v ?? '').trim();
+			return !v || v == 'off' || /^https?:\/\/[^\s/?#]+\S*$/i.test(v) || _('Enter an http:// or https:// URL or "off"');
+		};
+		o.write = (sid, v) => uci.set('xvpn', sid, 'speedtest_url', v.trim());
+
+		o = s.option(form.Value, 'speedtest_interval', _('Speed test every, s'),
+			_('With ten servers one run downloads about 100 MB: mind the traffic limit of the subscription.'));
+		o.placeholder = DEFAULTS.speedtest_interval;
+		o.validate = integer(1800, 604800);
+		o.depends('auto_mode', 'speed');
+		o.depends('auto_mode', 'balanced');
+		o.retain = true;
+
 		o = s.option(form.Flag, 'auto_best', _('Switch to a faster server'),
 			_('Off: the server is switched only when it fails. On: also when the background test finds a server that is faster by the hysteresis below.'));
 		o.default = '0';
@@ -156,6 +184,14 @@ return view.extend({
 		o.validate = integer(0, 10000);
 		o.depends('auto_best', '1');
 		// the value stays in the config while the option is hidden
+		o.retain = true;
+
+		o = s.option(form.Value, 'speed_hysteresis', _('Speed hysteresis, %'),
+			_('By download speed or by ping and speed: how much better another server must be to switch to it.'));
+		o.placeholder = DEFAULTS.speed_hysteresis;
+		o.validate = integer(0, 1000);
+		o.depends({ auto_best: '1', auto_mode: 'speed' });
+		o.depends({ auto_best: '1', auto_mode: 'balanced' });
 		o.retain = true;
 
 		s = m.section(form.NamedSection, 'main', 'general', _('xray'));

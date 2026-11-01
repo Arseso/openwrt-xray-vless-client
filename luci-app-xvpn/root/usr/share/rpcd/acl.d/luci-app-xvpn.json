@@ -9,7 +9,7 @@
 		},
 		"write": {
 			"ubus": {
-				"luci.xvpn": [ "update", "service", "test", "select", "auto", "set_auto", "split_update" ]
+				"luci.xvpn": [ "update", "service", "test", "speedtest", "select", "auto", "set_auto", "split_update" ]
 			},
 			"uci": [ "xvpn" ]
 		}

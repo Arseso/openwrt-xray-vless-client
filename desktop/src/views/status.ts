@@ -11,7 +11,7 @@ import { t } from '../i18n/status';
 import { byHand } from '../tray/model';
 import { clear, h } from '../ui/dom';
 import { errorText } from '../ui/errors';
-import { bytes, dur, ping, speed } from '../ui/format';
+import { ago, bytes, dur, mbit, ping, speed } from '../ui/format';
 import { registerView } from './registry';
 
 export const STATS_EVERY_MS = 30_000;
@@ -116,6 +116,11 @@ registerView({
               byHand(up!) == null ? null : h('span', { class: 'muted' }, ` · ${byHand(up!) ? t('by_hand') : t('by_auto')}`),
               byHand(up!) ? [' ', h('button', { onclick: act(() => ctx.xvpn.auto()) }, t('back_auto'))] : null),
             h('dt', {}, t('ping')), h('dd', {}, ping(active.latency)),
+            active.speed != null ? [h('dt', {}, t('download')), h('dd', { id: 'server-speed' },
+              `${mbit(active.speed)} · ${ago(s.time, active.speed_tested)}`,
+              up!.optimal === active.id ? [' ', h('span', { class: 'badge' }, t('optimal'))] : null)] : null,
+            up!.auto_mode ? [h('dt', {}, t('auto_mode')), h('dd', {}, t(`mode.${up!.auto_mode}`),
+              up!.speedtest?.last ? ` · ${t('speedtest_last', { ago: ago(s.time, up!.speedtest.last) })}` : '')] : null,
             up!.udp != null ? [h('dt', {}, t('udp')), h('dd', {}, up!.udp ? t('udp_ok') : t('udp_bad'))] : null,
             up!.speed !== undefined ? [h('dt', {}, t('speed')), h('dd', { id: 'speed' },
               up!.speed ? `↓ ${speed(up!.speed.down)}  ↑ ${speed(up!.speed.up)}` : t('speed_none'))] : null,

@@ -13,6 +13,7 @@ const STATS_EVERY = 10;
 
 const callStatus = rpc.declare({ object: 'luci.xvpn', method: 'status' });
 const callTest = rpc.declare({ object: 'luci.xvpn', method: 'test' });
+const callSpeedtest = rpc.declare({ object: 'luci.xvpn', method: 'speedtest' });
 const callSelect = rpc.declare({ object: 'luci.xvpn', method: 'select', params: [ 'id' ] });
 const callSetAuto = rpc.declare({ object: 'luci.xvpn', method: 'set_auto', params: [ 'id', 'auto' ] });
 const callServers = rpc.declare({ object: 'luci.xvpn', method: 'servers' });
@@ -63,6 +64,8 @@ function errorText(err) {
 		'timeout': _('The daemon did not answer in time, the request may still be carried out'),
 		'unknown server': _('The server is no longer in the list, reload the page'),
 		'xvpn has uncommitted changes': _('/etc/config/xvpn has uncommitted changes (uci set without uci commit)'),
+		'speed test is off': _('The speed test is off (speed test URL "off")'),
+		'no live servers': _('No live servers to measure'),
 	}[err] ?? err ?? _('unknown error');
 }
 
@@ -101,6 +104,26 @@ function dur(sec) {
 	if (m)
 		return _('%dm %ds').format(m, s);
 	return _('%ds').format(s);
+}
+
+// the download speed of a server (#95): Mbit/s, negative when the last download failed
+function mbit(v) {
+	return (v == null) ? null : (v < 0) ? label('error', _('failed')) : txt(_('%s Mbit/s').format(v));
+}
+
+// the best server by ping and speed together, whatever the mode (status.optimal)
+function optimalLabel() {
+	const l = label('notice', _('optimal'));
+	l.title = _('The best server by ping and download speed together');
+	return l;
+}
+
+function modeText(mode) {
+	return {
+		ping: _('by ping'),
+		speed: _('by download speed'),
+		balanced: _('by ping and speed'),
+	}[mode] ?? mode;
 }
 
 function bytes(n) {
@@ -325,6 +348,10 @@ return view.extend({
 			this.button('test', 'cbi-button-action', _('Test all'), !up || status.testing,
 				() => callTest(), _('Testing all servers…')),
 			' ',
+			// #95: about 10 MB through every live server, one after another
+			(up && status.speedtest) ? this.button('speedtest', 'cbi-button-action', _('Measure speed'), status.speedtest.running,
+				() => callSpeedtest(), _('Measuring the download speed of the servers…')) : '',
+			(up && status.speedtest) ? ' ' : '',
 			this.button('update', 'cbi-button-action', _('Update subscriptions'), updating,
 				() => callUpdate(), _('Updating subscriptions…')),
 			' ',
@@ -354,6 +381,8 @@ return view.extend({
 				state.push(' ', label('notice', _('testing servers')));
 			if (updating)
 				state.push(' ', label('notice', _('updating subscriptions')));
+			if (status.speedtest?.running)
+				state.push(' ', label('notice', _('measuring speed')));
 		}
 
 		const sw = up ? status.last_switch : null;
@@ -377,6 +406,10 @@ return view.extend({
 					? [ label('error', _('failed')), ' ', txt(ago(now, active.tested)) ]
 					: [ txt(_('%d ms').format(lat) + ', ' + ago(now, active.tested)), ...((active.limited && lat >= 0) ? [ ' ', limited(status.url2) ] : []) ] ] : null,
 				// #10: names resolve over DoH, but QUIC, calls and games of the clients need UDP
+				(up && active && active.speed != null) ? [ _('Download speed'), [ mbit(active.speed), txt(', ' + ago(now, active.speed_tested)),
+					...((status.optimal == active.id) ? [ ' ', optimalLabel() ] : []) ] ] : null,
+				up ? [ _('Auto selection'), txt(modeText(status.auto_mode ?? 'ping') + ((status.speedtest?.last)
+					? ', ' + _('speed test %s').format(ago(now, status.speedtest.last)) : '')) ] : null,
 				(up && active && status.udp === false) ? [ _('UDP'), [ label('warning', _('does not pass')), ' ',
 					txt(_('UDP does not pass through this server: QUIC, voice calls and games of the clients may not work.')) ] ] : null,
 				(up && active && status.since) ? [ sinceTitle, txt(dur(now - status.since)) ] : null,
@@ -448,7 +481,7 @@ return view.extend({
 			table(subTitles, subRows, _('No subscriptions. Add one on the "Subscriptions" tab.')),
 		]);
 
-		const srvTitles = [ _('Name'), _('Protocol'), _('Address'), _('Subscription'), _('Latency'), _('Traffic'), _('Auto'), '' ];
+		const srvTitles = [ _('Name'), _('Protocol'), _('Address'), _('Subscription'), _('Latency'), _('Speed'), _('Traffic'), _('Auto'), '' ];
 		const srvRows = list.map((s) => {
 			const isActive = (s.id == activeId);
 			const t = traffic[s.id];
@@ -465,6 +498,9 @@ return view.extend({
 				nameCell.push(' ', label('success', _('active')));
 			if (s.quarantined)
 				nameCell.push(' ', label('warning', _('quarantine')));
+			if (up && s.id == status.optimal)
+				nameCell.push(' ', optimalLabel());
+			const sp = mbit(s.speed);
 
 			return row(srvTitles, [
 				nameCell,
@@ -472,6 +508,7 @@ return view.extend({
 				txt((s.address ?? '') + (s.port ? ':' + s.port : '')),
 				s.sub_name ? txt(s.sub_name) : E('em', {}, _('manual')),
 				ping,
+				sp ? E('span', { 'title': ago(now, s.speed_tested) }, [ sp ]) : '—',
 				t ? txt('↓ ' + bytes(t.down) + ' ↑ ' + bytes(t.up)) : '—',
 				// health.no_auto: the daemon does not choose it by itself, "Use" still does
 				this.checkbox('auto:' + s.id, s.auto !== false, !up,

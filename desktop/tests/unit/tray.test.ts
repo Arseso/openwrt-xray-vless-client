@@ -81,6 +81,18 @@ describe('tray menu texts', () => {
     expect(m.servers[2]).toEqual({ id: 'c', label: 'C · нет ответа', active: false });
   });
 
+  it('speed and the optimal server in the server list (#95)', () => {
+    const m = model(up({
+      optimal: 'b',
+      servers: [
+        { ...STATUS_UP.servers[0], speed: -1 },
+        { id: 'b', name: 'B', proto: 'vless', address: 'b', port: 1, latency: 300, speed: 92.4, quarantined: false, auto: true, limited: false },
+      ],
+    }));
+    expect(m.servers[0].label).toBe('A · 40 мс · ошибка');
+    expect(m.servers[1].label).toBe('B · 300 мс · 92,4 Мбит/с · оптимальный');
+  });
+
   it('xray down and a stopped service', () => {
     expect(model(up({ state: 'xray_down' })).info[0]).toBe('● xray не запущен · xray не запущен');
     const m = model({ ...down, enabled: false });

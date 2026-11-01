@@ -38,7 +38,15 @@ export interface DaemonServer {
   auto: boolean;
   /** passes health.url but not health.url2 (restricted access) */
   limited: boolean;
+  /** download speed of health.speedtest_url, Mbit/s (#95); negative: the last download
+   * failed; absent: not measured (or a package before #95) */
+  speed?: number | null;
+  /** when speed was measured */
+  speed_tested?: number | null;
 }
+
+/** what the daemon chooses the server by (health.auto_mode, #95) */
+export type AutoMode = 'ping' | 'speed' | 'balanced';
 
 export interface LastSwitch {
   from?: string | null;
@@ -95,6 +103,13 @@ export interface StatusUp extends StatusBase {
   /** the active server was chosen by hand (select) and stays until auto(); absent in
    * packages before #78 */
   manual?: boolean;
+  /** health.auto_mode; absent in packages before #95 */
+  auto_mode?: AutoMode;
+  /** the best server by ping and speed together whatever the mode; absent until a server
+   * has a speed */
+  optimal?: string | null;
+  /** the speed test of the servers; absent: off (speedtest_url off) or a package before #95 */
+  speedtest?: { running: boolean; runs: number; last?: number | null; url: string } | null;
 }
 
 export type Status = StatusUp | StatusDown;
@@ -277,6 +292,12 @@ export class XvpnApi {
   /** tests all servers; wait for status().tests >= run */
   test(): Promise<TestReply> {
     return this.call('test');
+  }
+
+  /** measures the download speed of all live servers (#95); wait for
+   * status().speedtest.runs >= run */
+  speedtest(): Promise<TestReply> {
+    return this.call('speedtest');
   }
 
   select(id: string): Promise<OkReply> {

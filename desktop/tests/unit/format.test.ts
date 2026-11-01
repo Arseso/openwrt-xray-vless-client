@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { setLang } from '../../src/core/i18n';
-import { bytes, dur, ms, speed } from '../../src/ui/format';
+import { bytes, dur, mbit, ms, speed } from '../../src/ui/format';
 import { matches } from '../../src/views/servers';
 import { STATUS_UP } from './fake';
 
@@ -17,6 +17,16 @@ describe('format', () => {
     setLang('ru');
     expect(speed(137_500)).toBe('1,1 Мбит/с');
     expect(dur(90061)).toBe('1 д 1 ч');
+  });
+
+  it('server speed in Mbit/s (#95)', () => {
+    setLang('en');
+    expect(mbit(92.4)).toBe('92.4 Mbit/s');
+    expect(mbit(92)).toBe('92 Mbit/s');
+    expect(mbit(-1)).toBe('failed');
+    expect(mbit(undefined)).toBe('—');
+    setLang('ru');
+    expect(mbit(7.5)).toBe('7,5 Мбит/с');
   });
 
   it('server filter by words', () => {

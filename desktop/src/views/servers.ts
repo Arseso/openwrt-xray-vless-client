@@ -1,12 +1,13 @@
 // Tab «Серверы» (#78): the servers of the daemon with ping, quarantine, restricted access
-// and auto selection (#60); Use (select), Auto (set_auto), Test all (test). The list
-// comes with the shared poll, no call of its own.
+// and auto selection (#60), download speed and the optimal one (#95); Use (select), Auto
+// (set_auto), Test all (test), Measure speed (speedtest). The list comes with the shared
+// poll, no call of its own.
 
 import { DaemonServer, Status } from '../api/xvpn';
 import { t } from '../i18n/servers';
 import { clear, h } from '../ui/dom';
 import { errorText } from '../ui/errors';
-import { ping } from '../ui/format';
+import { ago, mbit, ping } from '../ui/format';
 import { registerView } from './registry';
 
 export function matches(s: DaemonServer, q: string): boolean {
@@ -26,14 +27,17 @@ registerView({
     // test(): done once status.tests reaches this run
     let waitRun: number | null = null;
     let testsAt = 0;
+    // speedtest(): done once status.speedtest.runs reaches this run
+    let speedRun: number | null = null;
     let error: string | null = null;
 
     const testBtn = h('button', { class: 'primary' }, t('test_all'));
+    const speedBtn = h('button', { title: t('speedtest_hint') }, t('speedtest'));
     const filter = h('input', { type: 'search', placeholder: t('filter'), oninput: () => { query = filter.value.trim(); render(ctx.poller.status); } });
     const note = h('div');
     const table = h('div', { class: 'servers' });
     el.replaceChildren(h('section', {},
-      h('div', { class: 'toolbar' }, h('h2', {}, t('title')), h('span', { class: 'spacer' }), testBtn),
+      h('div', { class: 'toolbar' }, h('h2', {}, t('title')), h('span', { class: 'spacer' }), speedBtn, testBtn),
       filter, note, table));
 
     const act = async (fn: () => Promise<{ ok: boolean; error?: string }>) => {
@@ -59,9 +63,17 @@ registerView({
       return r;
     });
 
-    const row = (s: DaemonServer, active: boolean, online: boolean) => {
+    speedBtn.onclick = () => void act(async () => {
+      const r = await ctx.xvpn.speedtest();
+      if (r.ok && r.run != null)
+        speedRun = r.run;
+      return r;
+    });
+
+    const row = (s: DaemonServer, active: boolean, online: boolean, st: Status) => {
       const flags = [
         active && h('span', { class: 'badge ok' }, t('active')),
+        st.running && st.optimal === s.id && h('span', { class: 'badge', title: t('optimal_hint') }, t('optimal')),
         s.quarantined && h('span', { class: 'badge warn', title: t('quarantined_hint') }, t('quarantined')),
         s.limited && h('span', { class: 'badge warn', title: t('limited_hint') }, t('limited')),
         !s.auto && h('span', { class: 'badge', title: t('auto_hint') }, t('excluded')),
@@ -75,6 +87,7 @@ registerView({
         h('td', {}, s.proto),
         h('td', { class: 'mono' }, `${s.address}:${s.port}`),
         h('td', { class: 'num' }, ping(s.latency)),
+        h('td', { class: 'num', title: s.speed_tested ? t('speed_hint', { ago: ago(st.time, s.speed_tested) }) : '' }, mbit(s.speed)),
         h('td', {}, flags),
         h('td', {}, auto),
         h('td', {}, h('button', {
@@ -93,6 +106,13 @@ registerView({
       const testing = !!up && (up.testing || waitRun != null);
       testBtn.disabled = !up || busy || testing;
       testBtn.textContent = testing ? t('testing') : t('test_all');
+      const runs = up?.speedtest?.runs ?? 0;
+      if (speedRun != null && (!up?.speedtest || runs >= speedRun))
+        speedRun = null;
+      const measuring = !!up?.speedtest && (up.speedtest.running || speedRun != null);
+      speedBtn.hidden = !up?.speedtest;
+      speedBtn.disabled = !up || busy || measuring;
+      speedBtn.textContent = measuring ? t('speedtest_running') : t('speedtest');
       clear(note,
         error ? h('p', { class: 'error' }, error) : null,
         st && !up ? h('p', { class: 'warn' }, t('stopped')) : null);
@@ -101,9 +121,9 @@ registerView({
       clear(table,
         !all.length ? h('p', { class: 'muted' }, up ? t('empty') : '') : !list.length ? h('p', { class: 'muted' }, t('none_match')) : h('table', {},
           h('thead', {}, h('tr', {},
-            h('th', {}, t('name')), h('th', {}, t('proto')), h('th', {}, t('address')), h('th', { class: 'num' }, t('ping')),
+            h('th', {}, t('name')), h('th', {}, t('proto')), h('th', {}, t('address')), h('th', { class: 'num' }, t('ping')), h('th', { class: 'num' }, t('speed')),
             h('th', {}), h('th', { title: t('auto_hint') }, t('auto')), h('th', {}))),
-          h('tbody', {}, list.map((s) => row(s, s.id === up!.active, !!up)))),
+          h('tbody', {}, list.map((s) => row(s, s.id === up!.active, !!up, up!)))),
         all.length ? h('p', { class: 'muted' }, t('count', { n: all.length })) : null);
     };
 
