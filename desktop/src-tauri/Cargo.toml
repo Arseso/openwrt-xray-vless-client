@@ -43,6 +43,8 @@ tauri-plugin-fs = "2"
 # with tauri-plugin-dialog above
 tauri-plugin-updater = "2"
 time = { version = "0.3", features = ["formatting"] }
+# routerpkg.rs: the ipk for ubus file write (already in the tree)
+base64 = "0.22"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # tray.rs: is there a StatusNotifierItem host (already in the tree through keyring)
@@ -50,7 +52,7 @@ dbus = "0.9"
 
 [dev-dependencies]
 rcgen = "0.13"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util"] }
 
 [profile.release]
 codegen-units = 1

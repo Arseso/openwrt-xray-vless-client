@@ -24,7 +24,21 @@ export type ErrorCode =
   | 'no_method' // ubus status 3
   | 'no_object' // ubus status 4 / JSON-RPC -32000
   | 'invalid_argument' // ubus status 2
-  | 'ubus'; // any other ubus status (detail.ubusStatus)
+  | 'ubus' // any other ubus status (detail.ubusStatus)
+  // the router package from the GitHub release (src-tauri/src/routerpkg.rs, src/core/routerpkg.ts)
+  | 'release_unreachable' // no connection to GitHub from this PC
+  | 'release_http' // GitHub answered another HTTP status (status)
+  | 'release_rate_limit' // the anonymous API limit of GitHub (60 an hour)
+  | 'release_bad' // not a release in the API answer
+  | 'release_no_asset' // the release has no luci-app-xvpn ipk
+  | 'release_no_digest' // the API gives no sha256 of the asset: it is not installed
+  | 'release_digest' // the downloaded file differs from the sha256 of the release
+  | 'release_too_big' // the asset is larger than the limit or than the API said
+  | 'need_root' // the session may not install packages: log in as root
+  | 'pkg_unsupported' // the router has no opkg (apk) or no way to install
+  | 'pkg_busy' // another install is running on the router
+  | 'pkg_failed' // opkg failed (detail.output)
+  | 'pkg_lost'; // the router did not come back with the new version in time
 
 export interface ErrorDetail {
   /** SHA-256 of the certificate the router presented, AA:BB:... */
@@ -42,6 +56,8 @@ export interface ErrorDetail {
   version?: string;
   api?: number;
   supported?: number;
+  /** pkg_failed: the end of the opkg output */
+  output?: string;
 }
 
 export class XvpnError extends Error {

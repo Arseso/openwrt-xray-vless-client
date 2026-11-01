@@ -6207,6 +6207,7 @@ dependencies = [
 name = "xvpn"
 version = "0.2.0"
 dependencies = [
+ "base64 0.22.1",
  "dbus",
  "keyring",
  "rcgen",
