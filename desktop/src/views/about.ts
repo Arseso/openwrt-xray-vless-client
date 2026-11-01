@@ -8,7 +8,7 @@ import { githubRelease } from '../api/release';
 import { tauriUpdater } from '../api/updater';
 import { AppContext, connection } from '../core/connection';
 import { lang } from '../core/i18n';
-import { PkgFlow, PkgState, compareVersions } from '../core/routerpkg';
+import { PkgFlow, PkgState, compareVersions, flowFor } from '../core/routerpkg';
 import { UpdateFlow, UpdateState } from '../core/updater';
 import { t } from '../i18n/about';
 import { h } from '../ui/dom';
@@ -48,18 +48,14 @@ function render(box: HTMLElement, s: UpdateState): void {
   box.replaceChildren(h('p', {}, check), ...rows);
 }
 
-// one flow per connection: an install goes on when the tab is closed
-let pkg: { ctx: AppContext; flow: PkgFlow } | null = null;
-
+// one flow per router profile (src/core/routerpkg.ts flowFor): an install goes on when the
+// tab is closed, and a reconnect meanwhile gets the same flow, not a second install
 function pkgFlow(ctx: AppContext): PkgFlow {
-  if (pkg?.ctx !== ctx)
-    pkg = {
-      ctx, flow: new PkgFlow({
-        ubus: ctx.ubus, xvpn: ctx.xvpn, source: githubRelease, poller: ctx.poller,
-        refresh: () => connection.refreshPackage(),
-      }),
-    };
-  return pkg.flow;
+  return flowFor(ctx.profile.id, ctx, () => new PkgFlow({
+    ubus: ctx.ubus, xvpn: ctx.xvpn, source: githubRelease, poller: ctx.poller,
+    refresh: () => connection.refreshPackage(),
+    current: () => connection.context === ctx,
+  }));
 }
 
 function renderPkg(box: HTMLElement, ctx: AppContext, flow: PkgFlow, s: PkgState, app: string | null): void {
@@ -107,6 +103,8 @@ function renderPkg(box: HTMLElement, ctx: AppContext, flow: PkgFlow, s: PkgState
       break;
     case 'done':
       rows.push(h('p', {}, t('pkg_done', { version: s.version })));
+      for (const w of s.warnings)
+        rows.push(h('p', { class: 'warn' }, t('pkg_warning', { message: w })));
       break;
     case 'error':
       rows.push(h('p', { class: 'error' }, t('pkg_error', { message: errorText(s.error) })));

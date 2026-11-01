@@ -31,8 +31,10 @@ export type ErrorCode =
   | 'release_rate_limit' // the anonymous API limit of GitHub (60 an hour)
   | 'release_bad' // not a release in the API answer
   | 'release_no_asset' // the release has no luci-app-xvpn ipk
-  | 'release_no_digest' // the API gives no sha256 of the asset: it is not installed
-  | 'release_digest' // the downloaded file differs from the sha256 of the release
+  | 'release_unsigned' // the release has no SHA256SUMS with its signature
+  | 'release_signature' // SHA256SUMS is not signed with the key built into the app
+  | 'release_no_digest' // the asset is not in SHA256SUMS: it is not installed
+  | 'release_digest' // the downloaded file differs from SHA256SUMS (or from the API digest)
   | 'release_too_big' // the asset is larger than the limit or than the API said
   | 'need_root' // the session may not install packages: log in as root
   | 'pkg_unsupported' // the router has no opkg (apk) or no way to install

@@ -36,6 +36,7 @@ export const t = strings({
     'pkg_step.install': 'Installing (opkg)…',
     'pkg_step.reconnect': 'Waiting for the router: its services restart…',
     pkg_done: 'luci-app-xvpn {version} is installed.',
+    pkg_warning: 'Not everything got installed: {message}',
     pkg_error: 'Not installed: {message}',
   },
   ru: {
@@ -71,6 +72,7 @@ export const t = strings({
     'pkg_step.install': 'Установка (opkg)…',
     'pkg_step.reconnect': 'Ожидание роутера: перезапускаются службы…',
     pkg_done: 'luci-app-xvpn {version} установлен.',
+    pkg_warning: 'Установилось не всё: {message}',
     pkg_error: 'Не установлено: {message}',
   },
 });

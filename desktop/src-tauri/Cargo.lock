@@ -6210,6 +6210,7 @@ dependencies = [
  "base64 0.22.1",
  "dbus",
  "keyring",
+ "minisign-verify",
  "rcgen",
  "reqwest 0.12.28",
  "rustls",

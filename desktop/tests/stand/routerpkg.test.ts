@@ -3,12 +3,13 @@
 //   XVPN_PKG_OLD  a directory with the ipk files installed by opkg first (the release
 //                 v0.2.0: no helper yet, the upgrade goes through LuCI's package manager)
 //   XVPN_PKG_NEW  the ipk files the test serves as the latest release (built with a newer
-//                 PKG_RELEASE: sh scripts/build.sh); the sha256 check is Rust's (cargo test)
+//                 PKG_RELEASE: sh scripts/build.sh); the signature of SHA256SUMS is Rust's
+//                 (cargo test), the sha256 of each file the helper checks on the router
 //   XVPN_CONTAINER the stand container
 // The app reconnects by itself: the Connection of the app sees the new version.
 
 import { execFileSync } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -32,7 +33,10 @@ function inStand(cmd: string, input?: string | Buffer): string {
 
 function dirSource(dir: string): ReleaseSource {
   const names = readdirSync(dir).filter((n) => n.endsWith('.ipk'));
-  const release: Release = { tag: 'v-stand', url: 'file://' + dir, assets: names.map((name) => ({ name, size: 0, verified: true })) };
+  const sha = (n: string) => createHash('sha256').update(readFileSync(join(dir, n))).digest('hex');
+  const release: Release = {
+    tag: 'v-stand', url: 'file://' + dir, assets: names.map((name) => ({ name, size: 0, verified: true, sha256: sha(name) })),
+  };
   return {
     latest: async () => release,
     download: async (name) => readFileSync(join(dir, name)).toString('base64'),
@@ -105,6 +109,35 @@ describe.skipIf(!CONTAINER || !OLD || !NEW)(`router package upgrade against ${UR
     expect(inStand('cat /tmp/xvpn-pkg.out')).toMatch(/Installing luci-app-xvpn|Reinstalling/);
     expect(inStand('ls /tmp/xvpn-pkg-*.ipk 2>/dev/null || true').trim()).toBe('');
   }, 300_000);
+
+  it('pkg.sh: lists only the xvpn packages, checks the sha256, one job at a time', async () => {
+    const list = inStand('/usr/share/xvpn/pkg.sh list');
+    expect(list).toMatch(/^Package: luci-app-xvpn$/m);
+    expect([...list.matchAll(/^Package: (.*)$/gm)].map((m) => m[1]).every((n) => /^luci-(app-xvpn|i18n-(xvpn|base)-)/.test(n))).toBe(true);
+    const before = inStand('/usr/share/xvpn/pkg.sh status');
+    const run = (args: string) => {
+      try {
+        inStand(`/usr/share/xvpn/pkg.sh install ${args} 2>&1`);
+        return 'ok';
+      }
+      catch (e) {
+        return String((e as { stdout?: string }).stdout ?? e);
+      }
+    };
+    inStand('echo x >/tmp/xvpn-pkg-abc-x.ipk');
+    expect(run(`abc /tmp/xvpn-pkg-abc-x.ipk ${'0'.repeat(64)}`)).toContain('sha256 mismatch');
+    expect(run('abc /tmp/xvpn-pkg-abd-x.ipk 00')).toContain('bad file');
+    expect(run('abc /etc/passwd 00')).toContain('bad file');
+    // a live job holds the lock; a dead one does not
+    inStand('mkdir /tmp/xvpn-pkg.lock; sleep 30 </dev/null >/dev/null 2>&1 & echo $! >/tmp/xvpn-pkg.lock/pid');
+    expect(run(`abc /tmp/xvpn-pkg-abc-x.ipk ${'0'.repeat(64)}`)).toContain('an install is running');
+    inStand('kill $(cat /tmp/xvpn-pkg.lock/pid)');
+    expect(run(`abc /tmp/xvpn-pkg-abc-x.ipk ${'0'.repeat(64)}`)).toContain('sha256 mismatch');
+    // refusals touch neither the lock nor the state of the last job
+    expect(inStand('ls -d /tmp/xvpn-pkg.lock 2>/dev/null || true').trim()).toBe('');
+    expect(inStand('/usr/share/xvpn/pkg.sh status')).toBe(before);
+    inStand('rm -f /tmp/xvpn-pkg-abc-x.ipk');
+  });
 
   it('the rpcd user without root may not: need_root, nothing uploaded', async () => {
     const pass = randomBytes(12).toString('hex');
