@@ -36,6 +36,14 @@ impl Http {
         post(&c.http, &c.url, body, timeout_ms).await
     }
 
+    /// the same over a new connection, not a kept-alive one: after a firewall change an
+    /// established connection may still work while new ones do not (the check after
+    /// uci apply, src/core/apply.ts)
+    pub async fn post_fresh(&self, url: &str, pin: Option<&str>, body: &Value, timeout_ms: u64) -> Result<Value> {
+        let http = build(pin.map(str::to_string))?;
+        post(&http, url, body, timeout_ms).await
+    }
+
     /// after the address or pin of the profile changed
     pub fn forget(&self, key: &str) {
         self.clients.lock().unwrap().remove(key);

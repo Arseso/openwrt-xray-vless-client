@@ -43,6 +43,27 @@ describe('UCI and the session', () => {
     await expect(uci.apply()).resolves.toBeUndefined();
   });
 
+  it('a user without session access: a denial with staged changes is acl, no new login loses them', async () => {
+    const { router, ubus, uci } = uciSetup();
+    router.denied.add('session.access');
+    await uci.set('xvpn', 'main', { a: '1' });
+    router.denied.add('luci.xvpn.service');
+    await expect(ubus.call('luci.xvpn', 'service', { action: 'stop' })).rejects.toMatchObject({ code: 'acl' });
+    expect(router.logins).toBe(1);
+    expect(ubus.hasStaged).toBe(true);
+    await expect(uci.apply()).resolves.toBeUndefined();
+  });
+
+  it('a user without session access and nothing staged: a denial still tries one new login', async () => {
+    const { router, ubus } = uciSetup();
+    router.denied.add('session.access');
+    router.on('luci.xvpn.status', () => ({}));
+    await ubus.call('luci.xvpn', 'status');
+    router.expireSessions();
+    await expect(ubus.call('luci.xvpn', 'status')).resolves.toEqual({});
+    expect(router.logins).toBe(2);
+  });
+
   it('the relogin of the failing write itself reports session_lost', async () => {
     const { router, uci } = uciSetup();
     await uci.set('xvpn', 'main', { a: '1' });
@@ -157,6 +178,6 @@ describe('UbusClient', () => {
     await xvpn.update('sub1');
     await xvpn.subscriptions({ updating: false });
     // rpcd rejects null arguments: an absent sid is left out
-    expect(router.calls.map((c) => c.args)).toEqual([{}, { sid: 'sub1' }, { updating: false }]);
+    expect(router.calls.filter((c) => c.object === 'luci.xvpn').map((c) => c.args)).toEqual([{}, { sid: 'sub1' }, { updating: false }]);
   });
 });

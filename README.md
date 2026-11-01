@@ -394,7 +394,8 @@ config login 'xvpn_xvpn'
 
 `luci-app-xvpn-remote` — вызовы ubus `uci` (`get`, `changes`, `set`, `add`, `delete`, `rename`,
 `order`, `revert`, `commit`, `apply`, `confirm`, `rollback`), которые LuCI получает от `luci-base`,
-и `session destroy` (выход);
+`session access` (приложение отличает живую сессию от истёкшей и не теряет несохранённые
+изменения из-за лишнего входа) и `session destroy` (выход);
 к каким конфигам они применимы, решает `luci-app-xvpn` (только `xvpn`, `firewall` — на чтение).
 Под этим пользователем можно войти и в LuCI — там будут только страницы XVPN.
 
