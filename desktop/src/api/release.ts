@@ -9,7 +9,8 @@ import { invokeRust } from './transport';
 export interface ReleaseAsset {
   /** luci-app-xvpn_<version>_all.ipk, luci-i18n-xvpn-<lang>_<version>_all.ipk */
   name: string;
-  size: number;
+  /** null: unknown (the release found without the GitHub API) */
+  size: number | null;
   /** in the signed SHA256SUMS of the release; false: it is not downloaded (release_no_digest) */
   verified: boolean;
   /** from SHA256SUMS: the router checks the uploaded file against it before opkg */

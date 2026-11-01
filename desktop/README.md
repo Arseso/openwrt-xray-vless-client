@@ -265,13 +265,14 @@ Rust только показывает (`notify_show`).
    `luci-i18n-xvpn-<lang>` и `luci-i18n-base-<lang>`;
 3. последний релиз: Rust (`routerpkg.rs`, `pkg_latest`) спрашивает
    `api.github.com/repos/Arseso/openwrt-xray-vless-client/releases/latest` анонимно (60 запросов
-   в час с IP, затем `release_rate_limit`), берёт ассеты `luci-app-xvpn_*_all.ipk`,
+   в час с IP; сверх лимита — без API: тег из редиректа `github.com/<repo>/releases/latest`,
+   ipk — имена из подписанного `SHA256SUMS` релиза, размеры неизвестны, предел `MAX_SIZE`), берёт ассеты `luci-app-xvpn_*_all.ipk`,
    `luci-i18n-xvpn-*_all.ipk`, `SHA256SUMS` и `SHA256SUMS.sig` с адресами релизов этого
    репозитория и проверяет подпись `SHA256SUMS` открытым ключом обновлений приложения
    (`plugins.updater.pubkey` из `tauri.conf.json`, вшит в бинарь): нет подписи —
    `release_unsigned`, чужая — `release_signature`. SHA-256 ассета — строка `SHA256SUMS` (нет —
    ассет не ставится, `release_no_digest`); `digest` API, если есть, должен с ней совпасть.
-   Редиректы — не больше 5, только https и хосты GitHub. Web view получает имена, размеры и
+   Редиректы — не больше 5, только https и хосты GitHub. Web view получает имена, размеры (без API — `null`) и
    SHA-256 без URL; выбирает (`selectAssets`) самый новый пакет и самый новый перевод каждого
    языка роутера (у переводов LuCI своя версия по дате, `0.YYMMDD.x`).
 
