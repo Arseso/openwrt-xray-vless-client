@@ -10,6 +10,9 @@ import { b64, parse_link, parse_subscription } from 'xvpn.links';
 
 // Failed downloads are retried after this many seconds.
 const RETRY_AFTER = 1800;
+// The body goes to tmpfs (RAM): a wrong or hostile URL must not fill it (#17). Hundreds of
+// servers as links are well below; curl stops a larger one also without Content-Length.
+export const MAX_SIZE = 2 * 1024 * 1024;
 
 export function cache_path(sid) {
 	return `${SUBS_DIR}/${sid}.json`;
@@ -63,8 +66,8 @@ function download(sub, proxy_port) {
 	mkdir_p(RUN_DIR);
 	let hdr = `${RUN_DIR}/sub-${sub.id}.hdr`, body = `${RUN_DIR}/sub-${sub.id}.body`;
 	// the URL comes from UCI as is: no file://, scp:// and the like, also not through a redirect
-	let cmd = sprintf("curl -sS -L --proto =http,https --proto-redir =http,https --connect-timeout 10 --max-time 40 -A %s -D %s -o %s -w '%%{http_code}' %s %s 2>&1",
-		shq(sub.user_agent), shq(hdr), shq(body),
+	let cmd = sprintf("curl -sS -L --proto =http,https --proto-redir =http,https --connect-timeout 10 --max-time 40 --max-filesize %d -A %s -D %s -o %s -w '%%{http_code}' %s %s 2>&1",
+		MAX_SIZE, shq(sub.user_agent), shq(hdr), shq(body),
 		proxy_port ? `-x socks5h://127.0.0.1:${proxy_port}` : '',
 		shq(sub.url));
 
@@ -74,12 +77,44 @@ function download(sub, proxy_port) {
 	unlink(hdr);
 	unlink(body);
 
-	if (r.code != 0)
+	// 63: --max-filesize
+	if (r.code == 63)
+		res.error = `the answer is larger than ${MAX_SIZE / 1048576} MB`;
+	else if (r.code != 0)
 		res.error = trim(r.out) || `curl exit code ${r.code}`;
 	else if (code < 200 || code >= 300)
 		res.error = `HTTP ${code}`;
 	return res;
 }
+
+// A host no client can reach a server at: 0.0.0.0, ::, empty.
+function unspecified(a) {
+	return a == null || a == '' || a == '0.0.0.0' || match(a, /^\[?::\]?$/) != null;
+}
+
+// Loopback and private addresses: on the router or in its LAN, not a VPN server out there.
+function local_addr(a) {
+	a = lc(replace(a ?? '', /^\[|\]$/g, ''));
+	return a == 'localhost' || match(a, /^(127\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2[0-9]|3[01])\.)/) != null
+		|| a == '::1' || match(a, /^f[cd][0-9a-f]{2}:|^fe[89ab][0-9a-f]:/) != null;
+}
+
+// A panel (Marzban, Remnawave, 3x-ui) answers an expired or blocked subscription with one or
+// two placeholder "servers" named like "Subscription expired" at 0.0.0.0 or 127.0.0.1 (#17).
+// Servers at unspecified addresses are dropped; a list left empty, or left with only local
+// addresses while the cache had a server out there, is no update: the cache stays and the
+// error says why. old: the servers of the cache. { servers, dropped } or { error }.
+export function check_stub(servers, old, userinfo) {
+	let kept = filter(servers, (s) => !unspecified(s.address));
+	let public_ = (l) => length(filter(l ?? [], (s) => !unspecified(s.address) && !local_addr(s.address)));
+	if (!length(kept) || (!public_(kept) && public_(old))) {
+		let names = join(', ', map(slice(servers, 0, 2), (s) => `"${s.name}" (${s.address})`));
+		let exp = userinfo?.expire, d = exp ? gmtime(exp) : null;
+		let why = (exp && exp <= time()) ? sprintf(', the subscription expired on %04d-%02d-%02d', d.year, d.mon, d.mday) : '';
+		return { error: `only placeholder servers: ${names}${why}; the servers from the last update are kept` };
+	}
+	return { servers: kept, dropped: length(servers) - length(kept) };
+};
 
 // Updates one subscription. proxy_port: SOCKS port of the active server, or null.
 // Returns { changed, count, skipped, error }.
@@ -109,14 +144,23 @@ export function update(sub, proxy_port) {
 		return { changed: false, error: st.error };
 	}
 
+	let old = load_cache(sub.id);
+	let userinfo = parse_userinfo(dl.headers['subscription-userinfo']);
+	let stub = check_stub(parsed.servers, old?.servers, userinfo);
+	if (stub.error) {
+		st.error = stub.error;
+		st.userinfo = userinfo ?? st.userinfo;	// the expiry date shows up in the UI
+		mkdir_p(RUN_DIR);
+		write_json(status_path(sub.id), st);
+		return { changed: false, error: st.error };
+	}
 	let cache = {
 		format: parsed.format,
 		title: parse_title(dl.headers['profile-title']),
 		interval: int(dl.headers['profile-update-interval'] ?? 0) || null,
-		skipped: parsed.skipped,
-		servers: parsed.servers,
+		skipped: (parsed.skipped ?? 0) + stub.dropped,
+		servers: stub.servers,
 	};
-	let old = load_cache(sub.id);
 	// timestamp only changes with content, so unchanged subscriptions never hit the flash
 	cache.updated = (old && sprintf('%J', { ...old, updated: null }) == sprintf('%J', { ...cache, updated: null })) ? old.updated : time();
 
@@ -125,11 +169,11 @@ export function update(sub, proxy_port) {
 
 	st.error = null;
 	st.last_ok = time();
-	st.userinfo = parse_userinfo(dl.headers['subscription-userinfo']);
+	st.userinfo = userinfo;
 	mkdir_p(RUN_DIR);
 	write_json(status_path(sub.id), st);
 
-	return { changed, count: length(parsed.servers), skipped: parsed.skipped, error: null };
+	return { changed, count: length(stub.servers), skipped: cache.skipped, error: null };
 };
 
 // Seconds until the subscription is due for an update (<= 0 means now).

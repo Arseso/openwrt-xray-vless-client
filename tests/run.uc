@@ -5,7 +5,7 @@
 
 import { readfile, writefile, mkdir, stat } from 'fs';
 import { parse_link, parse_subscription, transport } from 'xvpn.links';
-import { parse_userinfo, assign_ids, list_change, known_ids, prune_no_auto, NO_AUTO_GRACE } from 'xvpn.subscription';
+import { parse_userinfo, assign_ids, list_change, known_ids, prune_no_auto, NO_AUTO_GRACE, check_stub, update, load_cache, load_status, MAX_SIZE } from 'xvpn.subscription';
 import { load_config, valid_bin, valid_url, fastest, auto_pick, best_of, balanced_scores, better, mbps, retry_delay, no_auto_ids, set_no_auto, mkdir_p, read_json, SUBS_DIR } from 'xvpn.util';
 import { build_index, generate, ports_error, config_key, set_active } from 'xvpn.xrayconf';
 import { render, resolve, fix_ifnames, ifnames_applied, table_names, rule_prefs, stale_routes, counters, counter_step } from 'xvpn.firewall';
@@ -765,6 +765,43 @@ ok('split xray: before the rule of the active server', index(rtags, 'direct') ==
 writefile(`${OUT}/config-split.json`, sprintf('%J', sconf));
 let nodom = generate({ ...scfg, split: { ...scfg.split, domain: [] } }, servers, idx);
 ok('split xray: no domains, no direct outbound', !length(filter(nodom.outbounds, (o) => o.tag == 'direct')));
+
+// #17: placeholder servers of an expired subscription and a too large answer keep the cache
+let srv = (name, address) => ({ name, address });
+let pub = [ srv('nl', 'nl.example.com'), srv('de', '203.0.113.5') ];
+eq('stub: servers at 0.0.0.0 are dropped', check_stub([ srv('Подписка истекла', '0.0.0.0'), ...pub ], pub), { servers: pub, dropped: 1 });
+ok('stub: only 0.0.0.0 and ::', match(check_stub([ srv('Подписка истекла', '0.0.0.0'), srv('Продлите', '::') ], null).error,
+	/^only placeholder servers: "Подписка истекла" \(0\.0\.0\.0\), "Продлите" \(::\); the servers from the last update are kept$/));
+ok('stub: loopback and private ones where the cache had public servers',
+	check_stub([ srv('a', '127.0.0.1') ], pub).error && check_stub([ srv('b', '192.168.1.5'), srv('c', '[fd00::1]'), srv('d', '172.20.0.1') ], pub).error);
+eq('stub: local servers without public ones before are a real list (a LAN server, itest)', check_stub([ srv('a', '127.0.0.1') ], [ srv('a', '127.0.0.1') ]).dropped, 0);
+eq('stub: 172.32 and 100.64 are no private ones', check_stub([ srv('a', '172.32.0.1'), srv('b', '100.64.0.1') ], pub).dropped, 0);
+ok('stub: the expiry date when it is over', match(check_stub([ srv('x', '0.0.0.0') ], pub, { expire: 1735689600 }).error, /expired on 2025-01-01;/));
+ok('stub: no date while it is not over', !match(check_stub([ srv('x', '0.0.0.0') ], pub, { expire: time() + 86400 }).error, /expired/));
+
+let www = `${OUT}/www`;
+mkdir(www);
+writefile(`${www}/good`, readfile(`${FIX}/sub-base64.txt`));
+writefile(`${www}/stub`, 'vless://00000000-0000-0000-0000-000000000000@0.0.0.0:1?type=tcp&security=none#Expired\n');
+writefile(`${www}/local`, 'vless://00000000-0000-0000-0000-000000000000@127.0.0.1:1?type=tcp&security=none#Expired\n');
+system(`dd if=/dev/zero of=${www}/big bs=1024 count=${MAX_SIZE / 1024 + 512} 2>/dev/null; uhttpd -p 127.0.0.1:18089 -h ${www}; sleep 1`);
+let ssub = (f) => ({ id: 'stubtest', url: `http://127.0.0.1:18089/${f}`, user_agent: 'test', via_tunnel: false });
+let u1 = update(ssub('good'), null), n1 = length(load_cache('stubtest')?.servers ?? []);
+ok('update: a real list', !u1.error && n1 > 0 && u1.count == n1);
+for (let f in [ 'stub', 'local' ]) {
+	let u = update(ssub(f), null);
+	ok(`update: ${f} placeholders keep the cache`, match(u.error ?? '', /^only placeholder servers/) && length(load_cache('stubtest').servers) == n1
+		&& load_status('stubtest').error == u.error);
+}
+let ub = update(ssub('big'), null);
+eq('update: a too large answer', [ ub.error, length(load_cache('stubtest').servers) ], [ 'the answer is larger than 2 MB', n1 ]);
+system('killall uhttpd');
+
+// #18: the rpcd ACL names exactly the methods of the plugin
+let acl = json(readfile(`${FIX}/../../luci-app-xvpn/root/usr/share/rpcd/acl.d/luci-app-xvpn.json`))['luci-app-xvpn'];
+let plugin = map(filter(split(readfile(`${FIX}/../../luci-app-xvpn/root/usr/share/rpcd/ucode/luci.xvpn`), '\n'),
+	(l) => match(l, /^\t[a-z_]+: \{$/)), (l) => match(l, /[a-z_]+/)[0]);
+eq('ACL of luci.xvpn: the methods of the plugin', sort([ ...acl.read.ubus['luci.xvpn'], ...acl.write.ubus['luci.xvpn'] ]), sort(plugin));
 
 print(`${passed} passed, ${failed} failed\n`);
 exit(failed ? 1 : 0);
