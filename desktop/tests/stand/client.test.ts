@@ -50,7 +50,8 @@ describe(`client against ${URL}`, () => {
     const { xvpn } = client();
     try {
       const pkg = await checkPackage(xvpn);
-      expect(pkg.version).toMatch(/^\d+\.\d+\.\d+-r\d+$/);
+      // "unknown": the files are copied, not installed by opkg/apk (scripts/luci.sh)
+      expect(pkg.version).toMatch(/^(\d+\.\d+\.\d+-r\d+|unknown)$/);
       expect(pkg.api).toBe(1);
       console.log('luci-app-xvpn', pkg.version, 'api', pkg.api);
     }
