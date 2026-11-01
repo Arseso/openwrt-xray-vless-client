@@ -115,6 +115,13 @@ describe('StatusPoller', () => {
     poller.stop();
   });
 
+  it('refresh of a stopped poller does nothing', async () => {
+    const { poller, source, names } = setup([up()]);
+    await poller.refresh();
+    expect(source.status).not.toHaveBeenCalled();
+    expect(names()).toEqual([]);
+  });
+
   it('refresh polls at once and restarts the interval', async () => {
     const { poller, source } = setup([up()]);
     poller.start();

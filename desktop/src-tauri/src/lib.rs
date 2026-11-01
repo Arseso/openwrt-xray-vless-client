@@ -16,6 +16,7 @@ mod profiles;
 mod screens;
 mod transport;
 mod tray;
+mod vpncheck;
 
 use std::sync::Arc;
 
@@ -25,8 +26,11 @@ pub fn run() {
     let core = commands::handler();
     let tray = tray::handler();
     let notify = notifications::handler();
+    let vpn = vpncheck::handler();
 
     tauri::Builder::default()
+        // first, as the plugin asks: a second start shows the window of the running app
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| tray::show_window(app)))
         .setup(|app| {
             let dir = app.path().app_config_dir()?;
             app.manage(commands::Core { profiles: Arc::new(profiles::Profiles::load(dir)), http: Default::default() });
@@ -41,6 +45,8 @@ pub fn run() {
                 tray(invoke)
             } else if cmd.starts_with("notify_") {
                 notify(invoke)
+            } else if cmd.starts_with("vpn_") {
+                vpn(invoke)
             } else {
                 core(invoke)
             }
