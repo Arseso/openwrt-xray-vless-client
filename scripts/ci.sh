@@ -175,17 +175,23 @@ desktop() {
 
 # what the release uploads besides the ipk: all of it, each .sig checked against the public
 # key of tauri.conf.json (a key other than the one the apps know would publish an update every
-# installed app refuses), latest.json for this version and tag
+# installed app refuses), latest.json for this version and tag, SHA256SUMS of the ipk files
+# signed with the same key (the app installs the router package only with it)
 desktop_assets() {
 	d=dist/desktop
 	for f in "$d"/xvpn_"$ver"_amd64.deb "$d"/xvpn_"$ver"_amd64.deb.sig "$d"/xvpn_"$ver"_amd64.AppImage \
-		"$d"/xvpn_"$ver"_amd64.AppImage.sig "$d"/xvpn_"$ver"_x64-setup.exe "$d"/xvpn_"$ver"_x64-setup.exe.sig "$d"/latest.json; do
+		"$d"/xvpn_"$ver"_amd64.AppImage.sig "$d"/xvpn_"$ver"_x64-setup.exe "$d"/xvpn_"$ver"_x64-setup.exe.sig "$d"/latest.json \
+		"$d"/SHA256SUMS "$d"/SHA256SUMS.sig; do
 		[ -s "$f" ] || { echo "ci: no $f (the updater key: scripts/desktop-build.sh)" >&2; return 1; }
 		echo "$f"
 	done
 	jq -e --arg v "$ver" --arg t "$tag" '.version == $v and (.platforms | length == 3)
 		and all(.platforms[]; .url | contains("/download/" + $t + "/"))' "$d/latest.json" >/dev/null \
 		|| { echo "ci: $d/latest.json is not for $ver / $tag" >&2; return 1; }
+	# the app installs the router packages of the release only by the signed SHA256SUMS:
+	# it must list exactly the ipk files uploaded (verify below checks the signature)
+	(cd dist && sha256sum -c --quiet desktop/SHA256SUMS >&2) || { echo "ci: $d/SHA256SUMS does not match dist/*.ipk" >&2; return 1; }
+	[ "$(wc -l < "$d/SHA256SUMS")" = "$(ls dist/*.ipk | wc -l)" ] || { echo "ci: $d/SHA256SUMS does not list every dist/*.ipk" >&2; return 1; }
 	sh scripts/desktop-build.sh verify >&2 || { echo "ci: the signatures do not match the public key of tauri.conf.json" >&2; return 1; }
 }
 
@@ -217,7 +223,8 @@ if [ "$MODE" = release ]; then
 - \`$ipk\` и \`luci-i18n-xvpn-*\` — роутер (OpenWrt 24.10)
 - \`xvpn_${ver}_x64-setup.exe\` — приложение для Windows (установщик NSIS)
 - \`xvpn_${ver}_amd64.AppImage\`, \`xvpn_${ver}_amd64.deb\` — приложение для Linux (оба обновляются из приложения)
-- \`*.sig\`, \`latest.json\` — подписи и манифест автообновления приложения"
+- \`*.sig\`, \`latest.json\` — подписи и манифест автообновления приложения
+- \`SHA256SUMS\`, \`SHA256SUMS.sig\` — хэши ipk, подписанные ключом приложения (по ним приложение обновляет пакет на роутере)"
 	# a draft first: gh creates the tag only when it is published, so a failed upload leaves
 	# no tag behind, and the next run uploads into the same draft
 	# shellcheck disable=SC2086 # one asset per line, no spaces in the names

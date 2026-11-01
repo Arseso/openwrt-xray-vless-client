@@ -13,7 +13,8 @@
 # Updates (#81): with the key of `tauri signer generate` in $KEYS/updater.key (password in
 # $KEYS/updater.pass, empty without it) the AppImage, the deb and the setup get .sig files
 # and dist/desktop/latest.json for tauri-plugin-updater is written, its URLs pointing at the
-# GitHub release $TAG. The build itself never sees the key (it runs npm scripts, build.rs of
+# GitHub release $TAG; the router packages in dist/ (scripts/build.sh) get
+# dist/desktop/SHA256SUMS with SHA256SUMS.sig, which the app checks before it installs them. The build itself never sees the key (it runs npm scripts, build.rs of
 # hundreds of crates, downloaded tools): a second container signs the finished packages,
 # without network, with no volumes and only the key file (desktop/docker/sign.sh), and checks
 # every signature against the public key of tauri.conf.json. The key is never in the
@@ -52,6 +53,8 @@ $DOCKER build -q -t "$IMAGE" desktop/docker >/dev/null
 sign() { # sign|verify
 	mode=$1
 	set -- -v "$PWD/desktop:/src:ro" -v "$PWD/dist/desktop:/out"
+	# the router packages of scripts/build.sh: SHA256SUMS of them, signed with the same key
+	[ ! -d dist ] || set -- "$@" -v "$PWD/dist:/ipk:ro"
 	if [ "$mode" = sign ]; then
 		set -- "$@" -v "$KEYS/updater.key:/key/updater.key:ro"
 		[ ! -f "$KEYS/updater.pass" ] || set -- "$@" -v "$KEYS/updater.pass:/key/updater.pass:ro"

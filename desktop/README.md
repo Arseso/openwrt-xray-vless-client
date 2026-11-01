@@ -31,6 +31,8 @@ desktop/
       version.ts       checkPackage(): версия пакета и совместимость API
       profiles.ts      профили роутеров (команды Rust)
       updater.ts       обновление приложения (команды updater_*)
+      release.ts       последний релиз GitHub с пакетом роутера (команды pkg_*)
+      opkg.ts          установка пакетов на роутер: file write/exec, pkg.sh или package-manager-call
     core/
       bus.ts           типизированная шина событий
       store.ts         наблюдаемый стор
@@ -40,6 +42,7 @@ desktop/
       history.ts       история пинга и скорости: кольцевой буфер, заменяемый источник
       i18n.ts          strings({ en, ru }), lang(), setLang()
       updater.ts       UpdateFlow: проверка по кнопке, установка после нативного вопроса Rust
+      routerpkg.ts     PkgFlow: luci-app-xvpn из релиза на роутер, сравнение версий opkg
       apply.ts         сохранение UCI: stage → apply с откатом → проверка связи → confirm
       diagnostics.ts   файл диагностики вкладки «Журнал» и маскировка секретов
     forms/             формы вкладок: validate.ts (проверки как в LuCI и load_config),
@@ -68,6 +71,7 @@ desktop/
     tray.rs            трей — TODO(#78)
     notifications.rs   уведомления: tauri-plugin-notification, команда notify_show
     updater.rs         обновление приложения: tauri-plugin-updater (#81)
+    routerpkg.rs       пакет роутера из последнего релиза: GitHub API, загрузка, sha256
     screens.rs         плагины вкладок #79: clipboard-manager, dialog, fs
                        (права — capabilities/screens.json)
   tests/unit/          vitest, фейковый роутер (fake.ts)
@@ -163,7 +167,8 @@ registerView({
 ### Rust-модули
 
 Команды маршрутизируются по префиксу имени: `tray_*` → `tray::handler()`,
-`notify_*` → `notifications::handler()`, `updater_*` → `updater::handler()`, остальное — ядро (`commands.rs`). Новая команда
+`notify_*` → `notifications::handler()`, `updater_*` → `updater::handler()`, `vpn_*` →
+`vpncheck::handler()`, `pkg_*` → `routerpkg::handler()`, остальное — ядро (`commands.rs`). Новая команда
 трея или уведомлений добавляется в свой модуль (`tauri::generate_handler!` в его
 `handler()`), `lib.rs` не трогается. У каждого модуля есть `init(app)`, вызывается из
 `setup`; плагины Tauri модуль регистрирует там же (`app.handle().plugin(...)`, как
@@ -246,6 +251,83 @@ Rust только показывает (`notify_show`).
 отсчётов (8 ч при 3 с), при смене роутера или переводе часов ПК назад начинается заново. Вкладка читает
 `historySource()`; история с роутера (#34) подменит источник через
 `setHistorySource()`. Графики — SVG без библиотек.
+
+## Пакет на роутере
+
+Вкладка «О программе», блок «Пакет на роутере» (`src/core/routerpkg.ts`, `PkgFlow`): ничего не
+делается само. «Проверить последний релиз»:
+
+1. права сессии (`session access`): `file write`/`file exec` и команда установки. Нет — `need_root`
+   («нужен вход root»), дальше ничего не спрашивается (rpcd-пользователь `luci-app-xvpn-remote`);
+2. что стоит: с помощником — блоки opkg status `luci-app-xvpn`, `luci-i18n-xvpn-*`,
+   `luci-i18n-base-*` (`pkg.sh list`: весь status-файл может не пройти через вывод `file exec`);
+   без него — имена из `file list /usr/lib/opkg/info` и версия из `luci.xvpn version`. Языки —
+   `luci-i18n-xvpn-<lang>` и `luci-i18n-base-<lang>`;
+3. последний релиз: Rust (`routerpkg.rs`, `pkg_latest`) спрашивает
+   `api.github.com/repos/Arseso/openwrt-xray-vless-client/releases/latest` анонимно (60 запросов
+   в час с IP, затем `release_rate_limit`), берёт ассеты `luci-app-xvpn_*_all.ipk`,
+   `luci-i18n-xvpn-*_all.ipk`, `SHA256SUMS` и `SHA256SUMS.sig` с адресами релизов этого
+   репозитория и проверяет подпись `SHA256SUMS` открытым ключом обновлений приложения
+   (`plugins.updater.pubkey` из `tauri.conf.json`, вшит в бинарь): нет подписи —
+   `release_unsigned`, чужая — `release_signature`. SHA-256 ассета — строка `SHA256SUMS` (нет —
+   ассет не ставится, `release_no_digest`); `digest` API, если есть, должен с ней совпасть.
+   Редиректы — не больше 5, только https и хосты GitHub. Web view получает имена, размеры и
+   SHA-256 без URL; выбирает (`selectAssets`) самый новый пакет и самый новый перевод каждого
+   языка роутера (у переводов LuCI своя версия по дате, `0.YYMMDD.x`).
+
+Подпись делает `desktop/docker/sign.sh` (контейнер без сети, смонтирован только ключ) вместе с
+подписями обновлений приложения: `SHA256SUMS` всех `dist/*.ipk` и `tauri signer sign`;
+`scripts/ci.sh release` проверяет подпись ключом из `tauri.conf.json` и что `SHA256SUMS`
+перечисляет ровно выкладываемые ipk.
+
+Показывается «установлена X, доступна Y». Версии сравниваются как в opkg (`compareVersions`:
+epoch, verrevcmp версии и ревизии). Y новее — «Установить Y…», та же — «Переустановить…» (если
+есть помощник, см. ниже), старее — ничего. Пакет не через opkg (`unknown`, файлы скопированы) —
+как «новее». Если релиз новее самого приложения, блок советует сначала обновить приложение.
+
+Установка после подтверждения в окне:
+
+1. все файлы скачиваются заранее (`pkg_download` по имени), размер больше 4 МиБ или больше
+   заявленного — `release_too_big`, SHA-256 не совпал — `release_digest`; до роутера в этих
+   случаях ничего не доходит;
+2. поллер останавливается: пока rpcd загружает плагины, опрос не видел бы `luci.xvpn` и счёл бы
+   пакет удалённым;
+3. `file write` кусками по 32 КиБ base64 (`append`; uhttpd принимает запрос до 64 КиБ), затем:
+   - помощник `/usr/share/xvpn/pkg.sh` (пакет новее 0.2.0-r1, ACL-группа `luci-app-xvpn-pkg` —
+     только root). Сначала `status`: идёт задание — `pkg_busy`, ничего не заливается. Файлы —
+     `/tmp/xvpn-pkg-<id>-<имя>` со случайным id задания; сбой заливки (любой, и без ответа) —
+     ошибка, свои файлы удаляются. `install <id> [--force-reinstall] файл sha256 …` берёт лок
+     (каталог `/tmp/xvpn-pkg.lock` с pid задания; лок умершего задания снимается), сверяет
+     `sha256sum` каждого файла и запускает `opkg install` в фоне. Фон нужен потому, что postinst
+     LuCI-пакета перезапускает rpcd (SIGHUP, re-exec), а rpcd убивает exec дольше 30 с.
+     Приложение спрашивает `status`, пока задание с его id не кончится: другой id — задание не
+     началось (`pkg_lost`, файлы удаляются); `lost` (задание убито) или код opkg не 0 — успех,
+     только если `luci-app-xvpn` новой версии в состоянии `installed` (postinst выполнен), при
+     ненулевом коде — с предупреждением;
+   - старый пакет без помощника — `package-manager-call install /tmp/upload.ipk` LuCI, по файлу.
+     Файл общий с LuCI: перед заливкой и после потерянного ответа приложение ждёт, пока уйдёт
+     `/tmp/ipkg.lock` (flock этого скрипта, `file list /tmp`), `pkg_busy` повторяет. Ошибка
+     перевода — предупреждение, ошибка основного пакета — провал. `--force-reinstall` скрипт
+     выбрасывает, поэтому переустановки нет;
+4. ответ на установку может не прийти (rpcd перезапустился под вызовом): тогда приложение ждёт
+   роутер. Результат — не ответ, а `luci.xvpn version` по новым соединениям: сказал новую версию —
+   готово, не сказал за 3 мин — `pkg_lost`. Сессия rpcd переживает SIGHUP, после полного
+   перезапуска `UbusClient` входит заново сам;
+5. поллер запускается снова и `connection.refreshPackage()` перечитывает версию в `ctx.pkg` и
+   состояние подключения (несовместимый `api` нового пакета переводит его в `failed`, как при
+   подключении) — только если контекст установки всё ещё текущий (не сменились профиль или
+   подключение). Поток один на профиль (`flowFor`): переподключение во время установки
+   показывает её же, вторую рядом не начать. Новая ACL-группа достаётся сессии при входе:
+   переустановка помощником после апгрейда со старого пакета — после переподключения.
+
+Стенд: `tests/stand/routerpkg.test.ts` ставит пакеты на стенд и потому запускается только с
+`XVPN_PKG_OLD` (каталог ipk, которые ставятся opkg сначала, например релиз v0.2.0) и `XVPN_PKG_NEW`
+(ipk, которые тест отдаёт как релиз, — собранные с большим `PKG_RELEASE`):
+
+```sh
+XVPN_URL=http://127.0.0.1:$PORT XVPN_CONTAINER=$NAME XVPN_PKG_OLD=… XVPN_PKG_NEW=… \
+  npx vitest run --config vitest.stand.config.ts tests/stand/routerpkg.test.ts
+```
 
 ## Подключение
 

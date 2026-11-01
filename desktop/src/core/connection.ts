@@ -146,6 +146,35 @@ export class Connection {
     this.state.set({ phase: 'failed', error });
   }
 
+  /**
+   * the package info again (after an upgrade from the app, src/core/routerpkg.ts): the
+   * new version in ctx.pkg and the state; an incompatible package fails the connection
+   */
+  refreshPackage(): Promise<void> {
+    const ctx = this.ctx;
+    return ctx ? this.recheck(this.gen, ctx.xvpn) : Promise.resolve();
+  }
+
+  private async recheck(gen: number, xvpn: XvpnApi): Promise<void> {
+    let p: PackageInfo;
+    try {
+      p = await checkPackage(xvpn);
+    }
+    catch (e) {
+      if (gen !== this.gen)
+        return;
+      const error = toXvpnError(e);
+      if (!error.offline)
+        this.fail(error);
+      return;
+    }
+    if (gen !== this.gen)
+      return;
+    if (this.ctx)
+      this.ctx.pkg = p;
+    this.state.set({ phase: 'online', pkg: p, error: null });
+  }
+
   private online(profile: Profile, pkg: PackageInfo, ubus: UbusClient, xvpn: XvpnApi): void {
     const poller = new StatusPoller(xvpn, this.bus, { intervalMs: this.opts.intervalMs });
     this.ctx = { profile, pkg, ubus, xvpn, uci: new UciApi(ubus), poller, bus: this.bus };
@@ -162,21 +191,7 @@ export class Connection {
           this.fail(error);
       }),
       // the package may have been upgraded while the router was away
-      this.bus.on('router-up', () => {
-        checkPackage(xvpn).then((p) => {
-          if (gen !== this.gen)
-            return;
-          if (this.ctx)
-            this.ctx.pkg = p;
-          this.state.set({ phase: 'online', pkg: p, error: null });
-        }, (e) => {
-          if (gen !== this.gen)
-            return;
-          const error = toXvpnError(e);
-          if (!error.offline)
-            this.fail(error);
-        });
-      }),
+      this.bus.on('router-up', () => void this.recheck(gen, xvpn)),
     );
     this.state.set({ phase: 'online', pkg, error: null });
     poller.start();

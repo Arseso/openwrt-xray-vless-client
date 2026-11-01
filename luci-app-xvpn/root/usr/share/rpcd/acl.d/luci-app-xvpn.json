@@ -27,5 +27,26 @@
 				"uci": [ "set", "add", "delete", "rename", "order", "revert", "commit", "apply", "confirm", "rollback" ]
 			}
 		}
+	},
+	"luci-app-xvpn-pkg": {
+		"description": "Grant installing luci-app-xvpn from the desktop app (root only, see /usr/share/xvpn/pkg.sh)",
+		"read": {
+			"file": {
+				"/usr/share/xvpn/pkg.sh list": [ "exec" ],
+				"/usr/share/xvpn/pkg.sh status": [ "exec" ]
+			},
+			"ubus": {
+				"file": [ "exec" ]
+			}
+		},
+		"write": {
+			"file": {
+				"/tmp/xvpn-pkg-*.ipk": [ "write" ],
+				"/usr/share/xvpn/pkg.sh install *": [ "exec" ]
+			},
+			"ubus": {
+				"file": [ "write", "exec", "remove" ]
+			}
+		}
 	}
 }

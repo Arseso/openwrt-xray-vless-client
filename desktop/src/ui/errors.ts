@@ -14,6 +14,10 @@ export function errorText(e: unknown): string {
       version: d.version ?? '?', api: d.api ?? '?', supported: d.supported ?? '?',
       what: (d.api ?? 0) > (d.supported ?? 0) ? t('what_app') : t('what_package'),
     });
+  case 'release_http':
+    return t('error.release_http', { status: d.status ?? '?' });
+  case 'pkg_failed':
+    return t('error.pkg_failed', { output: d.output || err.message });
   case 'ubus':
     return t('error.ubus', { message: err.message });
   default:
