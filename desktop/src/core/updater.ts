@@ -1,15 +1,16 @@
 // The update flow of the tab «О программе» (src/views/about.ts): nothing is checked or
-// installed by itself. check() runs on the button; an update found is installed only
-// through ask() and then confirm() (the user agreed), and only the version that was shown.
+// installed by itself. check() runs on the button; install() on «Install…» hands over to
+// Rust, which asks the user in a native dialog (no script here can skip it) and installs
+// only the version that was shown. A «no» there brings the update back.
 
 import { Available, UpdaterApi } from '../api/updater';
+import { Lang } from './i18n';
 
 export type UpdateState =
   | { phase: 'idle' }
   | { phase: 'checking' }
   | { phase: 'latest'; current: string }
   | { phase: 'available'; current: string; update: Available }
-  | { phase: 'confirm'; current: string; update: Available }
   | { phase: 'installing'; current: string; update: Available }
   | { phase: 'error'; message: string };
 
@@ -53,30 +54,17 @@ export class UpdateFlow {
     }
   }
 
-  /** the user pressed «Install»: ask before anything is downloaded */
-  ask(): void {
+  /** «Install…»: Rust asks the user, then the app restarts when it is installed */
+  async install(lang: Lang): Promise<void> {
     const s = this.get();
-    if (s.phase === 'available' && s.update.installable)
-      this.set({ ...s, phase: 'confirm' });
-  }
-
-  cancel(): void {
-    const s = this.get();
-    if (s.phase === 'confirm')
-      this.set({ ...s, phase: 'available' });
-  }
-
-  /** the user agreed: the app restarts when it is installed */
-  async confirm(): Promise<void> {
-    const s = this.get();
-    if (s.phase !== 'confirm')
+    if (s.phase !== 'available' || !s.update.installable)
       return;
     this.set({ ...s, phase: 'installing' });
     try {
-      await this.api.install(s.update.version);
+      await this.api.install(s.update.version, lang);
     }
     catch (e) {
-      this.set({ phase: 'error', message: message(e) });
+      this.set(message(e) === 'cancelled' ? s : { phase: 'error', message: message(e) });
     }
   }
 }

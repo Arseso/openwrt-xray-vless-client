@@ -17,11 +17,12 @@
 #                DESKTOP_ITEST=1 also runs scripts/desktop-itest.sh against the LuCI stand
 #
 #   sh scripts/ci.sh           check HEAD
-#   sh scripts/ci.sh release   check HEAD (must be origin/main), tag it v<PKG_VERSION>
-#                              (v<PKG_VERSION>-r<PKG_RELEASE> when PKG_RELEASE is not 1),
-#                              push the tag and publish a GitHub Release with the ipk and
-#                              the desktop app (all its packages signed, latest.json for
-#                              the updater; without the key a release is refused)
+#   sh scripts/ci.sh release   check HEAD (must be origin/main) and publish the GitHub
+#                              Release v<PKG_VERSION> (v<PKG_VERSION>-r<PKG_RELEASE> when
+#                              PKG_RELEASE is not 1) with the ipk and the desktop app (all
+#                              its packages signed with the key tauri.conf.json knows,
+#                              latest.json for the updater): a draft first, its tag is made
+#                              on publishing; a run that failed half way goes on from it
 #
 # Logs: .ci/<step>.log. Variables: DOCKER (default docker --context default), NAME
 # (itest container, by default unique per checkout, so worktrees do not collide),
@@ -45,16 +46,36 @@ rel=$(sed -n 's/^PKG_RELEASE:=//p' luci-app-xvpn/Makefile)
 tag="v$ver"; [ "$rel" = 1 ] || tag="v$ver-r$rel"
 ipk="luci-app-xvpn_${ver}-r${rel}_all.ipk"
 
+# the updater key of the desktop app (scripts/desktop-build.sh signs with it)
+KEYS=${KEYS:-$HOME/.config/xvpn-desktop}
+export KEYS
+# a release that stopped half way (upload failed): the tag exists only once it is published
+# (gh creates it then), a draft release of HEAD is taken up again; see the end
+resume=
 if [ "$MODE" = release ]; then
 	[ -z "$(git status --porcelain)" ] || die "uncommitted changes"
+	command -v jq >/dev/null || die "jq is needed to check latest.json"
+	gh auth status >/dev/null 2>&1 || die "gh is not logged in (gh auth login): the release could not be uploaded"
 	git fetch -q origin main --tags
 	[ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] \
 		|| die "HEAD is not origin/main: a release is made from the pushed main"
-	! git rev-parse -q --verify "refs/tags/$tag" >/dev/null \
-		|| die "tag $tag already exists: raise PKG_VERSION or PKG_RELEASE in luci-app-xvpn/Makefile"
-	[ -f "$HOME/.config/xvpn-desktop/updater.key" ] || [ -f "${KEYS:-}/updater.key" ] \
-		|| die "no updater key (~/.config/xvpn-desktop/updater.key): the desktop app would be unsigned"
-	command -v jq >/dev/null || die "jq is needed to check latest.json"
+	draft=$(gh release view "$tag" --repo "$REPO" --json isDraft --jq .isDraft 2>/dev/null) || draft=none
+	if git rev-parse -q --verify "refs/tags/$tag" >/dev/null || [ "$draft" = false ]; then
+		die "release $tag exists: raise PKG_VERSION or PKG_RELEASE in luci-app-xvpn/Makefile"
+	fi
+	if [ "$draft" = true ]; then
+		[ "$(gh release view "$tag" --repo "$REPO" --json targetCommitish --jq .targetCommitish)" = "$(git rev-parse HEAD)" ] \
+			|| die "draft release $tag is of another commit: delete it (gh release delete $tag) or release that commit"
+		resume=1
+	fi
+	[ -f "$KEYS/updater.key" ] || die "no updater key $KEYS/updater.key: the desktop app would be unsigned"
+	# the app has PKG_VERSION only: a -rN with another desktop/ would not reach the updater
+	# (same version as the previous release)
+	if [ "$rel" != 1 ]; then
+		prev=$(git tag -l "v$ver" "v$ver-r*" | sort -V | tail -1)
+		[ -z "$prev" ] || git diff --quiet "$prev" HEAD -- desktop/ \
+			|| die "desktop/ changed since $prev: the updater would not see it, raise PKG_VERSION instead of PKG_RELEASE"
+	fi
 elif [ -n "$(git status --porcelain)" ]; then
 	echo "ci: uncommitted changes are not checked, only HEAD $(git rev-parse --short HEAD)" >&2
 fi
@@ -152,17 +173,20 @@ desktop() {
 	rm -rf dist/desktop && mkdir -p dist && cp -r "$SRC/dist/desktop" dist/desktop
 }
 
-# what the release uploads besides the ipk; all of it, signed, or the release is refused
+# what the release uploads besides the ipk: all of it, each .sig checked against the public
+# key of tauri.conf.json (a key other than the one the apps know would publish an update every
+# installed app refuses), latest.json for this version and tag
 desktop_assets() {
 	d=dist/desktop
-	for f in "$d"/xvpn_"$ver"_amd64.deb "$d"/xvpn_"$ver"_amd64.AppImage "$d"/xvpn_"$ver"_amd64.AppImage.sig \
-		"$d"/xvpn_"$ver"_x64-setup.exe "$d"/xvpn_"$ver"_x64-setup.exe.sig "$d"/latest.json; do
+	for f in "$d"/xvpn_"$ver"_amd64.deb "$d"/xvpn_"$ver"_amd64.deb.sig "$d"/xvpn_"$ver"_amd64.AppImage \
+		"$d"/xvpn_"$ver"_amd64.AppImage.sig "$d"/xvpn_"$ver"_x64-setup.exe "$d"/xvpn_"$ver"_x64-setup.exe.sig "$d"/latest.json; do
 		[ -s "$f" ] || { echo "ci: no $f (the updater key: scripts/desktop-build.sh)" >&2; return 1; }
 		echo "$f"
 	done
-	jq -e --arg v "$ver" --arg t "$tag" '.version == $v and (.platforms | length == 2)
+	jq -e --arg v "$ver" --arg t "$tag" '.version == $v and (.platforms | length == 3)
 		and all(.platforms[]; .url | contains("/download/" + $t + "/"))' "$d/latest.json" >/dev/null \
 		|| { echo "ci: $d/latest.json is not for $ver / $tag" >&2; return 1; }
+	sh scripts/desktop-build.sh verify >&2 || { echo "ci: the signatures do not match the public key of tauri.conf.json" >&2; return 1; }
 }
 
 echo "ci: HEAD $(git rev-parse --short HEAD), package $ipk"
@@ -194,8 +218,16 @@ if [ "$MODE" = release ]; then
 - \`xvpn_${ver}_x64-setup.exe\` — приложение для Windows (установщик NSIS)
 - \`xvpn_${ver}_amd64.AppImage\`, \`xvpn_${ver}_amd64.deb\` — приложение для Linux (обновляется само только AppImage)
 - \`*.sig\`, \`latest.json\` — подписи и манифест автообновления приложения"
-	git tag -a "$tag" -m "$tag"
-	git push origin "refs/tags/$tag"
+	# a draft first: gh creates the tag only when it is published, so a failed upload leaves
+	# no tag behind, and the next run uploads into the same draft
 	# shellcheck disable=SC2086 # one asset per line, no spaces in the names
-	gh release create "$tag" dist/*.ipk $assets --repo "$REPO" --title "$tag" --notes "$notes" --generate-notes --verify-tag
+	if [ -z "$resume" ]; then
+		gh release create "$tag" --draft --target "$(git rev-parse HEAD)" --repo "$REPO" --title "$tag" \
+			--notes "$notes" --generate-notes || die "could not create the draft release $tag"
+	fi
+	gh release upload "$tag" dist/*.ipk $assets --clobber --repo "$REPO" \
+		|| die "upload to the draft $tag failed: run sh scripts/ci.sh release again to go on"
+	gh release edit "$tag" --draft=false --repo "$REPO" || die "could not publish $tag: run again to go on"
+	git fetch -q origin --tags
+	echo "ci: released $tag"
 fi

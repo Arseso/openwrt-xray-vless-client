@@ -1,8 +1,10 @@
 // Tab «О программе»: the versions and the update of the app (#81). Updates are checked
-// on the button only and installed only after the user confirmed (src/core/updater.ts).
+// on the button only and installed only after the user said yes in the native dialog of
+// the install command (src/core/updater.ts).
 
 import { getVersion } from '@tauri-apps/api/app';
 import { tauriUpdater } from '../api/updater';
+import { lang } from '../core/i18n';
 import { UpdateFlow, UpdateState } from '../core/updater';
 import { t } from '../i18n/about';
 import { h } from '../ui/dom';
@@ -23,19 +25,13 @@ function render(box: HTMLElement, s: UpdateState): void {
     rows.push(h('p', {}, t('latest', { current: s.current })));
     break;
   case 'available':
-  case 'confirm':
     rows.push(h('p', {}, t('available', { version: s.update.version, current: s.current })));
     if (s.update.notes)
       rows.push(h('pre', { class: 'notes' }, s.update.notes));
-    if (!s.update.installable)
-      rows.push(h('p', { class: 'muted' }, t('deb'), ' ', RELEASES));
-    else if (s.phase === 'available')
-      rows.push(h('button', { class: 'primary', onclick: () => flow.ask() }, t('install')));
+    if (s.update.installable)
+      rows.push(h('button', { class: 'primary', onclick: () => void flow.install(lang()) }, t('install')));
     else
-      rows.push(h('p', {}, t('confirm', { version: s.update.version })),
-        h('p', {},
-          h('button', { class: 'primary', onclick: () => void flow.confirm() }, t('yes')), ' ',
-          h('button', { onclick: () => flow.cancel() }, t('cancel'))));
+      rows.push(h('p', { class: 'muted' }, t('manual'), ' ', RELEASES));
     break;
   case 'installing':
     rows.push(h('p', {}, t('installing', { version: s.update.version })));

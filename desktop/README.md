@@ -183,7 +183,7 @@ sh scripts/desktop-itest.sh        # клиент против стенда scri
 ```
 
 Кэш cargo, npm, target и MSVC SDK cargo-xwin — в docker-томах `xvpn-desktop-cargo`,
-`xvpn-desktop-npm`, `xvpn-desktop-target`, `xvpn-desktop-xwin`, инструменты бандлера — `xvpn-desktop-tools`. `TARGETS=linux` — без
+`xvpn-desktop-npm`, `xvpn-desktop-target`, `xvpn-desktop-xwin`. `TARGETS=linux` — без
 Windows. Хост слабый: тяжёлые команды параллельные сессии запускают под общим замком
 `flock ~/.cache/xvpn-heavy.lock <команда>`.
 
@@ -217,33 +217,50 @@ npx tauri build --bundles msi,nsis          # src-tauri\target\release\bundle\{m
 ### Обновления
 
 `tauri-plugin-updater` (`src-tauri/src/updater.rs`, вкладка «О программе»): проверка — только
-по кнопке, установка — только после подтверждения, той версии, что показана. Манифест —
-`latest.json` последнего релиза
+по кнопке; установку команда `updater_install` начинает с нативного диалога со своим текстом
+(`tauri-plugin-dialog`) — без «Установить» в нём ничего не скачивается, и ни один скрипт в
+web view этот вопрос не обойдёт. Ставится только версия, найденная последней проверкой.
+Манифест — `latest.json` последнего релиза
 (`https://github.com/Arseso/openwrt-xray-vless-client/releases/latest/download/latest.json`),
 пакет проверяется подписью по публичному ключу из `tauri.conf.json` (`plugins.updater.pubkey`).
-Обновляются установка из NSIS (Windows, `installMode: passive`) и AppImage (Linux); установка
-из deb не обновляется сама — приложение показывает новую версию и просит поставить deb
-из релиза. JS-API плагина web view не выдан: у неё только команды `updater_check` и
-`updater_install`.
+Обновляются установка из NSIS (Windows, `installMode: passive`), AppImage и deb (Linux: плагин
+ставит deb через `dpkg` с `pkexec`); тип установки плагин берёт из бинаря (сборщик Tauri его туда
+записывает). MSI, собранный вручную, rpm и голый бинарь не обновляются — приложение показывает
+новую версию и ссылку на релиз. JS-API плагинов web view не выдан: у неё только команды
+`updater_check` и `updater_install`.
 
-Ключ подписи — вне репозитория: `~/.config/xvpn-desktop/updater.key` (600), пароль — в
-`updater.pass` рядом (нет файла — пустой). Создан так:
+Ключ подписи — вне репозитория: `~/.config/xvpn-desktop/updater.key` (600; другой каталог —
+`KEYS`), пароль — в `updater.pass` рядом (нет файла — пустой). Создан так:
 
 ```sh
 npx tauri signer generate --ci -p "" -w ~/.config/xvpn-desktop/updater.key
 ```
 
-С ключом `desktop-build.sh` подписывает AppImage и установщик (`*.sig`) и пишет
-`dist/desktop/latest.json` со ссылками на релиз `TAG` (по умолчанию `v<PKG_VERSION>`, как
-тег `scripts/ci.sh release`). Без ключа ничего не подписывается, а `ci.sh release` отказывается
-выпускать релиз. Потеря ключа — новый ключ и новый `pubkey`: установленные версии со старым
-ключом новые подписи не примут, их придётся обновить вручную.
+Сборка ключа не видит: в ней работают npm-скрипты, `build.rs` сотен крейтов и скачанные
+инструменты. Готовые AppImage, deb и установщик подписывает второй контейнер того же образа
+(`desktop/docker/sign.sh`) — без сети, без томов, смонтирован только файл ключа — и там же
+пишет `dist/desktop/latest.json` со ссылками на релиз `TAG` (по умолчанию `v<PKG_VERSION>`, как
+тег `scripts/ci.sh release`) и проверяет каждую подпись `minisign` по ключу из `tauri.conf.json`.
+`sh scripts/desktop-build.sh verify` — только проверка. Без ключа ничего не подписывается, а
+`ci.sh release` отказывается выпускать релиз. Потеря ключа — новый ключ и новый `pubkey`:
+установленные версии со старым ключом новые подписи не примут, их придётся обновить вручную.
+
+### Воспроизводимость
+
+Образ сборки (`desktop/docker/Dockerfile`) закреплён: базовые образы node и rust — по digest,
+cargo-xwin и tauri CLI — по версии, MSVC CRT и Windows SDK — `XWIN_CRT_VERSION`/`XWIN_SDK_VERSION`,
+инструменты AppImage (AppRun, linuxdeploy, linuxdeploy-plugin-appimage), которые сборщик Tauri
+иначе качал бы при каждой сборке, а plugin-appimage — с движущегося тега `continuous`, лежат в
+образе по фиксированным URL с `sha256sum -c`. Плагины NSIS сборщик проверяет по хэшу сам.
 
 ### CI и релиз
 
 `sh scripts/ci.sh` — шаг `desktop`: `desktop-build.sh test`, затем сборка Linux и Windows
 (`DESKTOP_TARGETS=linux` — только Linux) в `dist/desktop/`; `DESKTOP_ITEST=1` добавляет
 `desktop-itest.sh` (по умолчанию нет: стенд LuCI — ещё один контейнер, а itest и так
-идёт ~12 мин). `sh scripts/ci.sh release` кладёт в тот же GitHub Release, что и ipk: deb,
-AppImage, установщик, их `.sig` и `latest.json`, проверив, что всё подписано и `latest.json`
-ссылается на этот тег.
+идёт ~12 мин). `sh scripts/ci.sh release` кладёт в тот же GitHub Release, что и ipk: deb, AppImage, установщик,
+их `.sig` и `latest.json` — проверив подписи по ключу из `tauri.conf.json` и что `latest.json`
+ссылается на этот тег. Релиз сначала создаётся черновиком (тег GitHub ставит при публикации),
+поэтому сбой загрузки не оставляет тега без релиза, а повторный запуск догружает в тот же
+черновик и публикует. Версия приложения — `PKG_VERSION` без `PKG_RELEASE`: релиз `-rN`, в котором
+изменился `desktop/`, `ci.sh release` не выпустит — обновление с той же версией updater не увидит.

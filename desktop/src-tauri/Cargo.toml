@@ -27,6 +27,8 @@ sha2 = "0.10"
 keyring = { version = "3", features = ["windows-native", "sync-secret-service", "crypto-rust"] }
 # updates from the GitHub release (#81): rustls with ring as above, no OpenSSL
 tauri-plugin-updater = "2"
+# the native question before an update is installed
+tauri-plugin-dialog = "2"
 time = { version = "0.3", features = ["formatting"] }
 
 [dev-dependencies]

@@ -16,29 +16,29 @@ describe('UpdateFlow', () => {
     expect(f.get()).toEqual({ phase: 'latest', current: '0.1.0' });
   });
 
-  it('installs only the shown version and only after ask and confirm', async () => {
+  it('installs nothing before a check, then only the version shown, in the app language', async () => {
     const a = api(), f = new UpdateFlow(a);
-    await f.confirm();
+    await f.install('ru');
+    expect(a.install).not.toHaveBeenCalled();
     await f.check();
-    expect(f.get().phase).toBe('available');
-    await f.confirm();	// not asked yet
-    expect(a.install).not.toHaveBeenCalled();
-    f.ask();
-    f.cancel();
-    await f.confirm();	// cancelled
-    expect(a.install).not.toHaveBeenCalled();
-    f.ask();
-    expect(f.get().phase).toBe('confirm');
-    await f.confirm();
-    expect(a.install).toHaveBeenCalledExactlyOnceWith('0.2.0');
+    await f.install('ru');
+    expect(a.install).toHaveBeenCalledExactlyOnceWith('0.2.0', 'ru');
     expect(f.get().phase).toBe('installing');
   });
 
-  it('a deb installation cannot be installed from the app', async () => {
+  it('a «no» in the native dialog brings the update back', async () => {
+    const a = api();
+    a.install = vi.fn(async () => { throw 'cancelled'; });
+    const f = new UpdateFlow(a);
+    await f.check();
+    await f.install('en');
+    expect(f.get()).toMatchObject({ phase: 'available', update: UPDATE });
+  });
+
+  it('an installation the app cannot update is not installed', async () => {
     const a = api({ ...UPDATE, installable: false }), f = new UpdateFlow(a);
     await f.check();
-    f.ask();
-    await f.confirm();
+    await f.install('en');
     expect(a.install).not.toHaveBeenCalled();
     expect(f.get().phase).toBe('available');
   });
@@ -53,8 +53,7 @@ describe('UpdateFlow', () => {
     b.install = vi.fn(async () => { throw 'bad signature'; });
     const g = new UpdateFlow(b);
     await g.check();
-    g.ask();
-    await g.confirm();
+    await g.install('en');
     expect(g.get()).toEqual({ phase: 'error', message: 'bad signature' });
   });
 });
