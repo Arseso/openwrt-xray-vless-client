@@ -27,7 +27,17 @@ sha2 = "0.10"
 keyring = { version = "3", features = ["windows-native", "sync-secret-service", "crypto-rust"] }
 # tray.rs: autostart; vpncheck.rs: public CAs for the echo services
 tauri-plugin-autostart = "2"
+# tray.rs: Open LuCI as a URL (ShellExecuteW / xdg-open); lib.rs: one running app
+tauri-plugin-opener = "2"
+tauri-plugin-single-instance = "2"
 webpki-roots = "1"
+# vpncheck.rs: a time limit for the resolver (tokio is in the tree through tauri)
+tokio = { version = "1", features = ["time"] }
+
+# the tabs of #79 (src/screens.rs)
+tauri-plugin-clipboard-manager = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # tray.rs: is there a StatusNotifierItem host (already in the tree through keyring)

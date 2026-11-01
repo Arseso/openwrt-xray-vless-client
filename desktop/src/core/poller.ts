@@ -106,6 +106,9 @@ export class StatusPoller {
    * waits for it and polls once more; any number of such calls share that one poll.
    */
   refresh(): Promise<void> {
+    // a stopped poller belongs to a profile left behind: nothing of it reaches the bus
+    if (!this.running)
+      return Promise.resolve();
     if (!this.inFlight) {
       if (this.timer)
         clearTimeout(this.timer);

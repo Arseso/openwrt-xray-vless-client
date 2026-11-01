@@ -206,7 +206,7 @@ const LinksValue = form.TextValue.extend({
 			}
 			rows.push(E('tr', { 'class': 'tr' }, [
 				E('td', { 'class': 'td', 'data-title': titles[0] }, [ txt(String(i + 1)) ]),
-				E('td', { 'class': 'td', 'data-title': titles[1] }, [ txt(r?.proto ?? '') ]),
+				E('td', { 'class': 'td', 'data-title': titles[1] }, [ txt([ r?.proto, r?.transport ].filter((x) => x).join(' ')) ]),
 				E('td', { 'class': 'td', 'data-title': titles[2] }, [ txt(r?.name ?? '') ]),
 				E('td', { 'class': 'td', 'data-title': titles[3] }, [ txt(r?.address ? r.address + ':' + r.port : '') ]),
 				E('td', { 'class': 'td', 'data-title': titles[4] }, [ check ]),

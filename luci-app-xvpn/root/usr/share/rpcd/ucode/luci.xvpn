@@ -8,7 +8,7 @@ import { cursor } from 'uci';
 import { connect } from 'ubus';
 import { load_config, read_json, run, shq, update_running, no_auto_ids, INDEX_FILE, ACTIVE_FILE } from 'xvpn.util';
 import { all_servers, load_cache, load_status, due_in } from 'xvpn.subscription';
-import { parse_link } from 'xvpn.links';
+import { parse_link, transport } from 'xvpn.links';
 import { lists_status, lists_due_in, parse_nets, RU_FILE } from 'xvpn.split';
 
 const CLI = '/usr/share/xvpn/cli.uc';
@@ -96,6 +96,13 @@ const methods = {
 		}
 	},
 
+	// back to auto selection after select
+	auto: {
+		call: function() {
+			return daemon('auto') ?? { ok: false, error: daemon_error };
+		}
+	},
+
 	// takes part in auto selection or not (health.no_auto): the daemon writes UCI and
 	// restarts nothing
 	set_auto: {
@@ -114,7 +121,8 @@ const methods = {
 			for (let id in no_auto_ids())
 				off[id] = true;
 			let list = map(all_servers(cfg), (s) => ({
-				id: s.id, name: s.name, proto: s.proto, address: s.address, port: s.port,
+				id: s.id, name: s.name, proto: s.proto, transport: transport(s.outbound),
+				address: s.address, port: s.port,
 				sub: s.sub, sub_name: s.sub_name, auto: !off[s.id],
 			}));
 			return { servers: list, active: trim(readfile(ACTIVE_FILE) ?? '') || null };
@@ -178,7 +186,8 @@ const methods = {
 			return { links: map(slice(links, 0, 200), (l) => {
 				let s = (type(l) == 'string') ? parse_link(l) : { error: 'not a link' };
 				return s.error ? { error: s.error }
-					: { id: s.hash, name: s.name, proto: s.proto, address: s.address, port: s.port };
+					: { id: s.hash, name: s.name, proto: s.proto, transport: transport(s.outbound),
+						address: s.address, port: s.port };
 			}) };
 		}
 	},

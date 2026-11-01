@@ -48,9 +48,12 @@ diag() {
 	echo "--- ucode"; logread | grep 'ucode\[' | tail -20
 }
 i=0; until logread 2>/dev/null | grep -q 'init complete'; do [ $i -lt 30 ] || break; sleep 1; i=$((i+1)); done
-# netifd puts eth0 into br-lan and drops the docker address: give it back as wan
+# netifd puts eth0 into br-lan and drops the docker address: give it back as wan.
+# docker passes on the host's DNS server, often a home router at 192.168.1.1: the
+# default LAN address would take it over and DNS would end at our own dnsmasq
 set -- $NET
 uci batch <<UCI
+set network.lan.ipaddr=192.168.199.1
 del_list network.@device[0].ports=eth0
 set network.@device[0].bridge_empty=1
 set network.wan=interface
@@ -755,8 +758,15 @@ wait_for @.state connected 30
 wait_cmd 15 select_ok "$id2"
 wait_cmd 10 active_is second
 [ "$(xray_pid)" = "$xp" ] || { echo "FAIL: select back restarted xray"; exit 1; }
-rm -f /etc/xvpn/active_manual	# the daemon's choice, as before
 echo "OK: a reload keeps xray and the choice, back to second without a restart"
+# status says the choice is by hand; auto (also through luci.xvpn, the desktop app) drops it
+[ "$(status @.manual)" = true ] || { echo "FAIL: status.manual after select: $(ubus call xvpn status)"; exit 1; }
+[ "$(ubus call luci.xvpn auto | jsonfilter -e @.ok)" = true ] || { echo "FAIL: luci.xvpn auto"; exit 1; }
+[ ! -e /etc/xvpn/active_manual ] && [ "$(status @.manual)" = false ] \
+	|| { echo "FAIL: auto kept the choice by hand: $(ubus call xvpn status)"; exit 1; }
+logread | grep -q 'back to auto selection' || { echo "FAIL: auto did not choose again"; exit 1; }
+wait_for @.state connected 60
+echo "OK: status.manual, auto drops the choice by hand"
 
 # #10: the DNS server of the clients as an IP (dnsmasq in wan): their queries go over UDP
 # through the server, so does the check. "second" drops UDP: names do not resolve through it,

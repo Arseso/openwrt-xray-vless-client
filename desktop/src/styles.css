@@ -92,3 +92,32 @@ input[type=search] { margin: 12px 0; }
 .badge.ok { color: var(--ok); border-color: var(--ok); }
 .badge.warn { color: var(--warn); border-color: var(--warn); }
 label.check { display: flex; gap: 6px; align-items: center; margin-bottom: 8px; }
+/* forms of the tabs (src/forms/form.ts) */
+.ok-text { color: var(--ok); }
+.error-text { color: var(--error); }
+textarea { font: inherit; color: inherit; width: 100%; padding: 5px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); resize: vertical; }
+textarea.mono, pre.log { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 12px; }
+.card h3 { margin: 4px 0 8px; font-size: 15px; }
+.field { margin: 10px 0; }
+.field > label { display: block; margin-bottom: 3px; font-weight: 600; }
+.field > label.check, label.check { display: inline-flex; gap: 6px; align-items: center; font-weight: normal; }
+.field > small { display: block; margin-top: 3px; }
+.field-error:empty { display: none; }
+.field-error { color: var(--error); }
+.field.invalid input, .field.invalid textarea, input.invalid { border-color: var(--error); }
+.checks { display: flex; flex-direction: column; gap: 4px; }
+.save-bar { align-items: center; flex-wrap: wrap; }
+.save-msg:empty { display: none; }
+p.save-msg { margin: 8px 0; }
+table.grid { border-collapse: collapse; width: 100%; margin-top: 8px; font-size: 13px; }
+table.grid th, table.grid td { text-align: left; padding: 3px 8px; border-bottom: 1px solid var(--border); }
+.sub-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.sub-url { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; margin: 4px 0; }
+.sub-body { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+progress { width: 140px; vertical-align: middle; }
+.log-tools { flex-wrap: wrap; align-items: center; }
+.log-tools .log-query { width: 18em; }
+pre.log { height: 60vh; overflow: auto; white-space: pre-wrap; word-break: break-all; margin: 8px 0 0; padding: 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--card); }
+button.link { border: none; background: none; color: var(--accent); padding: 0 4px; }
+ul.plain { list-style: none; padding: 0; margin: 4px 0; }
+.banner .notice { display: flex; justify-content: space-between; align-items: center; margin: 0; }

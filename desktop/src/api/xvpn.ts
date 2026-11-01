@@ -4,7 +4,7 @@
 // code is optional here as well. Times are seconds of the router clock (time in the
 // answers), not of the PC.
 
-import { UbusClient } from './ubus';
+import { CallOptions, UbusClient } from './ubus';
 
 export const OBJECT = 'luci.xvpn';
 
@@ -90,6 +90,9 @@ export interface StatusUp extends StatusBase {
   speed?: { up: number; down: number } | null;
   /** bytes through the tunnel since xvpnd started; null with speed_interval 0 */
   traffic?: { up: number; down: number } | null;
+  /** the active server was chosen by hand (select) and stays until auto(); absent in
+   * packages before #78 */
+  manual?: boolean;
 }
 
 export type Status = StatusUp | StatusDown;
@@ -226,8 +229,9 @@ export class XvpnApi {
     return this.ubus.call<T>(OBJECT, method, args);
   }
 
-  version(): Promise<VersionReply> {
-    return this.call('version');
+  /** opts: the check after uci apply goes over a new connection (src/core/apply.ts) */
+  version(opts: CallOptions = {}): Promise<VersionReply> {
+    return this.ubus.call<VersionReply>(OBJECT, 'version', {}, opts);
   }
 
   status(): Promise<Status> {
@@ -275,6 +279,11 @@ export class XvpnApi {
 
   select(id: string): Promise<OkReply> {
     return this.call('select', { id });
+  }
+
+  /** back to auto selection after select: the daemon chooses again */
+  auto(): Promise<OkReply> {
+    return this.call('auto');
   }
 
   setAuto(id: string, auto: boolean): Promise<OkReply> {

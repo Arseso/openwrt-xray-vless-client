@@ -4,7 +4,7 @@
 'use strict';
 
 import { readfile, writefile, mkdir, stat } from 'fs';
-import { parse_link, parse_subscription } from 'xvpn.links';
+import { parse_link, parse_subscription, transport } from 'xvpn.links';
 import { parse_userinfo, assign_ids, list_change, known_ids, prune_no_auto, NO_AUTO_GRACE } from 'xvpn.subscription';
 import { load_config, valid_bin, valid_url, fastest, auto_pick, retry_delay, no_auto_ids, set_no_auto, mkdir_p, read_json, SUBS_DIR } from 'xvpn.util';
 import { build_index, generate, ports_error, config_key, set_active } from 'xvpn.xrayconf';
@@ -63,6 +63,11 @@ eq('vmess pcs and vcn', p[15].outbound.streamSettings.tlsSettings, { serverName:
 	pinnedPeerCertSha256: '7b2d8f0c3a6e9b14d5f8a2c7e0b3d6f9a1c4e7b0d3f6a9c2e5b8d1f4a7c0e3b6', verifyPeerCertByName: 'vp.example.com' });
 ok('hashes unique', length(uniq(map(filter(p, (s) => !s.error), (s) => s.hash))) == 12);
 eq('hash stable', parse_link(lines[0]).hash, p[0].hash);
+eq('transport labels', map([ 0, 1, 2, 3, 4, 5, 6, 7 ], (i) => transport(p[i].outbound)),
+	[ 'tcp+reality+vision', 'xhttp+reality', 'ws+tls', 'grpc+tls', 'httpupgrade', 'ws+tls', 'tcp+tls', 'tcp' ]);
+// xray json items keep their own network names
+eq('transport json', [ transport({ streamSettings: { network: 'raw', security: 'reality' } }),
+	transport({ streamSettings: { network: 'splithttp' } }), transport(null) ], [ 'tcp+reality', 'xhttp', 'tcp' ]);
 
 // subscriptions
 let b = parse_subscription(readfile(`${FIX}/sub-base64.txt`));
@@ -72,6 +77,10 @@ eq('plain sub', [ pl.format, length(pl.servers) ], [ 'plain', 12 ]);
 let xj = parse_subscription(readfile(`${FIX}/sub-xray.json`));
 eq('xray json sub', [ xj.format, length(xj.servers), xj.skipped, xj.servers[0].name ], [ 'xray-json', 1, 1, '🇫🇮 Finland' ]);
 ok('xray json drops sockopt', xj.servers[0].outbound.streamSettings.sockopt == null);
+let xg = parse_subscription(sprintf('%J', [ { remarks: 'g', outbounds: [ { protocol: 'vless',
+	settings: { vnext: [ { address: 'g.example', port: 443, users: [ { id: 'u' } ] } ] },
+	streamSettings: { network: 'grpc', grpcSettings: { serviceName: 's', initial_windows_size: 524288 } } } ] } ]));
+eq('xray json drops initial_windows_size', xg.servers[0].outbound.streamSettings.grpcSettings, { serviceName: 's' });
 ok('clash rejected', match(parse_subscription('mixed-port: 7890\nproxies:\n').errors[0], /Clash/));
 ok('html rejected', match(parse_subscription('<html></html>').errors[0], /HTML/));
 eq('userinfo', parse_userinfo('upload=1; download=2; total=10737418240; expire=1798761600'),
@@ -137,6 +146,7 @@ let cfg = {
 let servers = [ ...assign_ids(b.servers, 's1'), ...assign_ids(xj.servers, 's2') ];
 let idx = build_index(cfg, servers, servers[2].id);
 eq('index active', idx.active, servers[2].id);
+eq('index transport', idx.servers[2].transport, transport(servers[2].outbound));
 let mv = build_index(cfg, servers, servers[3].hash);
 eq('index active by the hash (id before #49)', [ mv.active, mv.moved_from ], [ servers[3].id, servers[3].hash ]);
 eq('index active found by id: not moved', build_index(cfg, servers, servers[3].id, idx).moved_from, null);

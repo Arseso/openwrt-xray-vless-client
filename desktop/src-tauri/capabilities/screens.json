@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "screens",
+  "description": "Subscriptions and Log tabs (#79): clipboard text, the save dialog and writing the file chosen in it",
+  "windows": ["main"],
+  "permissions": [
+    "clipboard-manager:allow-read-text",
+    "clipboard-manager:allow-write-text",
+    "dialog:allow-save",
+    "fs:allow-write-text-file"
+  ]
+}

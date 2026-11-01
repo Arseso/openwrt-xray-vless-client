@@ -25,6 +25,7 @@ registerView({
     let busy = false;
     // test(): done once status.tests reaches this run
     let waitRun: number | null = null;
+    let testsAt = 0;
     let error: string | null = null;
 
     const testBtn = h('button', { class: 'primary' }, t('test_all'));
@@ -84,8 +85,11 @@ registerView({
 
     const render = (st: Status | null) => {
       const up = st?.running ? st : null;
-      if (up && waitRun != null && up.tests >= waitRun)
+      // done; or the daemon restarted (its counter starts over) or went away
+      if (waitRun != null && (!up || up.tests >= waitRun || up.tests < testsAt))
         waitRun = null;
+      if (up)
+        testsAt = up.tests;
       const testing = !!up && (up.testing || waitRun != null);
       testBtn.disabled = !up || busy || testing;
       testBtn.textContent = testing ? t('testing') : t('test_all');

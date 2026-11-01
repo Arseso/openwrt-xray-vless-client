@@ -21,9 +21,14 @@ export interface RpcResponse {
   error?: { code: number; message: string };
 }
 
+export interface RequestOptions {
+  /** over a new connection, not a kept-alive one (the check after uci apply) */
+  fresh?: boolean;
+}
+
 export interface Transport {
   /** one JSON-RPC request; rejects with XvpnError on transport failures only */
-  request(body: RpcRequest, timeoutMs: number): Promise<RpcResponse>;
+  request(body: RpcRequest, timeoutMs: number, opts?: RequestOptions): Promise<RpcResponse>;
   /** session login with the user and password of the profile; the answer as is */
   login(timeoutMs: number): Promise<RpcResponse>;
 }
@@ -57,8 +62,8 @@ export async function invokeRust<T>(cmd: string, args?: Record<string, unknown>)
 export class TauriTransport implements Transport {
   constructor(readonly profileId: string) {}
 
-  request(body: RpcRequest, timeoutMs: number): Promise<RpcResponse> {
-    return invokeRust('ubus_request', { profileId: this.profileId, body, timeoutMs });
+  request(body: RpcRequest, timeoutMs: number, opts: RequestOptions = {}): Promise<RpcResponse> {
+    return invokeRust('ubus_request', { profileId: this.profileId, body, timeoutMs, fresh: opts.fresh ?? false });
   }
 
   login(timeoutMs: number): Promise<RpcResponse> {
