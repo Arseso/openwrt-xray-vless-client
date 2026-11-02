@@ -180,6 +180,43 @@ function dns_server(v) {
 	return DEFAULT_DNS;
 }
 
+// The names the router's dnsmasq answers from its own data (#103): the clients' queries of
+// them go to it, not to the DNS server through the tunnel, which knows nothing of the LAN.
+// The local domain only with local=/<domain>/ and names without a dot only with
+// domainneeded: else dnsmasq would send them on to the provider, around the tunnel.
+// null without dnsmasq (no dhcp config, DNS off with port 0).
+function local_dns(c) {
+	if (!c.load('dhcp'))
+		return null;
+	let d = null;
+	c.foreach('dhcp', 'dnsmasq', (s) => { d ??= s; });
+	let p = num(d?.port, 53);
+	if (!d || p < 1 || p > 65535)
+		return null;
+	let domain = (type(d.domain) == 'string' && match(d.domain, /^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*$/)) ? lc(d.domain) : null;
+	if (domain && !(`/${domain}/` in map(list(d.local), lc)))
+		domain = null;
+	let plain = bool(d.domainneeded, false);
+	return (domain || plain) ? { port: p, domain, plain } : null;
+}
+
+// xray before 25.9.5 (the feed of OpenWrt 24.10 has 25.1.30) corrupts the clients' data
+// through tcp+tls+vision servers under parallel connections, "bad record mac" in TLS (#105):
+// on 25.1.30 about 1% of the requests through such a server on AX3000T, none of ~3900
+// from 25.9.5 on (probably its fix of MultiBuffer Compact(), XTLS/Xray-core#5015)
+export const VISION_FIXED = '25.9.5';
+
+// a version "x.y.z" before b; null when a is no version
+export function version_older(a, b) {
+	let pa = match(a ?? '', /^v?([0-9]+)\.([0-9]+)\.([0-9]+)/), pb = match(b, /^v?([0-9]+)\.([0-9]+)\.([0-9]+)/);
+	if (!pa)
+		return null;
+	for (let i = 1; i <= 3; i++)
+		if (int(pa[i]) != int(pb[i]))
+			return int(pa[i]) < int(pb[i]);
+	return false;
+};
+
 // The values that go into commands and routing run as root: whoever may write /etc/config/xvpn
 // (the rpcd user of the desktop app, #81) must not get more than the VPN with them. A bad
 // value is replaced by the default and logged; LuCI checks the same before it saves.
@@ -284,6 +321,7 @@ export function load_config(confdir) {
 			ipv6: (a.ipv6 == 'tunnel') ? 'tunnel' : 'block',
 			dns_hijack: bool(a.dns_hijack, true),
 			dns_server: dns_server(a.dns_server),
+			local_dns: local_dns(c),
 		},
 		health: {
 			url: check_url,

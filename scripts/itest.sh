@@ -12,7 +12,8 @@
 # program is skipped, a main one is an error, xray starts with IPv6 off; UDP sessions of a
 # torrent client are let go after conn_idle, BitTorrent is dropped when blocked; split tunneling:
 # listed addresses go around xray, listed domains out of xray directly, the Russian list;
-# the tunnel speed in status over fw4 flush; the rpcd user of the desktop app.
+# the tunnel speed in status over fw4 flush; the rpcd user of the desktop app; names of the
+# LAN through dnsmasq, not the DoH server; a single failed DoH check is tried again.
 set -e
 cd "$(dirname "$0")/.."
 DOCKER="${DOCKER:-docker}"
@@ -224,6 +225,12 @@ sleep 2
 wait_for @.state connected 40
 [ "$(active_name)" = first ] || { echo "FAIL: expected first, got $(active_name)"; exit 1; }
 echo "OK: picked the live server"
+# #105: the version of xray in the status; the feed's 25.1.30 breaks tcp+tls+vision
+xray_ver_known() { [ -n "$(status @.xray_version)" ]; }
+wait_cmd 15 xray_ver_known
+[ "$(status @.xray_version)" = "$(xray version | sed -n '1s/^Xray \([0-9.]*\).*/\1/p')" ] && [ "$(status @.vision_bug)" = true ] \
+	|| { echo "FAIL: xray_version $(status @.xray_version), vision_bug $(status @.vision_bug)"; diag; exit 1; }
+echo "OK: xray $(status @.xray_version) in the status, before the fix of tcp+tls+vision"
 [ "$(jsonfilter -i /var/etc/xvpn/index.json -e '@.servers[*].test_port' | tr '\n' ' ')" = "20001 20002 " ] \
 	|| { echo "FAIL: test ports with 20000 taken: $(cat /var/etc/xvpn/index.json)"; exit 1; }
 [ "$(latency first)" -ge 0 ] || { echo "FAIL: first is not measured on its shifted port"; ubus call xvpn status; exit 1; }
@@ -890,6 +897,73 @@ reload_config
 wait_cmd 30 xvpnd_restarted "$dp"
 wait_for @.state connected 30
 active_is second || { echo "FAIL: not back on second"; diag; exit 1; }
+
+# #103: with the DoH server (the default) the names of the LAN go to the router's dnsmasq:
+# the client resolves the router's name with the local domain and without one, a name of
+# the domain dnsmasq does not know stays unknown, and the DoH server is asked for none of
+# them (its queries are in the xray log from loglevel info); a public name still goes to it
+host=$(uci -q get system.@system[0].hostname || echo OpenWrt)
+lan_name() { ip netns exec cl nslookup "$1" 10.77.0.1 2>/dev/null | grep -q 'Address.*192\.168\.199\.1'; }
+# the log from a mark on: logread keeps the earlier steps
+mark() { logger -t itest "mark $1"; }
+since() { logread | sed -n "/itest: mark $1\$/,\$p"; }
+xp=$(xray_pid)
+uci set xvpn.main.loglevel=info; uci commit xvpn; reload_config
+wait_cmd 30 xray_restarted "$xp"
+wait_for @.state connected 30
+mark 103
+grep -q '"domain:lan"' /var/etc/xvpn/config.json || { echo "FAIL: no dnsmasq server in the DNS module"; cat /var/etc/xvpn/config.json; exit 1; }
+wait_cmd 10 lan_name "$host.lan"
+lan_name "$host" || { echo "FAIL: $host does not resolve through dnsmasq"; diag; exit 1; }
+ip netns exec cl nslookup nosuch.lan 10.77.0.1 2>/dev/null | grep -q '^Name:' && { echo "FAIL: nosuch.lan resolves"; exit 1; }
+ip netns exec cl nslookup example.com 10.77.0.1 >/dev/null 2>&1 || true
+sleep 1
+since 103 | grep -q 'DOH//cloudflare-dns.com querying: example\.com' || { echo "FAIL: no DoH query in the log of xray"; diag; exit 1; }
+since 103 | grep -iE 'querying: [^ ]*(\.lan|'"$host"')\.' && { echo "FAIL: the DoH server was asked for a name of the LAN"; exit 1; }
+xp=$(xray_pid)
+uci delete xvpn.main.loglevel; uci commit xvpn; reload_config
+wait_cmd 30 xray_restarted "$xp"
+wait_for @.state connected 30
+echo "OK: the client resolves $host.lan and $host through dnsmasq, the DoH server never sees names of the LAN"
+
+# #104: one DoH check that fails (curl 28) is tried again and the state stays connected;
+# two in a row are degraded, as before. curl of the daemon answers the DoH check itself:
+# /tmp/doh-fail holds how many to fail
+mv /usr/bin/curl /usr/bin/curl.real
+cat > /usr/bin/curl <<'SH'
+#!/bin/sh
+case "$*" in *dns-query*)
+	n=$(cat /tmp/doh-fail 2>/dev/null || echo 0)
+	[ "$n" -gt 0 ] && { echo $((n - 1)) > /tmp/doh-fail; sleep 1; exit 28; }
+	printf 200; exit 0 ;;
+esac
+exec /usr/bin/curl.real "$@"
+SH
+chmod +x /usr/bin/curl
+dp=$(xvpnd_pid)
+uci set xvpn.health.dns_check=1; uci commit xvpn; reload_config
+wait_cmd 30 xvpnd_restarted "$dp"
+wait_for @.state connected 30
+doh_left() { [ "$(cat /tmp/doh-fail)" = 0 ]; }
+mark 104
+echo 1 > /tmp/doh-fail
+wait_cmd 20 doh_left
+sleep 8
+since 104 | grep -q 'fails through it (curl 28), trying again' || { echo "FAIL: no second try of the DoH check"; diag; exit 1; }
+since 104 | grep -q 'state: connected -> degraded' && { echo "FAIL: a single lost DoH answer made it degraded"; diag; exit 1; }
+[ "$(status @.state)" = connected ] && active_is second || { echo "FAIL: not connected to second after a single DoH failure"; diag; exit 1; }
+mark 104b
+echo 2 > /tmp/doh-fail
+wait_cmd 30 doh_left
+degraded_once() { since 104b | grep -q 'state: connected -> degraded (1 failed checks: DNS'; }
+wait_cmd 15 degraded_once
+wait_for @.state connected 30
+echo "OK: a single DoH failure is tried again and stays connected, two in a row are degraded"
+mv /usr/bin/curl.real /usr/bin/curl
+dp=$(xvpnd_pid)
+uci set xvpn.health.dns_check=0; uci commit xvpn; reload_config
+wait_cmd 30 xvpnd_restarted "$dp"
+wait_for @.state connected 30
 
 # no live servers (#12): the test of all again after a pause, twice as long each time
 # (interval 3 s, retry_max 12 s: 3, 6, 12 …), once a run, the pause in the status; a test

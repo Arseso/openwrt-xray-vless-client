@@ -105,5 +105,6 @@ service_started() {
 }
 
 service_triggers() {
-	procd_add_reload_trigger xvpn wireless network
+	# dhcp: the local domain of dnsmasq goes into the xray config (#103)
+	procd_add_reload_trigger xvpn wireless network dhcp
 }

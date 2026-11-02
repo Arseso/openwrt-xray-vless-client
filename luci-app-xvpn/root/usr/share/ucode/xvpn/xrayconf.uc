@@ -97,6 +97,30 @@ export function config_key(conf) {
 	return s;
 };
 
+// The DNS servers of the module. dns_server for every name but those of the LAN (#103):
+// the router's dnsmasq answers them from its leases and hosts (util.uc local_dns()), and
+// the name of the DoH server itself: xray refuses to resolve it with that server ("tries to
+// resolve itself", #104), clients that ask for it (a browser's own DoH) got no answer. Another
+// DoH server by domain resolves it, through the tunnel as well.
+function dns_servers(cfg) {
+	let a = cfg.access, r = [ a.dns_server ], l = a.local_dns;
+	let host = match(a.dns_server, /^https:\/\/([^\/:]+)/)?.[1];
+	if (host && !match(host, /^[0-9.]+$|:/))
+		push(r, {
+			address: (host == 'cloudflare-dns.com') ? 'https://dns.google/dns-query' : 'https://cloudflare-dns.com/dns-query',
+			domains: [ `full:${host}` ], skipFallback: true,
+		});
+	if (l) {
+		let domains = [];
+		if (l.domain)
+			push(domains, `domain:${l.domain}`);
+		if (l.plain)
+			push(domains, 'regexp:^[^.]+$');
+		push(r, { address: '127.0.0.1', port: l.port, domains, skipFallback: true });
+	}
+	return r;
+}
+
 export function generate(cfg, servers, idx) {
 	let m = cfg.main;
 	let active = filter(idx.servers, (e) => e.id == idx.active)[0];
@@ -152,6 +176,12 @@ export function generate(cfg, servers, idx) {
 		push(outbounds, { tag: 'dns-out', protocol: 'dns', settings: { nonIPQuery: 'drop' } });
 		push(rules, { type: 'field', inboundTag: [ 'dns-in' ], outboundTag: 'dns-out' });
 	}
+	let local = doh ? cfg.access.local_dns : null;
+	if (local) {
+		// the queries of the module to the router's dnsmasq (dns_servers()) stay on the router
+		push(outbounds, { tag: 'dnsmasq', protocol: 'freedom' });
+		push(rules, { type: 'field', inboundTag: [ 'dns-module' ], ip: [ '127.0.0.1' ], port: `${local.port}`, outboundTag: 'dnsmasq' });
+	}
 	if (m.block_bittorrent)
 		push(rules, { type: 'field', inboundTag: [ 'tproxy' ], protocol: [ 'bittorrent' ], outboundTag: 'block' });
 	// split tunneling (#67): clients' connections to these domains (found by sniffing) go out
@@ -193,9 +223,12 @@ export function generate(cfg, servers, idx) {
 	};
 	if (doh)
 		conf.dns = {
-			tag: 'dns-module', servers: [ cfg.access.dns_server ],
+			tag: 'dns-module', servers: dns_servers(cfg),
 			// without IPv6 on the router AAAA answers are of no use to the clients
 			queryStrategy: (cfg.access.ipv6 == 'block' || !(idx.ipv6 ?? true)) ? 'UseIPv4' : 'UseIP',
 		};
+	if (doh && local)
+		// a name of the LAN dnsmasq does not know is no name for the DNS server either
+		conf.dns.disableFallbackIfMatch = true;
 	return conf;
 };

@@ -11,7 +11,7 @@ import { cursor } from 'uci';
 import { readfile, unlink, access, stat } from 'fs';
 import {
 	load_config, read_json, write_json, write_file, mkdir_p, shq, update_running, procs, tree, kill_tree,
-	no_auto_ids, set_no_auto, retry_delay, auto_pick, better, MANUAL_FILE, ETC_DIR, RUN_DIR, CONFIG_FILE, INDEX_FILE, ACTIVE_FILE, STATE_FILE, FW_ERROR_FILE, GENERATE_ERROR_FILE, STALE_FILE
+	no_auto_ids, set_no_auto, retry_delay, auto_pick, better, version_older, VISION_FIXED, MANUAL_FILE, ETC_DIR, RUN_DIR, CONFIG_FILE, INDEX_FILE, ACTIVE_FILE, STATE_FILE, FW_ERROR_FILE, GENERATE_ERROR_FILE, STALE_FILE
 } from 'xvpn.util';
 import { due_in } from 'xvpn.subscription';
 import { dns_via_module, set_active } from 'xvpn.xrayconf';
@@ -392,6 +392,25 @@ function xray_instance() {
 function bin_sig() {
 	let s = stat(cfg.main.xray_bin);
 	return s ? `${s.inode}:${s.size}:${s.mtime}` : '';
+}
+
+// The version of xray (#105) for the status, read once for each binary (bin_sig()): a
+// run of `xray version` costs ~20 MB for a moment, a hung one is killed after 5 s.
+let xray_ver = { sig: null, v: null, reading: false };
+function read_xray_version() {
+	let sig = bin_sig(), out = `${RUN_DIR}/xray-version`, p, t;
+	if (xray_ver.reading || sig == xray_ver.sig || sig == '')
+		return;
+	xray_ver.reading = true;
+	p = spawn('/bin/sh', [ '-c', `exec ${shq(cfg.main.xray_bin)} version > ${shq(out)} 2>/dev/null` ], (code) => {
+		t?.cancel();
+		let v = match(readfile(out) ?? '', /^Xray ([0-9]+\.[0-9]+\.[0-9]+)/);
+		unlink(out);
+		// not started (out of memory) or killed: tried again at the next check
+		xray_ver = { sig: (code == 0) ? sig : null, v: v?.[1], reading: false };
+	});
+	if (p)
+		t = uloop.timer(5000, () => system([ '/bin/kill', '-9', `${p.pid()}` ]));
 }
 
 // Log lines without timestamps, the banner and the usual warnings, the last three.
@@ -1226,7 +1245,10 @@ function failover(reason) {
 // After health.url answers through the active server: the DNS of the clients through it (#10),
 // its UDP (status udp, a warning unless the DNS of the clients is an IP: then it is their DNS)
 // and every dl_interval a download (#11; at every check while it fails). cb(kind, why): kind
-// null when they pass, 'dns' or 'dl'.
+// null when they pass, 'dns' or 'dl'. A failed DoH query or download is tried once more
+// DEEP_RETRY s later and counts only when that fails too (#104): one DoH answer or a few
+// packets lost in a busy tunnel are no fault of the server, the state stays.
+const DEEP_RETRY = 3;
 function deep_check(e, cb) {
 	let me = deep = { at: now() };
 	function end(kind, why) {
@@ -1234,12 +1256,19 @@ function deep_check(e, cb) {
 			deep = null;
 		cb(kind, why);
 	}
-	function dl() {
+	function again(why, f) {
+		log(`"${e.name}": ${why}, trying again in ${DEEP_RETRY} s`);
+		uloop.timer(DEEP_RETRY * 1000, () => (st.active == e.id) ? f() : end(null));
+	}
+	function dl(retry) {
 		if (!H.dl_url || (!st.dl_failing && st.dl_at != null && now() - st.dl_at < H.dl_interval))
 			return end(null);
 		dl_probe(e.test_port, (ok, why) => {
 			if (ok == null || st.active != e.id)
 				return end(null);
+			// failing since an earlier check: no second try, it counts at once
+			if (!ok && !retry && !st.dl_failing)
+				return again(`${H.dl_url} ${why}`, () => dl(true));
 			st.dl_failing = !ok;
 			if (!ok)
 				return end('dl', `${H.dl_url} ${why} through it`);
@@ -1260,12 +1289,17 @@ function deep_check(e, cb) {
 			next(ok);
 		});
 	}
-	if (DOH)
-		return doh_probe(e.test_port, (ok, code, http) => {
-			if (code >= 0 && !ok)
-				return end('dns', `DNS ${DOH} fails through it (${code ? `curl ${code}` : `HTTP ${http}`})`);
+	function doh(retry) {
+		doh_probe(e.test_port, (ok, code, http) => {
+			if (code >= 0 && !ok) {
+				let why = `DNS ${DOH} fails through it (${code ? `curl ${code}` : `HTTP ${http}`})`;
+				return retry ? end('dns', why) : again(why, () => doh(true));
+			}
 			udp(() => dl());
 		});
+	}
+	if (DOH)
+		return doh(false);
 	udp((ok) => (UDP_DNS && ok === false) ? end('dns', `DNS ${DNS} over UDP fails through it`) : dl());
 }
 
@@ -1342,6 +1376,8 @@ check = function() {
 	reindex(false);
 	if (st.testing || st.reloading)
 		return;
+	// not during a test or a reload: their curl and xray -test take the memory then
+	read_xray_version();
 	alive();
 	let timed = time_ok();	// also without servers: it runs the updates put off
 	if (!length(index.servers)) {
@@ -1645,6 +1681,8 @@ function status() {
 		// answers, until the method auto
 		manual: by_hand(st.active),
 		xray_restarts: st.xray.restarts ?? 0, url2: URL2, servers,
+		// #105: the status tab warns about tcp+tls+vision servers with this xray; null: not known
+		xray_version: xray_ver.v, vision_bug: version_older(xray_ver.v, VISION_FIXED),
 		// UDP through the active server (#10); null: not checked
 		udp: (st.state == 'connected' || st.state == 'degraded') ? st.udp : null,
 		// no live servers: the next test of all (router clock) and the pause before it
