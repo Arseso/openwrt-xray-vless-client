@@ -6,7 +6,7 @@
 import { readfile, writefile, mkdir, stat } from 'fs';
 import { parse_link, parse_subscription, transport } from 'xvpn.links';
 import { parse_userinfo, assign_ids, list_change, known_ids, prune_no_auto, NO_AUTO_GRACE, check_stub, update, load_cache, load_status, MAX_SIZE } from 'xvpn.subscription';
-import { load_config, valid_bin, valid_url, fastest, auto_pick, best_of, balanced_scores, better, mbps, retry_delay, no_auto_ids, set_no_auto, mkdir_p, read_json, SUBS_DIR } from 'xvpn.util';
+import { load_config, version_older, VISION_FIXED, valid_bin, valid_url, fastest, auto_pick, best_of, balanced_scores, better, mbps, retry_delay, no_auto_ids, set_no_auto, mkdir_p, read_json, SUBS_DIR } from 'xvpn.util';
 import { build_index, generate, ports_error, config_key, set_active } from 'xvpn.xrayconf';
 import { render, resolve, fix_ifnames, ifnames_applied, table_names, rule_prefs, stale_routes, counters, counter_step } from 'xvpn.firewall';
 import { ipv6_up, busy_ports } from 'xvpn.host';
@@ -214,7 +214,31 @@ cfg.main.buffer_size = null;
 // dns_server as a URL: queries go through the xray DNS module by domain
 cfg.access.dns_server = 'https://cloudflare-dns.com/dns-query';
 let dconf = generate(cfg, servers, idx);
-eq('doh module', dconf.dns, { tag: 'dns-module', servers: [ 'https://cloudflare-dns.com/dns-query' ], queryStrategy: 'UseIPv4' });
+// the DoH server's own name goes to another DoH server (#104)
+let self_dns = { address: 'https://dns.google/dns-query', domains: [ 'full:cloudflare-dns.com' ], skipFallback: true };
+eq('doh module', dconf.dns, { tag: 'dns-module', servers: [ 'https://cloudflare-dns.com/dns-query', self_dns ], queryStrategy: 'UseIPv4' });
+ok('doh without dnsmasq: no dnsmasq outbound', length(filter(dconf.outbounds, (o) => o.tag == 'dnsmasq')) == 0);
+cfg.access.dns_server = 'https://dns.google/dns-query';
+eq('doh dns.google: its name to cloudflare', generate(cfg, servers, idx).dns.servers[1],
+	{ address: 'https://cloudflare-dns.com/dns-query', domains: [ 'full:dns.google' ], skipFallback: true });
+cfg.access.dns_server = 'https://1.1.1.1/dns-query';
+eq('doh by IP: no server for its name', generate(cfg, servers, idx).dns.servers, [ 'https://1.1.1.1/dns-query' ]);
+cfg.access.dns_server = 'https://cloudflare-dns.com/dns-query';
+// the names of the LAN go to the router's dnsmasq (#103), the query stays on the router
+cfg.access.local_dns = { port: 53, domain: 'lan', plain: true };
+let lconf = generate(cfg, servers, idx);
+eq('local names to dnsmasq', lconf.dns.servers[2],
+	{ address: '127.0.0.1', port: 53, domains: [ 'domain:lan', 'regexp:^[^.]+$' ], skipFallback: true });
+ok('local names: no fallback to the DoH server', lconf.dns.disableFallbackIfMatch === true);
+ok('dnsmasq outbound', length(filter(lconf.outbounds, (o) => o.tag == 'dnsmasq' && o.protocol == 'freedom')) == 1);
+let lrule = filter(lconf.routing.rules, (r) => r.outboundTag == 'dnsmasq');
+eq('dnsmasq rule', lrule, [ { type: 'field', inboundTag: [ 'dns-module' ], ip: [ '127.0.0.1' ], port: '53', outboundTag: 'dnsmasq' } ]);
+ok('dnsmasq rule before the balancer', index(lconf.routing.rules, lrule[0]) < length(lconf.routing.rules) - 1);
+cfg.access.local_dns = { port: 5353, domain: null, plain: true };
+eq('plain names only, another port', generate(cfg, servers, idx).dns.servers[2],
+	{ address: '127.0.0.1', port: 5353, domains: [ 'regexp:^[^.]+$' ], skipFallback: true });
+cfg.access.local_dns = { port: 53, domain: 'lan', plain: true };
+dconf = lconf;
 ok('dns-in to dns-out', length(filter(dconf.routing.rules, (r) => r.inboundTag[0] == 'dns-in' && r.outboundTag == 'dns-out')) == 1);
 eq('doh route', dconf.routing.rules[length(dconf.routing.rules) - 1],
 	{ type: 'field', inboundTag: [ 'tproxy', 'dns-module', 'udp-test' ], balancerTag: 'active' });
@@ -229,6 +253,9 @@ eq('doh without servers: blackhole by default', nosrv.outbounds[0].tag, 'block')
 eq('without servers: no balancer', nosrv.routing.balancers, []);
 ok('doh without servers: no dns-module rule', length(filter(nosrv.routing.rules, (r) => r.inboundTag[0] == 'tproxy')) == 0);
 cfg.access.dns_server = '1.1.1.1';
+ok('dns server an IP: no dnsmasq server', generate(cfg, servers, idx).dns == null
+	&& length(filter(generate(cfg, servers, idx).outbounds, (o) => o.tag == 'dnsmasq')) == 0);
+cfg.access.local_dns = null;
 
 // IPv6 off on the router: the inbounds listen on 0.0.0.0 (a kernel without IPv6 refuses ::)
 let v4idx = build_index(cfg, servers, p[2].id, null, { ipv6: false, busy: { tcp: {}, udp: {} } });
@@ -309,6 +336,35 @@ eq('dns_server tcp kept', dns_of('tcp://1.1.1.1'), 'tcp://1.1.1.1');
 eq('dns_server IP kept', dns_of('9.9.9.9'), '9.9.9.9');
 eq('dns_server +local replaced', dns_of('https+local://dns.google/dns-query'), 'https://cloudflare-dns.com/dns-query');
 eq('dns_server quic+local replaced', dns_of('quic+local://dns.adguard.com'), 'https://cloudflare-dns.com/dns-query');
+
+// xray versions (#105): the feed's 25.1.30 is before the fix of tcp+tls+vision
+eq('version_older', [ version_older('25.1.30', VISION_FIXED), version_older('25.9.5', VISION_FIXED),
+	version_older('25.10.15', VISION_FIXED), version_older('v26.10.31', VISION_FIXED), version_older('25.8.30', '25.9.5'),
+	version_older(null, VISION_FIXED), version_older('dev', VISION_FIXED) ], [ true, false, false, false, true, null, null ]);
+
+// the names dnsmasq answers itself (#103)
+function local_of(dhcp) {
+	mkdir(`${OUT}/dnscfg`);
+	writefile(`${OUT}/dnscfg/xvpn`, "config access 'access'\n");
+	if (dhcp == null)
+		system([ 'rm', '-f', `${OUT}/dnscfg/dhcp` ]);
+	else
+		writefile(`${OUT}/dnscfg/dhcp`, `config dnsmasq\n${dhcp}`);
+	return load_config(`${OUT}/dnscfg`).access.local_dns;
+}
+eq('dnsmasq of OpenWrt', local_of("\toption domainneeded 1\n\toption local '/lan/'\n\toption domain 'lan'\n"),
+	{ port: 53, domain: 'lan', plain: true });
+eq('no dhcp config: no dnsmasq', local_of(null), null);
+eq('domain without local=: names of it are sent on, not ours', local_of("\toption domainneeded 1\n\toption domain 'home'\n"),
+	{ port: 53, domain: null, plain: true });
+eq('local as a list, upper case', local_of("\tlist local '/Home.Arpa/'\n\toption domain 'home.arpa'\n"),
+	{ port: 53, domain: 'home.arpa', plain: false });
+eq('neither: nothing to dnsmasq', local_of("\toption domain 'lan'\n"), null);
+eq('DNS off (port 0)', local_of("\toption port 0\n\toption domainneeded 1\n"), null);
+eq('another port', local_of("\toption port 5353\n\toption domainneeded 1\n"), { port: 5353, domain: null, plain: true });
+eq('bad domain left out', local_of("\toption domainneeded 1\n\tlist local '/a\"b/'\n\toption domain 'a\"b'\n"),
+	{ port: 53, domain: null, plain: true });
+system([ 'rm', '-f', `${OUT}/dnscfg/dhcp` ]);
 
 // firewall
 // SSIDs come with a wildcard (WDS, dynamic VLAN) and may overlap an exact name: nft -c checks it

@@ -157,13 +157,25 @@ function row(titles, cells, cls) {
 
 // gRPC carries every connection of the tunnel in one HTTP/2 connection, so one CPU
 // core does all of it: about 130 Mbit/s on a dual-core Cortex-A53 router (issue #68)
-function protoCell(s) {
+function protoCell(s, visionBug) {
 	const cell = [ txt(s.proto) ];
 	if (s.transport)
 		cell.push(E('br'), E('small', s.transport.startsWith('grpc') ? {
 			'title': _('gRPC sends all connections through one connection that one CPU core handles: on a weak router it is slower than TCP (e.g. tcp+reality+vision)')
 		} : {}, [ txt(s.transport) ]));
+	if (visionBug && tlsVision(s))
+		cell.push(' ', E('span', { 'class': 'label warning', 'title': visionText() }, [ _('xray too old') ]));
 	return cell;
+}
+
+// xray before 25.9.5 (OpenWrt 24.10 has 25.1.30) breaks TLS of the clients through
+// tcp+tls+vision servers when many connections run at once (issue #105)
+function tlsVision(s) {
+	return /\btls\+vision\b/.test(s?.transport ?? '');
+}
+
+function visionText() {
+	return _('With xray older than 25.9.5 some connections of the clients through tcp+tls+vision servers break when many run at once (TLS error "bad record mac"): choose a server with another transport or set a newer xray binary (main.xray_bin).');
 }
 
 function info(rows) {
@@ -410,6 +422,8 @@ return view.extend({
 					...((status.optimal == active.id) ? [ ' ', optimalLabel() ] : []) ] ] : null,
 				up ? [ _('Auto selection'), txt(modeText(status.auto_mode ?? 'ping') + ((status.speedtest?.last)
 					? ', ' + _('speed test %s').format(ago(now, status.speedtest.last)) : '')) ] : null,
+				(up && active && status.vision_bug && tlsVision(active)) ? [ _('xray'), [ label('warning', status.xray_version ?? ''), ' ',
+					txt(visionText()) ] ] : null,
 				(up && active && status.udp === false) ? [ _('UDP'), [ label('warning', _('does not pass')), ' ',
 					txt(_('UDP does not pass through this server: QUIC, voice calls and games of the clients may not work.')) ] ] : null,
 				(up && active && status.since) ? [ sinceTitle, txt(dur(now - status.since)) ] : null,
@@ -504,7 +518,7 @@ return view.extend({
 
 			return row(srvTitles, [
 				nameCell,
-				protoCell(s),
+				protoCell(s, up && status.vision_bug),
 				txt((s.address ?? '') + (s.port ? ':' + s.port : '')),
 				s.sub_name ? txt(s.sub_name) : E('em', {}, _('manual')),
 				ping,
