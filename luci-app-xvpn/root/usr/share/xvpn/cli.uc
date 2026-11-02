@@ -1,6 +1,7 @@
 #!/usr/bin/ucode
 // SPDX-License-Identifier: MIT
 // xvpn command line: generate | ifnames | ifnames-wait | fw-apply [passthrough] | fw-guard | fw-refresh | fw-remove | update [sid...|all] | lists
+//   | xray-install <tag> [id] | xray-rollback
 
 'use strict';
 
@@ -10,13 +11,15 @@ import * as uloop from 'uloop';
 import {
 	load_config, read_json, write_json, write_file, mkdir_p, log, run, shq, is_updater, kill_tree, fnv1a,
 	ACTIVE_FILE, MANUAL_FILE, CONFIG_FILE, INDEX_FILE, VAR_DIR, RUN_DIR, UPDATE_LOCK,
-	FW_WANT_FILE, FW_MODE_FILE, FW_ERROR_FILE, FW_WARN_FILE, FW_LOCK_FILE, GENERATE_ERROR_FILE, STALE_FILE
+	FW_WANT_FILE, FW_MODE_FILE, FW_ERROR_FILE, FW_WARN_FILE, FW_LOCK_FILE, GENERATE_ERROR_FILE, STALE_FILE,
+	XRAY_FEED_BIN, XRAY_GH_BIN
 } from 'xvpn.util';
 import { all_servers, update, prune, list_change } from 'xvpn.subscription';
 import { build_index, generate, ports_error, config_key } from 'xvpn.xrayconf';
 import { host_env } from 'xvpn.host';
 import { resolve, apply, remove, fix_ifnames, ifnames_applied } from 'xvpn.firewall';
 import { direct_nets, direct_domains, update_lists, prune_lists } from 'xvpn.split';
+import { valid_tag, fetch, set_bin, job_lock, job_unlock, job_running, set_job, GH_META } from 'xvpn.xraycore';
 
 const cfg = load_config();
 
@@ -490,7 +493,84 @@ case 'lists': {
 	exit(r.changed ? 0 : 2);
 }
 
+// xray-core of a GitHub release (#31), a job in the background (luci.xvpn xray_install):
+// the progress and the result in xraycore.uc JOB_FILE. The service restarts with it; when
+// xray does not come up with it, back to the previous one. 0: done, 1: failed, 5: busy
+case 'xray-install': {
+	let tag = ARGV[1], id = ARGV[2] ?? '';
+	if (!valid_tag(tag)) {
+		warn(`bad tag: ${tag}\n`);
+		exit(1);
+	}
+	if (!job_lock(SELF)) {
+		warn('another xray install is running\n');
+		exit(5);
+	}
+	let j = { id, state: 'running', step: 'start', tag, started: time() };
+	let step = (s) => { j.step = s; set_job(j); };
+	let fail = (err) => {
+		log(`xray ${tag}: ${err}`);
+		set_job({ ...j, state: 'failed', error: err });
+		job_unlock();
+		exit(1);
+	};
+	step('start');
+	let prev = cfg.main.xray_bin, before = length(read_json(INDEX_FILE)?.servers ?? []);
+	let r = fetch(tag, active_port(), step);
+	if (r.error)
+		fail(r.error);
+	log(`xray ${tag} downloaded (${r.via}) into ${XRAY_GH_BIN}`);
+	if (prev != XRAY_GH_BIN && !set_bin(XRAY_GH_BIN))
+		fail('cannot write /etc/config/xvpn');
+	if (cfg.main.enabled) {
+		step('restart');
+		system('/etc/init.d/xvpn restart >/dev/null 2>&1 </dev/null');
+		// generate tests the servers with it first: give it the reload's time
+		let up = !before;
+		for (let i = 0; i < 90 && !up; i++) {
+			system('sleep 1');
+			let conn = ubus.connect(null, 2);
+			up = !!conn?.call('service', 'list', { name: 'xvpn' })?.xvpn?.instances?.xray?.running;
+		}
+		if (!up) {
+			if (prev != XRAY_GH_BIN) {
+				set_bin(prev);
+				system('/etc/init.d/xvpn restart >/dev/null 2>&1 </dev/null');
+			}
+			fail(`xray ${tag} did not start${(prev != XRAY_GH_BIN) ? `, back to ${prev}` : ''}`);
+		}
+	}
+	let after = length(read_json(INDEX_FILE)?.servers ?? []);
+	log(`xray ${tag} (${r.version}) is in use${(after < before) ? `, it rejects ${before - after} of ${before} servers` : ''}`);
+	set_job({ ...j, state: 'done', step: null, version: r.version, via: r.via, servers: { before, after } });
+	job_unlock();
+	exit(0);
+}
+
+// back to xray-core of the feed; the release is removed
+case 'xray-rollback': {
+	if (!access(XRAY_FEED_BIN, 'x')) {
+		warn(`no ${XRAY_FEED_BIN}: the package xray-core is not installed\n`);
+		exit(1);
+	}
+	if (job_running()) {
+		warn('an xray install is running\n');
+		exit(5);
+	}
+	if (cfg.main.xray_bin != XRAY_FEED_BIN && !set_bin(XRAY_FEED_BIN)) {
+		warn('cannot write /etc/config/xvpn\n');
+		exit(1);
+	}
+	unlink(XRAY_GH_BIN);
+	unlink(GH_META);
+	log(`back to xray-core of the package (${XRAY_FEED_BIN})`);
+	// in the background: rpcd waits for this command no longer than 30 s
+	if (cfg.main.enabled)
+		system('(/etc/init.d/xvpn restart) >/dev/null 2>&1 </dev/null &');
+	exit(0);
+}
+
 default:
-	warn('usage: cli.uc generate | ifnames | ifnames-wait | fw-apply [passthrough] | fw-guard | fw-refresh | fw-remove | update [sid...|all] | lists\n');
+	warn('usage: cli.uc generate | ifnames | ifnames-wait | fw-apply [passthrough] | fw-guard | fw-refresh | fw-remove | update [sid...|all] | lists | xray-install <tag> [id] | xray-rollback\n');
 	exit(1);
 }

@@ -81,7 +81,8 @@ luci-app-xvpn/
   root/usr/share/ucode/xvpn/xrayconf.uc        генерация config.json и индекса серверов
   root/usr/share/ucode/xvpn/firewall.uc        nft-правила и ip rule/route
   root/usr/share/ucode/xvpn/split.uc           раздельное туннелирование: проверка адресов и доменов, список России (§7.3)
-  root/usr/share/xvpn/cli.uc                   CLI: generate / ifnames / ifnames-wait / fw-apply / fw-guard / fw-refresh / fw-remove / update
+  root/usr/share/ucode/xvpn/xraycore.uc        xray-core из релизов GitHub: архитектура, .dgst, распаковка zip, задание установки (§6.14)
+  root/usr/share/xvpn/cli.uc                   CLI: generate / ifnames / ifnames-wait / fw-apply / fw-guard / fw-refresh / fw-remove / update / lists / xray-install / xray-rollback
   root/usr/share/xvpn/xvpnd.uc                 демон
   root/usr/share/xvpn/firewall.include         fw4 include: вернуть правила после fw4 flush
   root/usr/share/xvpn/rpcd-user.sh             пользователь rpcd для desktop-приложения (§8.1)
@@ -111,6 +112,9 @@ scripts/{test,itest,build,luci,ci}.sh          тесты, сборка ipk, LuC
 | `/var/run/xvpn/fw_route` | пары `tproxy_mark`/`route_table`, чьи `ip rule` и `local default dev lo` могут стоять (IPv4 и IPv6); после смены метки или таблицы правила с прежними снимаются, `fw-remove` и режимы без TPROXY снимают все; прежние снимаются только после успешного `nft -f` (старые правила nft еще ставят старую метку); свои — только `from all fwmark M/M lookup T` без других селекторов (T — номер или имя из `/etc/iproute2/rt_tables` и `rt_tables.d/*.conf`), удаляются по `pref`; без файла (после загрузки) своим считается только точное совпадение с текущей парой | `cli.uc fw-*`; удаляют `fw-remove` и режимы `block` / `passthrough` / `minimal` |
 | `/var/lock/xvpn-fw` | блокировка: `fw-*` выполняются по одному | `cli.uc fw-*` |
 | `/var/run/xvpn/updating` | симлинк на pid идущего `cli.uc update` — единственный флаг «идёт обновление» | `cli.uc update` |
+| `/usr/lib/xvpn/xray`, `/usr/lib/xvpn/xray.json` | xray-core из релиза GitHub и его `{tag, version, installed, sha256}` (§6.14); sysupgrade их не сохраняет | `cli.uc xray-install`; удаляет `cli.uc xray-rollback` |
+| `/var/run/xvpn/xray-job.json` | задание установки xray: `id`, `state` (`running`/`done`/`failed`), `step`, `tag`, `error`, `version`, `via`, `servers {before, after}` | первое `running` — rpcd `xray_install`, дальше `cli.uc xray-install` |
+| `/var/run/xvpn/xray-job.lock` | симлинк на pid идущего `cli.uc xray-install` | `cli.uc xray-install` |
 | `/var/run/xvpn/stale` | обновление подписок изменило только неиспользуемые серверы; применит следующий `reload` (§6) | ставит `cli.uc update` (каждый раз с новым содержимым), снимает `cli.uc generate`, записав конфиг, — если маркер не поменялся с начала generate |
 
 ## 4. UCI-схема `/etc/config/xvpn`
@@ -328,7 +332,7 @@ ubus `xvpn`: `status` → `{state, active, since, fails, servers:[{id,name,proto
 
 ### 6.8 Версии xray (#14)
 
-Поддерживаются xray-core 25.1.30 из фида (по умолчанию) и релиз с GitHub, закреплённый в `scripts/ci.sh` (`XRAY_PINNED`, сейчас 26.10.29; 26.10.21 проверен вручную); оба проверяет `scripts/ci.sh`, остальные — нет. Тег закреплён, чтобы новый релиз xray не валил CI у всех веток и `ci.sh release`: о релизе новее закреплённого (`releases/latest` на GitHub) `ci.sh` только предупреждает, его проверяют `XRAY_TAG=<тег> [XRAY_REJECT=…] sh scripts/ci.sh` и поднимают `XRAY_PINNED` вместе с `XRAY_PINNED_REJECT`. Бинарь подменяется через `main.xray_bin` (README, «Другая версия xray»).
+Поддерживаются xray-core 25.1.30 из фида (по умолчанию) и релиз с GitHub, закреплённый в `scripts/ci.sh` (`XRAY_PINNED`, сейчас 26.10.31; 26.10.21 и 26.10.29 проверены так же); оба проверяет `scripts/ci.sh`, остальные — нет. Тег закреплён, чтобы новый релиз xray не валил CI у всех веток и `ci.sh release`: о релизе новее закреплённого (`releases/latest` на GitHub) `ci.sh` только предупреждает, его проверяют `XRAY_TAG=<тег> [XRAY_REJECT=…] sh scripts/ci.sh` и поднимают `XRAY_PINNED` вместе с `XRAY_PINNED_REJECT`. Бинарь подменяется через `main.xray_bin` (README, «Другая версия xray»), релиз с GitHub ставится из LuCI и desktop-приложения (§6.14).
 
 - **Конфиг один, без флагов возможностей.** Всё, что пишет `xrayconf.uc` (dokodemo-inbound'ы, `metrics` без `listen`, DNS-модуль, SOCKS-тестовые порты, `vnext`/`servers` в outbound'ах), 26.x принимает; WebSocket, gRPC и HTTPUpgrade он лишь предупреждает о депрекации. Поэтому генератор версию xray не определяет: `xray version` — ещё один запуск бинаря на 25–33 МБ ради ветки, которой нет (демон читает её только для предупреждения, см. ниже). Когда формат разойдётся (переименование, удаление поля, которое пишет сам генератор), версию надо брать один раз на сигнатуру бинаря (`bin_sig()` в `cli.uc`) и хранить рядом с вердиктами в `tested.json`; CI заметит такое расхождение при подъёме `XRAY_PINNED` — `test-xray` обязательный.
 - **tcp+tls+vision на xray до 25.9.5 (#105).** На 25.1.30 из фида при параллельных HTTPS-запросах через серверы tcp+tls+vision часть TLS-сессий клиентов ломается (`bad record mac`, байты искажены в туннеле); через REALITY и gRPC — нет. Замер на AX3000T вторым xray на тех же серверах (копия outbound на `127.0.0.1:21999`, 15 пачек × 30): 25.1.30 — 10 из 900, 25.8.3 — 4 из 900, 25.9.5, 25.10.15, 26.1.23 и 26.10.31 — 0 (всего ~3900). Ошибка в клиентском xray, вероятно — исправление `MultiBuffer.Compact()` (XTLS/Xray-core#5015) в 25.9.5. Пакет xray не поднимет (фид), поэтому демон один раз на бинарь (`bin_sig()`) читает `xray version` и отдаёт в статусе `xray_version` и `vision_bug` (`util.uc VISION_FIXED`), а вкладка «Статус» предупреждает у активного tcp+tls+vision и метит такие серверы в списке. Автовыбор их не понижает: ошибка — около 1% запросов только под параллельной нагрузкой, а сервер может быть самым быстрым.
@@ -384,6 +388,18 @@ ubus `xvpn`: `status` → `{state, active, since, fails, servers:[{id,name,proto
 - **Замер.** `speedtest_url` (по умолчанию 10 МБ с `proof.ovh.net`; `speed.cloudflare.com/__down` с большим `bytes` отдаёт 1 байт) скачивается через тестовый порт каждого живого сервера в автоподборе (и активного) по очереди: один curl за раз, не дольше `speedtest_time` (10 с), не во время теста всех и reload. Скорость считается от первого байта до конца (`size / (time_total − time_starttransfer)`), меньше 256 КБ — неудача. Замер с `dl_url` не объединён: тот проверяет активный на DPI раз в 5 минут и весит 64 КБ.
 - **Трафик.** Один прогон — до 10 МБ на сервер (17 серверов — около 170 МБ). Поэтому замер идёт по расписанию только в режимах `speed` и `balanced`, раз в `speedtest_interval` (6 ч); в режиме `ping` — только по кнопке (`ubus xvpn speedtest`). Если клиенты качают больше `speedtest_busy` Мбит/с (счётчики туннеля, §7.4), прогон ждёт, но не дольше ещё одного интервала. После перезапуска демона прогон не повторяется раньше срока: `speeds` и время прогона хранятся в `state.json`.
 - **Статус.** У сервера `speed` (Мбит/с, −1 — неудача, нет поля — не замерен) и `speed_tested`; в корне `auto_mode`, `optimal` — лучший по `balanced` при любом режиме и ручном выборе (нет, пока ни у кого нет скорости) и `speedtest {running, runs, last, url}`. LuCI и desktop показывают скорость в списке серверов и метку «оптимальный».
+
+### 6.14 xray-core из релизов GitHub (#31)
+
+Свежий xray ставится рядом с пакетным: `/usr/lib/xvpn/xray` (на overlay, ~35 МБ), `/usr/bin/xray` из `xray-core` остаётся для отката. Пакет `xray-core` не трогаем: его файл перезапишет следующий `opkg upgrade`, и у opkg сломается учёт. tmpfs не подходит: 35 МБ RAM из 256 и новая загрузка после каждой перезагрузки, до поднятия VPN.
+
+- **Источник** — `github.com/XTLS/Xray-core/releases`, без API (60 запросов в час без токена): последний тег — из редиректа `releases/latest`, файлы — `download/<tag>/Xray-linux-<arch>.zip` и `.dgst`. Имя zip — из `DISTRIB_ARCH` (`aarch64_*` → `arm64-v8a`, `arm_*` → `arm32-v7a`/`v6`/`v5`, `mipsel_*` → `mips32le`, …). Скачивание сначала через тестовый порт активного сервера, потом напрямую, как у списков (§7.3). Целостность — SHA2-256 из `.dgst` (с того же HTTPS); подписи у XTLS нет.
+- **Распаковка без unzip.** В базовой системе нет `unzip`, ставить его ради одного файла не хочется. `xraycore.uc` читает центральный каталог zip, находит `xray` (deflate или stored) и отдаёт его данные в `gunzip -c` из busybox, обернув в gzip-заголовок и хвост с CRC32 и длиной из каталога: gunzip сам проверяет CRC. Zip64 не поддерживается (xray меньше 4 ГБ).
+- **Проверки до переключения**: место на overlay (размер из каталога + 1 МБ), `xray version` нового бинаря (запускается на этой архитектуре и называет ту же версию, что тег), затем `rename` из `.new`. До этого `xray_bin` не меняется и ничего не перезапускается.
+- **Переключение** — `xvpn.main.xray_bin` и `/etc/init.d/xvpn restart`. `generate` сам перепроверяет серверы: `tested.json` привязан к сигнатуре бинаря (§6.8), отвергнутые новым xray выпадают, в задании — `servers {before, after}`. Если серверы были, а инстанс xray за 90 с не поднялся (бинарь падает или отвергает все серверы), задание возвращает прежний `xray_bin` и перезапускает службу ещё раз.
+- **Фон и права.** Загрузка и перезапуск дольше 30 с, которые rpcd даёт вызову: `xray_install` пишет первое состояние задания и запускает `cli.uc xray-install <tag> <id>` в фоне, клиент опрашивает `xray` до своего `id`. Задание одно (симлинк-замок с pid); `running` без живого pid дольше 10 с — `lost`. `xray_install` и `xray_rollback` — в группе ACL `luci-app-xvpn-xray`, её получает только root: пользователь rpcd desktop-приложения не меняет бинарь, который служба запускает от root, даже на официальный.
+- **После sysupgrade** `/usr/lib/xvpn` пропадает, `/etc/config/xvpn` остаётся: `load_config()` для `xray_bin` = `/usr/lib/xvpn/xray` без файла молча отдаёт `/usr/bin/xray`.
+- Desktop-приложение (вкладка «О программе», `desktop/src/core/xraycore.ts`) ничего не качает само, в отличие от пакета luci-app-xvpn (`desktop/README.md`, «Пакет на роутере»): тот же `xray_install` и опрос `xray`.
 
 ## 7. nftables
 
@@ -548,7 +564,7 @@ LuCI обращается к демону только через rpcd `luci.xvp
 - Исключения/включения по MAC/IP отдельных устройств.
 - Уведомления в Telegram (переключение сервера, ошибки подписки, падение VPN).
 - Другие страны и готовые доменные списки для раздельного туннелирования (§7.3).
-- Обновление xray-core с GitHub (свежие версии, VLESS encryption, hysteria2).
+- VLESS encryption (ML-KEM) и hysteria2 в парсере ссылок: xray с GitHub (§6.14) их уже умеет.
 - LED-индикация статуса VPN на AX3000T.
 - Импорт по QR, бэкап/восстановление настроек и кэша.
 - Графики трафика и задержек.

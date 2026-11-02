@@ -3,7 +3,7 @@
 
 'use strict';
 
-import { readfile, writefile, rename, mkdir, stat, popen, readlink, lsdir } from 'fs';
+import { readfile, writefile, rename, mkdir, stat, popen, readlink, lsdir, access } from 'fs';
 import { cursor } from 'uci';
 
 export const ETC_DIR = '/etc/xvpn';
@@ -220,7 +220,10 @@ export function version_older(a, b) {
 // The values that go into commands and routing run as root: whoever may write /etc/config/xvpn
 // (the rpcd user of the desktop app, #81) must not get more than the VPN with them. A bad
 // value is replaced by the default and logged; LuCI checks the same before it saves.
-const XRAY_BIN = '/usr/bin/xray';
+// xray-core of the feed and the GitHub release the app installs (#31, xraycore.uc)
+export const XRAY_FEED_BIN = '/usr/bin/xray';
+export const XRAY_GH_BIN = '/usr/lib/xvpn/xray';
+const XRAY_BIN = XRAY_FEED_BIN;
 export const AUTO_MODES = [ 'ping', 'speed', 'balanced' ];
 const DEFAULT_URL = 'https://www.gstatic.com/generate_204';
 
@@ -241,6 +244,12 @@ function checked(name, v, ok, def) {
 		return v ?? def;
 	log(`${name} '${v}' is not allowed, using ${def ?? 'none'}`);
 	return def;
+}
+
+// a sysupgrade keeps /etc/config/xvpn but not the release in /usr/lib/xvpn: back to the feed's
+function xray_bin(v) {
+	v = checked('xray_bin', v || null, valid_bin, XRAY_BIN);
+	return (v == XRAY_GH_BIN && !access(v, 'x')) ? XRAY_BIN : v;
 }
 
 // ports of xray on the router: from 1024, the rules drop the ones below for everyone else
@@ -287,7 +296,7 @@ export function load_config(confdir) {
 	let cfg = {
 		main: {
 			enabled: bool(m.enabled, false),
-			xray_bin: checked('xray_bin', m.xray_bin || null, valid_bin, XRAY_BIN),
+			xray_bin: xray_bin(m.xray_bin),
 			loglevel: m.loglevel || 'warning',
 			tproxy_port: port('tproxy_port', m.tproxy_port, 12345),
 			dns_port: port('dns_port', m.dns_port, 10853),

@@ -6,10 +6,11 @@
 import { readfile, popen } from 'fs';
 import { cursor } from 'uci';
 import { connect } from 'ubus';
-import { load_config, read_json, run, shq, update_running, no_auto_ids, INDEX_FILE, ACTIVE_FILE } from 'xvpn.util';
+import { load_config, read_json, run, shq, update_running, no_auto_ids, INDEX_FILE, ACTIVE_FILE, XRAY_FEED_BIN } from 'xvpn.util';
 import { all_servers, load_cache, load_status, due_in } from 'xvpn.subscription';
 import { parse_link, transport } from 'xvpn.links';
 import { lists_status, lists_due_in, parse_nets, RU_FILE } from 'xvpn.split';
+import { info as xray_info, latest as xray_latest, valid_tag, job as xray_job, set_job } from 'xvpn.xraycore';
 
 const CLI = '/usr/share/xvpn/cli.uc';
 const INIT = '/etc/init.d/xvpn';
@@ -326,6 +327,50 @@ const methods = {
 				want: readfile(FW_WANT_FILE), mode: readfile(FW_MODE_FILE), error: readfile(FW_ERROR_FILE),
 				warning: readfile(FW_WARN_FILE),
 			};
+		}
+	},
+	// xray-core (#31): which binary runs, the feed's and the GitHub release's, the install job
+	xray: {
+		call: function() {
+			return xray_info(load_config());
+		}
+	},
+
+	// the tag of the latest release on GitHub (up to 10 s, twice through the active server)
+	xray_latest: {
+		call: function() {
+			let idx = read_json(INDEX_FILE) ?? {};
+			let e = filter(idx.servers ?? [], (e) => e.id == idx.active)[0];
+			return xray_latest(e?.test_port);
+		}
+	},
+
+	// downloads and installs the release tag, restarts the service with it: in the background,
+	// done once xray.job has this id and is no longer running. Root only (ACL luci-app-xvpn-xray)
+	xray_install: {
+		args: { tag: 'tag' },
+		call: function(req) {
+			let tag = req.args?.tag;
+			if (!valid_tag(tag))
+				return { ok: false, error: 'invalid tag' };
+			// also a job started a moment ago that has not taken its lock yet
+			if (xray_job()?.state == 'running')
+				return { ok: false, error: 'busy' };
+			let id = replace(readfile('/proc/sys/kernel/random/uuid') ?? `${time()}`, /[^0-9a-f]/g, '');
+			// before the job: the next xray call must not show the previous one
+			set_job({ id, state: 'running', step: 'start', tag, started: time() });
+			bg(sprintf('/usr/bin/ucode %s xray-install %s %s', CLI, shq(tag), shq(id)));
+			return { ok: true, id };
+		}
+	},
+
+	// back to xray-core of the package, the release is removed; the restart in the background
+	xray_rollback: {
+		call: function() {
+			if (xray_job()?.state == 'running')
+				return { ok: false, error: 'busy' };
+			let r = run(sprintf('/usr/bin/ucode %s xray-rollback </dev/null 2>&1', CLI));
+			return (r.code == 0) ? { ok: true, bin: XRAY_FEED_BIN } : { ok: false, error: trim(r.out) || `exit code ${r.code}` };
 		}
 	},
 };

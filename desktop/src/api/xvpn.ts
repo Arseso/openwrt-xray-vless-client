@@ -239,6 +239,50 @@ export interface VersionReply {
 
 export type ServiceAction = 'start' | 'stop' | 'restart';
 
+/** which xray-core runs (#31): the package xray-core, a GitHub release, a path set by hand */
+export type XraySource = 'feed' | 'github' | 'other';
+
+export type XrayStep = 'start' | 'download' | 'check' | 'unpack' | 'test' | 'restart';
+
+/** the install job on the router (usr/share/ucode/xvpn/xraycore.uc JOB_FILE) */
+export interface XrayJob {
+  id: string;
+  /** lost: the job died halfway */
+  state: 'running' | 'done' | 'failed' | 'lost';
+  step?: XrayStep | null;
+  tag: string;
+  started?: number;
+  /** failed: why */
+  error?: string | null;
+  /** done: what the binary says */
+  version?: string | null;
+  via?: 'tunnel' | 'direct' | null;
+  /** done: servers of the config before and after (the new xray may reject some) */
+  servers?: { before: number; after: number } | null;
+}
+
+export interface XrayReply {
+  /** xvpn.main.xray_bin as the service uses it */
+  bin: string;
+  source: XraySource;
+  /** /usr/bin/xray of the package; absent without it */
+  feed?: { version?: string | null } | null;
+  /** the release in /usr/lib/xvpn; absent when there is none */
+  github?: { tag: string; version: string; installed: number } | null;
+  /** DISTRIB_ARCH */
+  arch?: string | null;
+  /** the zip of the release for this arch; absent: XTLS builds none */
+  asset?: string | null;
+  job?: XrayJob | null;
+}
+
+export type XrayLatestReply = { tag: string; via: 'tunnel' | 'direct' } | { error: string };
+
+export interface XrayInstallReply extends OkReply {
+  /** the job to wait for in xray().job */
+  id?: string;
+}
+
 export class XvpnApi {
   constructor(readonly ubus: UbusClient) {}
 
@@ -324,5 +368,25 @@ export class XvpnApi {
 
   splitUpdate(): Promise<OkReply> {
     return this.call('split_update');
+  }
+
+  /** xray-core on the router (#31); acl or no_method: a package before #31 */
+  xray(): Promise<XrayReply> {
+    return this.call('xray');
+  }
+
+  /** the tag of the latest release on GitHub, asked by the router (up to 20 s) */
+  xrayLatest(): Promise<XrayLatestReply> {
+    return this.ubus.call<XrayLatestReply>(OBJECT, 'xray_latest', {}, { timeoutMs: 30_000 });
+  }
+
+  /** root only: the router downloads tag and restarts with it; wait for xray().job.id */
+  xrayInstall(tag: string): Promise<XrayInstallReply> {
+    return this.call('xray_install', { tag });
+  }
+
+  /** root only: back to xray-core of the package */
+  xrayRollback(): Promise<OkReply> {
+    return this.call('xray_rollback');
   }
 }

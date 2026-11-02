@@ -6,8 +6,13 @@
 'require form';
 'require rpc';
 'require uci';
+'require ui';
 
 const callServers = rpc.declare({ object: 'luci.xvpn', method: 'servers' });
+const callXray = rpc.declare({ object: 'luci.xvpn', method: 'xray' });
+const callXrayLatest = rpc.declare({ object: 'luci.xvpn', method: 'xray_latest' });
+const callXrayInstall = rpc.declare({ object: 'luci.xvpn', method: 'xray_install', params: [ 'tag' ] });
+const callXrayRollback = rpc.declare({ object: 'luci.xvpn', method: 'xray_rollback' });
 
 // the defaults of util.uc load_config(); an empty field means the default
 const DEFAULTS = {
@@ -39,6 +44,113 @@ function integer(min, max) {
 			return _('Enter a whole number from %d to %d').format(min, max);
 		return true;
 	};
+}
+
+// 26.10.31 or v26.10.31 against 25.1.30: < 0 older, 0 the same, > 0 newer (xraycore.uc compare())
+function compareXray(a, b) {
+	const pa = String(a ?? '').replace(/^v/, '').replace(/-.*/, '').split('.');
+	const pb = String(b ?? '').replace(/^v/, '').replace(/-.*/, '').split('.');
+	for (let i = 0; i < 3; i++) {
+		const d = (parseInt(pa[i], 10) || 0) - (parseInt(pb[i], 10) || 0);
+		if (d)
+			return d;
+	}
+	return 0;
+}
+
+// #31: xray-core of a GitHub release beside the one of the package. The router downloads it
+// and restarts the service (luci.xvpn xray_install), the job is polled until it is over
+function xrayCore() {
+	const box = E('div', {});
+	let latest = null, checking = false, timer = null;
+	const steps = {
+		start: _('starting'), download: _('downloading'), check: _('checking the digest'),
+		unpack: _('unpacking'), test: _('testing the binary'), restart: _('restarting the service'),
+	};
+
+	const running = (x) => x?.job?.state == 'running';
+	const version = (x) => (x.source == 'github') ? x.github?.version : (x.source == 'feed') ? x.feed?.version : null;
+
+	const install = (x, tag) => ui.showModal(_('Install xray %s').format(tag), [
+		E('p', {}, _('The router downloads xray %s for %s from github.com/XTLS/Xray-core, checks its SHA-256 and restarts the VPN with it: the clients lose their connections for a moment. Servers that this xray rejects are dropped (the reason is in the log); if xray does not start at all, the previous one comes back.').format(tag, x.arch)),
+		E('div', { 'class': 'right' }, [
+			E('button', { 'class': 'cbi-button', 'click': ui.hideModal }, _('Cancel')), ' ',
+			E('button', { 'class': 'cbi-button cbi-button-positive', 'click': () => {
+				ui.hideModal();
+				callXrayInstall(tag).then((r) => r?.ok ? refresh() : ui.addNotification(null, E('p', {}, _('Install failed: %s').format(r?.error ?? '?')), 'error'));
+			} }, _('Install')),
+		]),
+	]);
+
+	const rollback = () => callXrayRollback().then((r) => {
+		if (!r?.ok)
+			ui.addNotification(null, E('p', {}, _('Failed: %s').format(r?.error ?? '?')), 'error');
+		refresh();
+	});
+
+	const check = (x) => {
+		checking = true;
+		draw(x);
+		callXrayLatest().then((r) => { latest = r; }, (e) => { latest = { error: e.message }; })
+			.finally(() => { checking = false; refresh(); });
+	};
+
+	const draw = (x) => {
+		if (!x) {
+			box.replaceChildren(E('em', {}, _('No answer from the router (the package may be older than this page).')));
+			return;
+		}
+		const rows = [];
+		const v = version(x);
+		if (x.source == 'github')
+			rows.push(E('p', {}, _('In use: xray %s from GitHub, installed %s.').format(x.github?.version ?? '?', x.github?.installed ? new Date(x.github.installed * 1000).toLocaleString() : '?')));
+		else if (x.source == 'feed')
+			rows.push(E('p', {}, _('In use: xray %s of the package xray-core.').format(x.feed?.version ?? '?')));
+		else
+			rows.push(E('p', {}, _('In use: %s (set by hand).').format(x.bin)));
+
+		const j = x.job;
+		if (running(x))
+			rows.push(E('p', {}, [ E('span', { 'class': 'spinning' }, _('Installing xray %s: %s…').format(j.tag, steps[j.step] ?? j.step ?? '')) ]));
+		else if (j?.state == 'failed')
+			rows.push(E('p', { 'style': 'color:var(--error-color-medium, #c00)' }, _('Install of xray %s failed: %s').format(j.tag, j.error)));
+		else if (j?.state == 'lost')
+			rows.push(E('p', { 'style': 'color:var(--error-color-medium, #c00)' }, _('Install of xray %s stopped halfway.').format(j.tag)));
+		else if (j?.state == 'done' && j.servers && j.servers.after < j.servers.before)
+			rows.push(E('p', {}, _('xray %s rejects %d of %d servers, see the log.').format(j.tag, j.servers.before - j.servers.after, j.servers.before)));
+
+		if (!x.asset)
+			rows.push(E('p', {}, E('em', {}, _('XTLS publishes no xray for this router (%s).').format(x.arch ?? '?'))));
+		else if (latest?.error)
+			rows.push(E('p', { 'style': 'color:var(--error-color-medium, #c00)' }, _('Cannot check GitHub: %s').format(latest.error)));
+		else if (latest?.tag) {
+			const cmp = compareXray(latest.tag, v);
+			rows.push(E('p', {}, (cmp > 0) ? _('Latest release: %s, newer.').format(latest.tag)
+				: (cmp == 0) ? _('Latest release: %s, the one in use.').format(latest.tag) : _('Latest release: %s, older than the one in use.').format(latest.tag)));
+		}
+
+		const busy = running(x) || checking;
+		const buttons = [];
+		if (x.asset)
+			buttons.push(E('button', { 'class': 'cbi-button', 'disabled': busy ? '' : null, 'click': () => check(x) },
+				checking ? _('Checking…') : _('Check for updates')));
+		if (x.asset && latest?.tag && !(x.source == 'github' && compareXray(latest.tag, v) == 0))
+			buttons.push(' ', E('button', { 'class': 'cbi-button cbi-button-positive', 'disabled': busy ? '' : null, 'click': () => install(x, latest.tag) },
+				_('Install %s').format(latest.tag)));
+		if (x.source == 'github' && x.feed)
+			buttons.push(' ', E('button', { 'class': 'cbi-button cbi-button-negative', 'disabled': busy ? '' : null, 'click': rollback },
+				_('Back to xray %s of the package').format(x.feed.version ?? '')));
+		rows.push(E('div', {}, buttons));
+		box.replaceChildren(...rows);
+
+		clearTimeout(timer);
+		if (running(x))
+			timer = setTimeout(refresh, 2000);
+	};
+
+	const refresh = () => L.resolveDefault(callXray(), null).then(draw);
+	refresh();
+	return box;
 }
 
 return view.extend({
@@ -197,8 +309,12 @@ return view.extend({
 		s = m.section(form.NamedSection, 'main', 'general', _('xray'));
 		s.addremove = false;
 
+		o = s.option(form.DummyValue, '_xray_core', _('xray-core'),
+			_('A newer xray from the GitHub releases of XTLS, beside the one of the package, which stays for the way back. It takes about 35 MB of flash.'));
+		o.renderWidget = () => xrayCore();
+
 		o = s.option(form.Value, 'xray_bin', _('Path to xray'),
-			_('The xray-core binary (25.x).'));
+			_('The xray-core binary: the one of the package is /usr/bin/xray, a GitHub release (above) goes to /usr/lib/xvpn/xray.'));
 		o.placeholder = DEFAULTS.xray_bin;
 		// the same as valid_bin() in util.uc: the service runs it as root
 		o.validate = (sid, v) => !v || /^(\/[A-Za-z0-9_][A-Za-z0-9._-]*)*\/xray[A-Za-z0-9._-]*$/.test(v.trim())

@@ -40,7 +40,13 @@ export type ErrorCode =
   | 'pkg_unsupported' // the router has no opkg (apk) or no way to install
   | 'pkg_busy' // another install is running on the router
   | 'pkg_failed' // opkg failed (detail.output)
-  | 'pkg_lost'; // the router did not come back with the new version in time
+  | 'pkg_lost' // the router did not come back with the new version in time
+  // xray-core from GitHub, installed by the router (#31, src/core/xraycore.ts)
+  | 'xray_old_package' // luci-app-xvpn before #31: no luci.xvpn xray
+  | 'xray_latest' // the router cannot reach GitHub (detail.output)
+  | 'xray_busy' // another xray install is running on the router
+  | 'xray_failed' // the install failed on the router (detail.output)
+  | 'xray_lost'; // the install stopped halfway or did not end in time
 
 export interface ErrorDetail {
   /** SHA-256 of the certificate the router presented, AA:BB:... */
@@ -58,7 +64,7 @@ export interface ErrorDetail {
   version?: string;
   api?: number;
   supported?: number;
-  /** pkg_failed: the end of the opkg output */
+  /** pkg_failed: the end of the opkg output; xray_failed, xray_latest: the router's reason */
   output?: string;
 }
 
