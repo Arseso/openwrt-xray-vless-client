@@ -3,7 +3,7 @@
 		"description": "Grant access to XVPN",
 		"read": {
 			"ubus": {
-				"luci.xvpn": [ "version", "status", "servers", "subscriptions", "access_points", "stats", "log", "firewall", "parse_links", "split" ]
+				"luci.xvpn": [ "version", "status", "servers", "subscriptions", "access_points", "stats", "log", "firewall", "parse_links", "split", "xray", "xray_latest" ]
 			},
 			"uci": [ "xvpn", "firewall" ]
 		},
@@ -46,6 +46,14 @@
 			},
 			"ubus": {
 				"file": [ "write", "exec", "remove" ]
+			}
+		}
+	},
+	"luci-app-xvpn-xray": {
+		"description": "Grant installing xray-core from GitHub releases (root only, not the rpcd user of rpcd-user.sh)",
+		"write": {
+			"ubus": {
+				"luci.xvpn": [ "xray_install", "xray_rollback" ]
 			}
 		}
 	}

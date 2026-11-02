@@ -330,6 +330,29 @@ XVPN_URL=http://127.0.0.1:$PORT XVPN_CONTAINER=$NAME XVPN_PKG_OLD=… XVPN_PKG_N
   npx vitest run --config vitest.stand.config.ts tests/stand/routerpkg.test.ts
 ```
 
+### xray-core на роутере
+
+Ниже на той же вкладке — блок «xray-core на роутере» (`src/core/xraycore.ts`, `XrayFlow`, #31).
+В отличие от пакета, ПК ничего не качает: роутер сам берёт релиз XTLS для своей архитектуры
+(DESIGN.md §6.14), приложение только запускает задание и ждёт его.
+
+- При открытии вкладки — `luci.xvpn xray`: какой xray работает (`feed` — пакет `xray-core`,
+  `github` — `/usr/lib/xvpn/xray`, `other` — путь задан вручную), есть ли релиз для этой
+  архитектуры, идущее задание. Задание, начатое в LuCI или другим приложением, показывается и
+  отслеживается так же.
+- «Проверить GitHub» — `xray_latest`: тег последнего релиза глазами роутера (таймаут вызова 30 с).
+  Ошибка — `xray_latest` с причиной curl.
+- «Установить vX…» после подтверждения — `xray_install {tag}` → `id`, затем `xray` каждые 2 с,
+  пока `job.id` не совпадёт и `state` не перестанет быть `running` (не больше 5 мин). `failed` —
+  `xray_failed` с причиной роутера, `lost` — `xray_lost`. Пока xvpn перезапускается, rpcd на месте;
+  `unreachable`/`timeout` терпятся до конца срока. Готово: версия и, если новый xray отверг часть
+  серверов, сколько из скольких.
+- «Вернуть xray … из пакета» после подтверждения — `xray_rollback`.
+
+Ставить и откатывать может только root: у пользователя из `rpcd-user.sh` нет группы ACL
+`luci-app-xvpn-xray`, отказ — `need_root`. Пакет до #31 не знает `xray` — `xray_old_package`.
+Поток один на профиль (`xrayFlowFor`), как у пакета.
+
 ## Подключение
 
 - Профиль: имя, адрес `https://host[:port]` (по умолчанию `https://<шлюз ПК>`; без

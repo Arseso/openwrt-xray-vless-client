@@ -461,19 +461,21 @@ config login 'xvpn_xvpn'
 ### Другая версия xray
 
 По умолчанию работает `xray-core` 25.1.30 из фида OpenWrt 24.10. Путь к бинарю задаёт
-`xvpn.main.xray_bin`, так что можно поставить свежий релиз с
-[GitHub](https://github.com/XTLS/Xray-core/releases), не трогая пакет.
+`xvpn.main.xray_bin`, так что свежий релиз с
+[GitHub](https://github.com/XTLS/Xray-core/releases) ставится рядом, не трогая пакет: из LuCI и
+desktop-приложения в пару кликов (ниже) или вручную.
 
 | xray | Статус |
 |---|---|
 | 25.1.30 (фид 24.10) | по умолчанию; CI, шаг `test`, и интеграционный тест; через серверы tcp+tls+vision часть параллельных соединений ломается, исправлено в 25.9.5 (см. «Ограничения») |
-| 26.10.29 (закреплён в `scripts/ci.sh`, `XRAY_PINNED`) | CI, шаг `test-xray`: конфиг принимается, серверы из таблицы ниже отвергаются по одному |
+| 26.10.31 (закреплён в `scripts/ci.sh`, `XRAY_PINNED`) | CI, шаг `test-xray`: конфиг принимается, серверы из таблицы ниже отвергаются по одному |
 | 26.10.21 | проверен вручную так же, результат тот же |
 | остальные | не проверялись; о релизе новее закреплённого `ci.sh` предупреждает |
 
 > **Внимание.** На xray 26 серверы с `allowInsecure=1` (или `insecure=1`) в ссылке и vless/trojan
 > без TLS к публичному адресу **отвергаются и пропадают из списка**. Если подписка состоит из
 > таких серверов, со свежим бинарём VPN останется без серверов — проверьте журнал после подмены.
+> Установка из LuCI в этом случае сама возвращает прежний xray (без серверов xray не запускается).
 
 Конфиг один для всех версий, по версии xray генератор ничего не меняет. Зато xray 26 запрещает
 то, что может прийти в подписке:
@@ -489,29 +491,47 @@ config login 'xvpn_xvpn'
 `xray rejected server "<имя>": <причина xray>`. Вердикт запоминается до смены бинаря, настроек или
 самого сервера, при следующих reload — строка `xray rejected N server(s) earlier: <имя> (<причина>)`.
 
-Как подменить бинарь (AX3000T и другие aarch64 — `Xray-linux-arm64-v8a.zip`). Бинарь 26.x
-весит ~33 МБ на флеше, zip — ~14 МБ в `/tmp` (это RAM): сначала проверьте место —
-`df -h /overlay` (нужно больше 35 МБ свободных) и `free`. Нужен `unzip`:
+#### Установка с GitHub из LuCI или desktop-приложения
+
+**Настройки → xray → xray-core** (или вкладка «О программе» desktop-приложения, блок «xray-core на
+роутере», [#31](https://github.com/Arseso/openwrt-xray-vless-client/issues/31)):
+
+1. «Проверить обновления» — роутер узнаёт тег последнего релиза по редиректу `releases/latest`
+   (без GitHub API) сначала через активный сервер, потом напрямую.
+2. «Установить vX.Y.Z» — роутер в фоне скачивает zip для своей архитектуры (`DISTRIB_ARCH`:
+   aarch64 → `Xray-linux-arm64-v8a.zip`, x86_64 → `Xray-linux-64.zip`, arm, mips, riscv64) и
+   `.dgst`, сверяет SHA2-256, проверяет место на флеше, распаковывает `xray` в `/usr/lib/xvpn/xray`
+   (`unzip` не нужен: хватает `gunzip` из busybox), запускает `xray version`, ставит
+   `xvpn.main.xray_bin` и перезапускает службу. Если xray с новым бинарём так и не поднялся,
+   возвращается прежний.
+3. «Вернуть xray … из пакета» — `xray_bin` снова `/usr/bin/xray`, релиз удаляется.
+
+Ставить и откатывать может только root (группа ACL `luci-app-xvpn-xray`); пользователь rpcd из
+`rpcd-user.sh` видит версии, но не устанавливает. Бинарь 26.x занимает ~35 МБ флеша, zip (~12 МБ)
+лежит в `/tmp`, то есть в RAM, пока идёт установка. После sysupgrade `/usr/lib/xvpn` пропадает —
+служба сама возвращается к `/usr/bin/xray`, релиз можно поставить снова.
+
+Из консоли то же самое:
 
 ```bash
-opkg update && opkg install unzip
-cd /tmp
-z=Xray-linux-arm64-v8a.zip; u=https://github.com/XTLS/Xray-core/releases/download/v26.10.29
-wget $u/$z $u/$z.dgst
-echo "$(sed -n 's/^SHA2-256= *//p' $z.dgst)  $z" | sha256sum -c -   # должно быть «OK»
-mkdir -p /usr/local/bin && unzip -o $z xray -d /usr/local/bin && rm $z $z.dgst
-/usr/local/bin/xray version
+ucode /usr/share/xvpn/cli.uc xray-install v26.10.31   # ход и результат: /var/run/xvpn/xray-job.json
+ucode /usr/share/xvpn/cli.uc xray-rollback
+```
+
+#### Вручную
+
+Любой другой бинарь — через `xray_bin` (абсолютный путь к файлу с именем `xray*`):
+
+```bash
 uci set xvpn.main.xray_bin=/usr/local/bin/xray
 uci commit xvpn
 /etc/init.d/xvpn restart
 echo /usr/local/bin/xray >> /etc/sysupgrade.conf   # чтобы sysupgrade его сохранил
 ```
 
-`wget` из busybox может не уметь HTTPS — тогда `opkg install wget-ssl` или скачайте на компьютере и
-скопируйте `scp -O`. После подмены все серверы один раз проверяются заново (`xray run -test`).
-Вернуться на версию из фида: `uci set xvpn.main.xray_bin=/usr/bin/xray`, `uci commit xvpn`,
-`/etc/init.d/xvpn restart`. Расход памяти xray 26 на AX3000T не замерялся. Ссылки с VLESS
-`encryption` (ML-KEM) парсер пропускает и со свежим бинарём.
+После подмены все серверы один раз проверяются заново (`xray run -test`). Расход памяти xray 26
+на AX3000T не замерялся. Ссылки с VLESS `encryption` (ML-KEM) парсер пропускает и со свежим
+бинарём.
 
 ## Как это работает
 

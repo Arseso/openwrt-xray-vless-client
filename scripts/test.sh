@@ -7,13 +7,17 @@
 # the config must pass. cli.uc generate runs with the links of tests/fixtures/links.txt:
 # the servers named in XRAY_REJECT (space-separated, empty for the feed's xray) and only
 # they are rejected, with xray's reason kept in tested.json; a second generate runs no
-# xray and logs them as rejected earlier, with the reasons (#14).
+# xray and logs them as rejected earlier, with the reasons (#14). Last, cli.uc xray-install
+# and xray-rollback (#31) against a fake release (tests/mkrelease.py, needs python3).
 set -e
 cd "$(dirname "$0")/.."
 DOCKER="${DOCKER:-docker}"
 IMAGE="${IMAGE:-openwrt/rootfs:x86-64-24.10.4}"
-set --
-[ -z "${XRAY_BIN:-}" ] || set -- -v "$(realpath "$XRAY_BIN"):/opt/xray:ro"
+REL=$(mktemp -d)
+trap 'rm -rf "$REL"' EXIT
+python3 tests/mkrelease.py "$REL"
+set -- -v "$REL:/rel:ro"
+[ -z "${XRAY_BIN:-}" ] || set -- "$@" -v "$(realpath "$XRAY_BIN"):/opt/xray:ro"
 
 $DOCKER run --rm --cap-add NET_ADMIN -v "$PWD:/src:ro" -e XRAY_REJECT="${XRAY_REJECT:-}" "$@" "$IMAGE" sh -ec '
 	mkdir -p /var/lock /tmp/out
@@ -57,4 +61,5 @@ $DOCKER run --rm --cap-add NET_ADMIN -v "$PWD:/src:ro" -e XRAY_REJECT="${XRAY_RE
 	ucode /usr/share/xvpn/cli.uc generate
 	ucode /src/tests/xray-check.uc again $runs /tmp/xvpn.log
 	for f in /tmp/out/*.nft; do s=$(date +%s); nft -c -f "$f" && echo "nft ok: $f ($(($(date +%s) - s)) s)"; done
+	sh /src/tests/xray-install.sh
 '

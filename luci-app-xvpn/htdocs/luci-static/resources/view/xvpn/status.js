@@ -175,7 +175,7 @@ function tlsVision(s) {
 }
 
 function visionText() {
-	return _('With xray older than 25.9.5 some connections of the clients through tcp+tls+vision servers break when many run at once (TLS error "bad record mac"): choose a server with another transport or set a newer xray binary (main.xray_bin).');
+	return _('With xray older than 25.9.5 some connections of the clients through tcp+tls+vision servers break when many run at once (TLS error "bad record mac"): choose a server with another transport or install a newer xray (Settings → xray → xray-core).');
 }
 
 function info(rows) {

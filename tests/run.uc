@@ -12,6 +12,7 @@ import { render, resolve, fix_ifnames, ifnames_applied, table_names, rule_prefs,
 import { ipv6_up, busy_ports } from 'xvpn.host';
 import { cidr, parse_nets, domain_rule, direct_domains, direct_nets, lists_due_in } from 'xvpn.split';
 import { cursor } from 'uci';
+import { asset as xc_asset, parse_dgst as xc_dgst, tag_of as xc_tag_of, valid_tag as xc_valid_tag, compare as xc_compare, parse_version as xc_version } from 'xvpn.xraycore';
 
 const FIX = ARGV[0] ?? 'tests/fixtures';
 const OUT = ARGV[1] ?? '/tmp';
@@ -854,10 +855,30 @@ eq('update: a too large answer', [ ub.error, length(load_cache('stubtest').serve
 system('killall uhttpd');
 
 // #18: the rpcd ACL names exactly the methods of the plugin
-let acl = json(readfile(`${FIX}/../../luci-app-xvpn/root/usr/share/rpcd/acl.d/luci-app-xvpn.json`))['luci-app-xvpn'];
+let acls = json(readfile(`${FIX}/../../luci-app-xvpn/root/usr/share/rpcd/acl.d/luci-app-xvpn.json`));
+let acl = acls['luci-app-xvpn'];
 let plugin = map(filter(split(readfile(`${FIX}/../../luci-app-xvpn/root/usr/share/rpcd/ucode/luci.xvpn`), '\n'),
 	(l) => match(l, /^\t[a-z_]+: \{$/)), (l) => match(l, /[a-z_]+/)[0]);
-eq('ACL of luci.xvpn: the methods of the plugin', sort([ ...acl.read.ubus['luci.xvpn'], ...acl.write.ubus['luci.xvpn'] ]), sort(plugin));
+// the install of xray (#31) in a group of its own: root only, not the rpcd user of the app
+eq('ACL of luci.xvpn: the methods of the plugin', sort([ ...acl.read.ubus['luci.xvpn'], ...acl.write.ubus['luci.xvpn'],
+	...acls['luci-app-xvpn-xray'].write.ubus['luci.xvpn'] ]), sort(plugin));
+
+// #31: xray-core from GitHub
+eq('xray asset by arch', map([ 'x86_64', 'aarch64_cortex-a53', 'arm_cortex-a7_neon-vfpv4', 'arm_arm926ej-s', 'arm_arm1176jzf-s_vfp',
+	'mipsel_24kc', 'mips_24kc', 'mips64el_octeonplus', 'riscv64_riscv64', 'i386_pentium4', 'powerpc_464fp', null ], xc_asset),
+	[ 'Xray-linux-64.zip', 'Xray-linux-arm64-v8a.zip', 'Xray-linux-arm32-v7a.zip', 'Xray-linux-arm32-v5.zip', 'Xray-linux-arm32-v6.zip',
+		'Xray-linux-mips32le.zip', 'Xray-linux-mips32.zip', 'Xray-linux-mips64le.zip', 'Xray-linux-riscv64.zip', 'Xray-linux-32.zip', null, null ]);
+eq('xray dgst', xc_dgst('MD5= 00\nSHA1= 11\nSHA2-256= ' + 'ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB' + '\nSHA2-512= 22\n'), 'abababababababababababababababababababababababababababababababab');
+eq('xray dgst without sha256', xc_dgst('MD5= 00\n'), null);
+eq('xray latest tag', map([ 'https://github.com/XTLS/Xray-core/releases/tag/v26.10.31', 'https://github.com/XTLS/Xray-core/releases/tag/v26.10.31\n',
+	'https://github.com/XTLS/Xray-core/releases', 'https://github.com/XTLS/Xray-core/releases/tag/v1.0;rm', '' ], xc_tag_of),
+	[ 'v26.10.31', 'v26.10.31', null, null, null ]);
+eq('xray tags', map([ 'v26.10.31', 'v1.8.24', '26.10.31', 'v26.10', 'v26.10.31-rc1', "v1.2.3\n", null ], xc_valid_tag),
+	[ true, true, false, false, false, false, false ]);
+eq('xray version compare', [ xc_compare('v26.10.31', '25.1.30-r1') > 0, xc_compare('25.1.30', 'v25.1.30'), xc_compare('v1.8.24', '25.1.30') < 0,
+	xc_compare('26.9.1', '26.10.1') < 0 ], [ true, 0, true, true ]);
+eq('xray version', [ xc_version('Xray 26.10.31 (Xray, Penetrates Everything.) 7e2b3f1 (go1.25.3 linux/amd64)\nA unified platform'),
+	xc_version('sh: xray: not found') ], [ '26.10.31', null ]);
 
 print(`${passed} passed, ${failed} failed\n`);
 exit(failed ? 1 : 0);

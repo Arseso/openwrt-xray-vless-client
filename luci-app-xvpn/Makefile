@@ -25,6 +25,8 @@ define Package/luci-app-xvpn/postrm
 #!/bin/sh
 [ -n "$${IPKG_INSTROOT}" ] || {
 	uci -q delete firewall.xvpn && uci commit firewall
+	# xray-core of a GitHub release (cli.uc xray-install)
+	rm -rf /usr/lib/xvpn
 	# fixed names of the VPN SSIDs (sections marked xvpn_ifname); applied at the next radio
 	# restart, not now: the package may be removed over that very Wi-Fi. Skipped when
 	# wireless has someone's uncommitted changes, the commit would take them along.
