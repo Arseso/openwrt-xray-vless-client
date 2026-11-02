@@ -406,8 +406,8 @@ function read_xray_version() {
 		t?.cancel();
 		let v = match(readfile(out) ?? '', /^Xray ([0-9]+\.[0-9]+\.[0-9]+)/);
 		unlink(out);
-		// not started (out of memory): tried again at the next check
-		xray_ver = { sig: (code < 0) ? null : sig, v: v?.[1], reading: false };
+		// not started (out of memory) or killed: tried again at the next check
+		xray_ver = { sig: (code == 0) ? sig : null, v: v?.[1], reading: false };
 	});
 	if (p)
 		t = uloop.timer(5000, () => system([ '/bin/kill', '-9', `${p.pid()}` ]));
@@ -1374,9 +1374,10 @@ function failed(e, gen, kind, why) {
 
 check = function() {
 	reindex(false);
-	read_xray_version();
 	if (st.testing || st.reloading)
 		return;
+	// not during a test or a reload: their curl and xray -test take the memory then
+	read_xray_version();
 	alive();
 	let timed = time_ok();	// also without servers: it runs the updates put off
 	if (!length(index.servers)) {
