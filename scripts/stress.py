@@ -17,12 +17,15 @@ What it measures:
   ping    ICMP to the router and to a direct host, 10 s windows (the kill
           switch rejects ICMP into the tunnel, so no tunneled target).
   dns     the router's DNS (xray) for a cached and a fresh name, and raw UDP
-          through the tunnel (OpenDNS on port 443).
+          through the tunnel (OpenDNS on port 5353: XTLS Vision drops UDP/443
+          on purpose, so QUIC falls back to TCP).
   exit    exit IP and Cloudflare colo; a change or the WAN IP is an event.
   burst   N parallel HTTPS requests at once.
   speed   periodic download (1 and 4 streams) and upload; probes taken
           meanwhile carry "load": 1 (latency under load).
-  stream  one long rate-limited download: breaks, stalls, session length.
+  stream  one long rate-limited download over HTTP/1.1: breaks, stalls, session
+          length (curl 8.5 cuts a rate-limited HTTP/2 download at its 10 MiB
+          stream window with PROTOCOL_ERROR).
   wifi    this client's signal, bitrate, BSSID, interface counters, load.
   router  via ssh: CPU, softirq, memory, xray RSS/CPU/fds/threads, conntrack,
           tunnel counters, xvpn status (active server, state, restarts), the
@@ -263,7 +266,7 @@ def dns_probe(router_ip):
 	def dns():
 		dig('router_cached', router_ip, 53, 'www.google.com')
 		dig('router_fresh', router_ip, 53, rand_label() + '.github.io')
-		dig('udp_tunnel', '208.67.222.222', 443, rand_label() + '.github.io')
+		dig('udp_tunnel', '208.67.222.222', 5353, rand_label() + '.github.io')
 	return dns
 
 
@@ -301,7 +304,7 @@ def burst_probe(n, timeout):
 		if STOP.is_set():
 			return
 		tot = [ms(j, 'time_total') for rc, j, _ in res if rc == 0]
-		errs = Counter((err or '')[:60] for rc, j, err in res if rc)
+		errs = Counter('%s: %s' % (u.split('/')[2], (err or '')[:60]) for u, (rc, j, err) in zip(urls, res) if rc)
 		OUT.rec('burst', n=n, ok=len(tot), wall=round(wall, 2), p50=pct(tot, 50), p95=pct(tot, 95),
 			max=max(tot, default=None), errs=dict(errs.most_common(3)) or None)
 	return burst
@@ -341,7 +344,7 @@ def speed_rec(test, res, field='size_download'):
 
 def stream_loop(rate, url, report_every, stall_after, hang_after):
 	while not STOP.is_set():
-		p = popen(['curl', '-sS', '-N', '--limit-rate', rate, '-o', '-', url],
+		p = popen(['curl', '-sS', '-N', '--http1.1', '--limit-rate', rate, '-o', '-', url],
 			stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 		fd = p.stdout.fileno()
 		t0 = last = win_start = time.monotonic()
@@ -863,7 +866,7 @@ def report(d):
 			rows.append([tgt, len(rs), fmt(100 * len(ok) / len(rs), 2) + '%', fmt(pct(ok, 50)), fmt(pct(ok, 95)),
 				fmt(max(ok, default=None)), ', '.join('%s×%d' % kv for kv in st.most_common(3)) or '–'])
 		o.append(table(['запрос', 'n', 'успех', 'p50 мс', 'p95', 'max', 'сбои'], rows))
-		o.append('\nrouter_* — DNS xray на роутере, udp_tunnel — сырой UDP через туннель до OpenDNS:443.\n')
+		o.append('\nrouter_* — DNS xray на роутере, udp_tunnel — сырой UDP через туннель до OpenDNS:5353.\n')
 
 	if recs['burst']:
 		rs = recs['burst']
