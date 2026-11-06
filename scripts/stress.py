@@ -17,18 +17,23 @@ What it measures:
   ping    ICMP to the router and to a direct host, 10 s windows (the kill
           switch rejects ICMP into the tunnel, so no tunneled target).
   dns     the router's DNS (xray) for a cached and a fresh name, and raw UDP
-          through the tunnel (OpenDNS on port 443).
+          through the tunnel (OpenDNS on port 5353: XTLS Vision drops UDP/443
+          on purpose, so QUIC falls back to TCP).
   exit    exit IP and Cloudflare colo; a change or the WAN IP is an event.
   burst   N parallel HTTPS requests at once.
   speed   periodic download (1 and 4 streams) and upload; probes taken
           meanwhile carry "load": 1 (latency under load).
-  stream  one long rate-limited download: breaks, stalls, session length.
+  stream  one long rate-limited download over HTTP/1.1: breaks, stalls, session
+          length (curl 8.5 cuts a rate-limited HTTP/2 download at its 10 MiB
+          stream window with PROTOCOL_ERROR).
   wifi    this client's signal, bitrate, BSSID, interface counters, load.
   router  via ssh: CPU, softirq, memory, xray RSS/CPU/fds/threads, conntrack,
           tunnel counters, xvpn status (active server, state, restarts), the
           client's station stats on the router.
   event   changes worth a look: server switch, xray restart, reboot, exit IP
-          change, leak, BSSID change, suspend of this machine, stalls.
+          change, leak, BSSID change, suspend of this machine, stalls, and
+          sub_change: what an hourly subscription refresh added, dropped or moved
+          (names and addresses only), to explain xray restarts after it.
 
 Keep the machine awake for long runs, e.g.:
   systemd-inhibit --what=sleep:idle python3 scripts/stress.py run --duration 24h
@@ -263,7 +268,7 @@ def dns_probe(router_ip):
 	def dns():
 		dig('router_cached', router_ip, 53, 'www.google.com')
 		dig('router_fresh', router_ip, 53, rand_label() + '.github.io')
-		dig('udp_tunnel', '208.67.222.222', 443, rand_label() + '.github.io')
+		dig('udp_tunnel', '208.67.222.222', 5353, rand_label() + '.github.io')
 	return dns
 
 
@@ -301,7 +306,7 @@ def burst_probe(n, timeout):
 		if STOP.is_set():
 			return
 		tot = [ms(j, 'time_total') for rc, j, _ in res if rc == 0]
-		errs = Counter((err or '')[:60] for rc, j, err in res if rc)
+		errs = Counter('%s: %s' % (u.split('/')[2], (err or '')[:60]) for u, (rc, j, err) in zip(urls, res) if rc)
 		OUT.rec('burst', n=n, ok=len(tot), wall=round(wall, 2), p50=pct(tot, 50), p95=pct(tot, 95),
 			max=max(tot, default=None), errs=dict(errs.most_common(3)) or None)
 	return burst
@@ -341,7 +346,7 @@ def speed_rec(test, res, field='size_download'):
 
 def stream_loop(rate, url, report_every, stall_after, hang_after):
 	while not STOP.is_set():
-		p = popen(['curl', '-sS', '-N', '--limit-rate', rate, '-o', '-', url],
+		p = popen(['curl', '-sS', '-N', '--http1.1', '--limit-rate', rate, '-o', '-', url],
 			stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 		fd = p.stdout.fileno()
 		t0 = last = win_start = time.monotonic()
@@ -474,6 +479,7 @@ wd=$(echo "$w" | jsonfilter -e '@.l3_device')
 for i in $(iw dev | awk '/Interface/{print $2}'); do
 	s=$(iw dev $i station get %MAC% 2>/dev/null) && { echo "@sta_if $i"; echo "$s" | sed -n 's/^\t\([^:]*\):[ \t]*/@sta \1=/p'; }
 done
+echo "@submd5 $(md5sum /etc/xvpn/subs/*.json 2>/dev/null | cut -d' ' -f1 | tr '\n' ' ')"
 echo "@status"
 ubus -t 5 call xvpn status
 '''
@@ -488,6 +494,8 @@ class Router:
 		self.ok = None
 		self.exit = None
 		self.tested = {}
+		self.subs = None
+		self.sub_md5 = None
 
 	def sh(self, script, timeout=25):
 		return run(self.ssh + [script], timeout)
@@ -553,6 +561,8 @@ class Router:
 			r['sta_tx_retries'] = inum(sta.get('tx retries'))
 			r['sta_tx_failed'] = inum(sta.get('tx failed'))
 			r['sta_inactive'] = inum((sta.get('inactive time') or '').split()[:1])
+		if v.get('submd5') != self.sub_md5:
+			self.sub_changed(v.get('submd5'))
 		servers = {s.get('id'): s for s in st.get('servers') or []}
 		act = servers.get(st.get('active')) or {}
 		r.update({'state': st.get('state'), 'active': st.get('active'), 'active_name': act.get('name'),
@@ -589,6 +599,25 @@ class Router:
 			'restarts': r['xray_restarts'], 'last_error': r['last_error'],
 			**{c: r.get(c) for c in ('tun_up', 'tun_down', 'wan_rx', 'wan_tx')}}
 
+	def sub_changed(self, md5):
+		"""The subscription caches changed (xvpn refreshes them hourly): which servers came, went
+		or moved, to see what makes xvpn reload xray after an update. Names and addresses only."""
+		rc, so, _ = self.sh('for f in /etc/xvpn/subs/*.json; do echo "@$f"; '
+			'jsonfilter -i $f -e "@.skipped"; echo @n; jsonfilter -i $f -e "@.servers[*].name"; '
+			'echo @a; jsonfilter -i $f -e "@.servers[*].address"; done')
+		if rc != 0:
+			return
+		cur = parse_subs(so)
+		if self.subs is not None:
+			for f, (skipped, srv) in cur.items():
+				old_skipped, old = self.subs.get(f, (None, []))
+				names, onames = [n for n, _ in srv], [n for n, _ in old]
+				moved = [(n, dict(old)[n], a) for n, a in srv if n in dict(old) and dict(old)[n] != a]
+				OUT.event('sub_change', sub=os.path.basename(f), skipped=skipped, old_skipped=old_skipped,
+					gone=[n for n in onames if n not in names], new=[n for n in names if n not in onames],
+					moved=moved, count=len(srv))
+		self.subs, self.sub_md5 = cur, md5
+
 	def logread(self, path):
 		with open(path, 'a', buffering=1, encoding='utf-8') as f:
 			while not STOP.is_set():
@@ -612,6 +641,18 @@ class Router:
 				if not STOP.is_set():
 					f.write(time.strftime('%Y-%m-%dT%H:%M:%S ') + '--- logread stream ended, reconnecting\n')
 					STOP.wait(10)
+
+
+def parse_subs(out):
+	"""Output of the loop in Router.sub_changed -> {file: (skipped, [(name, address)])}."""
+	res = {}
+	for block in out.split('@/etc/')[1:]:
+		f, _, rest = block.partition('\n')
+		skipped, _, rest = rest.partition('@n\n')
+		names, _, addrs = rest.partition('@a\n')
+		names, addrs = names.splitlines(), addrs.splitlines()
+		res['/etc/' + f.strip()] = (inum(skipped.strip()), list(zip(names, addrs)))
+	return res
 
 
 def inum(x):
@@ -863,7 +904,7 @@ def report(d):
 			rows.append([tgt, len(rs), fmt(100 * len(ok) / len(rs), 2) + '%', fmt(pct(ok, 50)), fmt(pct(ok, 95)),
 				fmt(max(ok, default=None)), ', '.join('%s×%d' % kv for kv in st.most_common(3)) or '–'])
 		o.append(table(['запрос', 'n', 'успех', 'p50 мс', 'p95', 'max', 'сбои'], rows))
-		o.append('\nrouter_* — DNS xray на роутере, udp_tunnel — сырой UDP через туннель до OpenDNS:443.\n')
+		o.append('\nrouter_* — DNS xray на роутере, udp_tunnel — сырой UDP через туннель до OpenDNS:5353.\n')
 
 	if recs['burst']:
 		rs = recs['burst']

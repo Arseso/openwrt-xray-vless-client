@@ -5,7 +5,7 @@
 
 import { readfile, writefile, mkdir, stat } from 'fs';
 import { parse_link, parse_subscription, transport } from 'xvpn.links';
-import { parse_userinfo, assign_ids, list_change, known_ids, prune_no_auto, NO_AUTO_GRACE, check_stub, update, load_cache, load_status, MAX_SIZE } from 'xvpn.subscription';
+import { parse_userinfo, assign_ids, list_change, list_diff, known_ids, prune_no_auto, NO_AUTO_GRACE, check_stub, update, load_cache, load_status, MAX_SIZE } from 'xvpn.subscription';
 import { load_config, version_older, VISION_FIXED, valid_bin, valid_url, fastest, auto_pick, best_of, balanced_scores, better, mbps, retry_delay, no_auto_ids, set_no_auto, mkdir_p, read_json, SUBS_DIR } from 'xvpn.util';
 import { build_index, generate, ports_error, config_key, set_active } from 'xvpn.xrayconf';
 import { render, resolve, fix_ifnames, ifnames_applied, table_names, rule_prefs, stale_routes, counters, counter_step } from 'xvpn.firewall';
@@ -136,6 +136,16 @@ eq('new uuid: reload', list_change(v2, v3, [ v2[0].id ]), 'reload');
 eq('new server: reload', list_change(v2, [ ...v2, ...assign_ids([ p[5] ], 's2') ], [ v2[0].id ]), 'reload');
 eq('server gone: reload', list_change(v2, slice(v2, 0, 3), [ v2[0].id ]), 'reload');
 eq('new order: no reload', list_change(v2, [ v2[1], v2[0], v2[2], v2[3] ], [ v2[0].id ]), 'stale');
+eq('list_diff: nothing changed', list_diff(v1, v1, [ v1[0].id ]), []);
+eq('list_diff: rotated host and port of the active server: old and new values in the line',
+	list_diff(v1, v2, [ v1[0].id ]), [ 'ACTIVE changed: "⚡ Estonia" ee23.example.com:8443: address "ee24.example.com" -> "ee23.example.com", port 443 -> 8443' ]);
+eq('list_diff: a new uuid is another server (the id comes from it), the value stays out of the line',
+	list_diff(v2, v3, [ v2[0].id ]), [ 'gone: "Netherlands" nl.example.com:443', 'new: "Netherlands" nl.example.com:443' ]);
+let vu = { ...v2[0], outbound: { ...v2[0].outbound, settings: { vnext: [ { ...v2[0].outbound.settings.vnext[0], users: [ { ...v2[0].outbound.settings.vnext[0].users[0], id: 'secret-uuid' } ] } ] } } };
+eq('list_diff: a changed uuid is named by its path only', list_diff(v2, [ vu, ...slice(v2, 1) ], []),
+	[ 'changed: "⚡ Estonia" ee23.example.com:8443: outbound.settings.vnext[0].users[0].id' ]);
+eq('list_diff: server gone and new', list_diff(v2, [ ...slice(v2, 0, 3), ...assign_ids([ p[5] ], 's2') ], []),
+	[ `gone: "${v2[3].name}" ${v2[3].address}:${v2[3].port}`, `new: "${p[5].name}" ${p[5].address}:${p[5].port}` ]);
 
 // config generation
 let cfg = {
