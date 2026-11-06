@@ -267,7 +267,13 @@ function diff_paths(a, b, path, out) {
 	}
 	else if (sprintf('%J', a) != sprintf('%J', b)) {
 		let parts = split(path, '.'), leaf = replace(parts[length(parts) - 1], /\[[0-9]+\]$/, '');
-		push(out, (leaf in PLAIN_LEAVES) ? `${path} ${sprintf('%J', a)} -> ${sprintf('%J', b)}` : path);
+		// the hash follows the connection (links.uc): no news; logd cuts long lines, so a plain
+		// leaf is named once, by its last key, and not again when another path shows the same change
+		if (leaf == 'hash')
+			return;
+		let line = (leaf in PLAIN_LEAVES) ? `${leaf} ${sprintf('%J', a)} -> ${sprintf('%J', b)}` : path;
+		if (!(line in out))
+			push(out, line);
 	}
 }
 

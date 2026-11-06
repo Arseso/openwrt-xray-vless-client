@@ -138,8 +138,7 @@ eq('server gone: reload', list_change(v2, slice(v2, 0, 3), [ v2[0].id ]), 'reloa
 eq('new order: no reload', list_change(v2, [ v2[1], v2[0], v2[2], v2[3] ], [ v2[0].id ]), 'stale');
 eq('list_diff: nothing changed', list_diff(v1, v1, [ v1[0].id ]), []);
 eq('list_diff: rotated host and port of the active server: old and new values in the line',
-	list_diff(v1, v2, [ v1[0].id ]), [ 'ACTIVE changed: "⚡ Estonia" ee23.example.com:8443: address "ee24.example.com" -> "ee23.example.com", hash, '
-		+ 'outbound.settings.vnext[0].address "ee24.example.com" -> "ee23.example.com", outbound.settings.vnext[0].port 443 -> 8443, port 443 -> 8443' ]);
+	list_diff(v1, v2, [ v1[0].id ]), [ 'ACTIVE changed: "⚡ Estonia" ee23.example.com:8443: address "ee24.example.com" -> "ee23.example.com", port 443 -> 8443' ]);
 eq('list_diff: a new uuid is another server (the id comes from it), the value stays out of the line',
 	list_diff(v2, v3, [ v2[0].id ]), [ 'gone: "Netherlands" nl.example.com:443', 'new: "Netherlands" nl.example.com:443' ]);
 let vu = { ...v2[0], outbound: { ...v2[0].outbound, settings: { vnext: [ { ...v2[0].outbound.settings.vnext[0], users: [ { ...v2[0].outbound.settings.vnext[0].users[0], id: 'secret-uuid' } ] } ] } } };
