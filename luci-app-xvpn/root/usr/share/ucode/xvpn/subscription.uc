@@ -245,6 +245,61 @@ export function list_change(before, after, active_ids) {
 	return (sprintf('%J', before) != sprintf('%J', after)) ? 'stale' : null;
 };
 
+// Leaves whose value is no secret: the log shows what they changed from and to. Everything
+// else (ids, passwords, keys, short ids) is named by its path only.
+const PLAIN_LEAVES = [ 'name', 'address', 'port', 'serverName', 'sni', 'host', 'path', 'serviceName',
+	'flow', 'fingerprint', 'network', 'security', 'alpn' ];
+
+// Paths of the leaves that differ between two values, e.g. outbound.settings.vnext[0].address.
+function diff_paths(a, b, path, out) {
+	if (type(a) == 'object' && type(b) == 'object') {
+		let ks = {};
+		for (let k in a)
+			ks[k] = true;
+		for (let k in b)
+			ks[k] = true;
+		for (let k in sort(keys(ks)))
+			diff_paths(a[k], b[k], path ? `${path}.${k}` : k, out);
+	}
+	else if (type(a) == 'array' && type(b) == 'array' && length(a) == length(b)) {
+		for (let i = 0; i < length(a); i++)
+			diff_paths(a[i], b[i], `${path}[${i}]`, out);
+	}
+	else if (sprintf('%J', a) != sprintf('%J', b)) {
+		let parts = split(path, '.'), leaf = replace(parts[length(parts) - 1], /\[[0-9]+\]$/, '');
+		push(out, (leaf in PLAIN_LEAVES) ? `${path} ${sprintf('%J', a)} -> ${sprintf('%J', b)}` : path);
+	}
+}
+
+// Why an update of the server list asks for a reload, or only marks the list stale: one line
+// per server that came, went or changed (the same comparison as list_change()), no secrets.
+// An update that restarts xray every hour drops the clients' connections: this is what to
+// look at to see what the subscription changes.
+export function list_diff(before, after, active_ids) {
+	let a = {}, b = {}, out = [];
+	active_ids = filter(active_ids, (x) => x);
+	for (let s in before)
+		a[s.id] = s;
+	for (let s in after)
+		b[s.id] = s;
+	let what = (s) => `"${s.name}" ${s.address}:${s.port}`;
+	for (let id in sort(keys(a)))
+		if (!b[id])
+			push(out, `gone: ${what(a[id])}`);
+	for (let id in sort(keys(b)))
+		if (!a[id])
+			push(out, `new: ${what(b[id])}`);
+	for (let id in sort(keys(a))) {
+		if (!b[id] || sprintf('%J', a[id]) == sprintf('%J', b[id]))
+			continue;
+		let paths = [];
+		diff_paths(a[id], b[id], '', paths);
+		let used = (id in active_ids) || (a[id].hash in active_ids);
+		push(out, `${used ? 'ACTIVE ' : ''}changed: ${what(b[id])}: ${join(', ', paths)}`);
+	}
+	return out;
+};
+
 // All usable servers: enabled subscriptions (filtered) + manual links, deduplicated.
 export function all_servers(cfg) {
 	let out = [], seen = {};

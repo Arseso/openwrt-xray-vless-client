@@ -14,7 +14,7 @@ import {
 	FW_WANT_FILE, FW_MODE_FILE, FW_ERROR_FILE, FW_WARN_FILE, FW_LOCK_FILE, GENERATE_ERROR_FILE, STALE_FILE,
 	XRAY_FEED_BIN, XRAY_GH_BIN
 } from 'xvpn.util';
-import { all_servers, update, prune, list_change } from 'xvpn.subscription';
+import { all_servers, update, prune, list_change, list_diff } from 'xvpn.subscription';
 import { build_index, generate, ports_error, config_key } from 'xvpn.xrayconf';
 import { host_env } from 'xvpn.host';
 import { resolve, apply, remove, fix_ifnames, ifnames_applied } from 'xvpn.firewall';
@@ -467,7 +467,16 @@ case 'update': {
 	}
 	// only addresses of servers xray does not use now changed (hosts rotated, #49): no
 	// reload that would drop the clients' connections, the next one applies them
-	let need = list_change(before, all_servers(cfg), active_ids());
+	let after = all_servers(cfg), ids = active_ids();
+	let need = list_change(before, after, ids);
+	// what the update changed, so that a reload every hour can be explained
+	if (need) {
+		let d = list_diff(before, after, ids);
+		for (let i = 0; i < length(d) && i < 12; i++)
+			log(`subscriptions: ${need}: ${d[i]}`);
+		if (length(d) > 12)
+			log(`subscriptions: ${need}: and ${length(d) - 12} more`);
+	}
 	if (need == 'stale') {
 		mkdir_p(RUN_DIR);
 		write_file(STALE_FILE, `${time()} ${SELF}\n`);	// another content each time, see generate
